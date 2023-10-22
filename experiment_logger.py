@@ -25,7 +25,6 @@ from acme.utils.loggers import filters
 from acme.utils.loggers import terminal
 
 import collections
-import datetime
 import jax
 import numpy as np
 import time
@@ -38,36 +37,7 @@ try:
 except ImportError:
   WANDB_AVAILABLE=False
 
-def date_time(time: bool=False):
-  strkey = '%Y.%m.%d'
-  if time:
-    strkey += '-%H.%M'
-  return datetime.datetime.now().strftime(strkey)
 
-def gen_log_dir(
-    base_dir="results/",
-    date=True,
-    hourminute=False,
-    seed=None,
-    return_kwpath=False,
-    path_skip=[],
-    **kwargs):
-
-  job_name = date_time(time=hourminute)
-  kwpath = ','.join([f'{key[:4]}={value}' for key, value in kwargs.items() if not key in path_skip])
-
-  if date:
-    path = Path(base_dir).joinpath(job_name).joinpath(kwpath)
-  else:
-    path = Path(base_dir).joinpath(kwpath)
-
-  if seed is not None:
-    path = path.joinpath(f'seed={seed}')
-
-  if return_kwpath:
-    return str(path), kwpath
-  else:
-    return str(path)
 
 
 def flatten_dict(d, parent_key='', sep='_'):

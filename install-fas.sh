@@ -10,6 +10,8 @@ mamba create --name humansf python=3.9 pip wheel -y
 
 source activate humansf
 
+conda env update --name omodel --file conda_env.yaml
+
 #############################################
 # Minigrid
 # at the time, needed this version because the babyai bot was not available via pip
@@ -35,6 +37,7 @@ cd ..
 # JAX
 #############################################
 # inspired from: https://github.com/wcarvalho/oo-model/blob/fixing/install.sh
+# need to pin this value for ACME
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/
 pip install --upgrade "jax[cuda11_pip]==0.4.3" "jaxlib==0.4.3" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 

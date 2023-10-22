@@ -1,6 +1,6 @@
 # FAS install
 
-laod modules
+## load modules
 ```
 module load cuda/11.3.1-fasrc01
 module load cudnn/8.9.2.26_cuda11-fasrc01
@@ -20,3 +20,6 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/path/to/cudnn/lib
 # mine
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/
 ```
+
+## Install
+Run `bash install-fas.sh` changing `LD_LIBRARY_PATH` on `line 41` as needed.

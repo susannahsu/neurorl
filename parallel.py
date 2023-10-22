@@ -5,6 +5,7 @@ from absl import flags
 import multiprocessing as mp
 import os
 import time
+import datetime
 
 from pathlib import Path
 from ray import tune
@@ -12,7 +13,6 @@ import subprocess
 
 from acme.utils import paths
 
-from experiments import logger as wandb_logger 
 import utils
 
 flags.DEFINE_integer('num_actors', 1, 'number of actors.')
@@ -26,6 +26,37 @@ DEFAULT_LABEL = ''
 
 def directory_not_empty(directory_path):
     return len(os.listdir(directory_path)) > 0
+
+def date_time(time: bool=False):
+  strkey = '%Y.%m.%d'
+  if time:
+    strkey += '-%H.%M'
+  return datetime.datetime.now().strftime(strkey)
+
+def gen_log_dir(
+    base_dir="results/",
+    date=True,
+    hourminute=False,
+    seed=None,
+    return_kwpath=False,
+    path_skip=[],
+    **kwargs):
+
+  job_name = date_time(time=hourminute)
+  kwpath = ','.join([f'{key[:4]}={value}' for key, value in kwargs.items() if not key in path_skip])
+
+  if date:
+    path = Path(base_dir).joinpath(job_name).joinpath(kwpath)
+  else:
+    path = Path(base_dir).joinpath(kwpath)
+
+  if seed is not None:
+    path = path.joinpath(f'seed={seed}')
+
+  if return_kwpath:
+    return str(path), kwpath
+  else:
+    return str(path)
 
 def make_program_command(
     agent: str,
@@ -115,7 +146,7 @@ def create_and_run_program(
   group = config.pop('group', wandb_group)
 
   # dir will be root_path/folder/group
-  log_dir, exp_name = wandb_logger.gen_log_dir(
+  log_dir, exp_name = gen_log_dir(
     base_dir=os.path.join(root_path, folder, group),
     hourminute=False,
     return_kwpath=True,
@@ -178,7 +209,6 @@ def run(
     wandb_init_kwargs: dict,
     default_env_kwargs: dict,
     space: Union[Dict, List[Dict]],
-    name: str ='train_many',
     use_wandb: bool = False,
     debug: bool = False,
     **kwargs):
@@ -218,7 +248,7 @@ def run(
   pprint(space)
 
   experiment_specs = [tune.Experiment(
-      name=name,
+      name='experiment',
       run=train_function,
       config=s,
       resources_per_trial={"cpu": FLAGS.num_cpus, "gpu": FLAGS.num_gpus}, 

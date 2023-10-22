@@ -1,0 +1,18 @@
+name: humansf
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - pip
+  - pip:
+    - pip
+    - ipdb
+    - matplotlib
+    - wandb
+
+
+
+
+# mamba create --name humansf python=3.9 pip wheel -y
+# mamba env update --file humansf.yaml --prune
+# mamba remove --name omodel --all -y

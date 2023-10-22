@@ -33,7 +33,9 @@ flags.DEFINE_bool(
 FLAGS = flags.FLAGS
 
 
-def make_environment(seed: int, evaluation: bool = False) -> dm_env.Environment:
+def make_environment(seed: int,
+                     object_options: bool = True,
+                     evaluation: bool = False) -> dm_env.Environment:
   """Loads environments.
   
   Args:
@@ -42,10 +44,13 @@ def make_environment(seed: int, evaluation: bool = False) -> dm_env.Environment:
   Returns:
       dm_env.Environment: Multitask environment is returned.
   """
+  del seed
 
   gym_wrappers = [
     minigrid.wrappers.DictObservationSpaceWrapper,
-    env_wrappers.GotoOptionsWrapper,
+    functools.partial(env_wrappers.GotoOptionsWrapper,
+                      use_options=object_options,
+                      ),
     env_wrappers.PickupCategoryCumulantsWrapper,
     functools.partial(minigrid.wrappers.RGBImgObsWrapper,
                       tile_size=8),
@@ -83,10 +88,18 @@ def setup_agents(
   # -----------------------
   # load agent config, builder, network factory
   # -----------------------
-  if agent == 'uvfa_flat':
+  if agent in 'uvfa_flat':
     config_class = config_class or r2d2.R2D2Config
     config = config_class(**config_kwargs)
     builder = r2d2.R2D2Builder(config)
+    network_factory = functools.partial(
+            r2d2.make_minigrid_networks, config=config)
+  elif agent in 'uvfa_object':
+    config_class = config_class or r2d2.R2D2Config
+    config = config_class(**config_kwargs)
+    builder = r2d2.R2D2Builder(config)
+    print("need/should make custom vision torso that takes in objects and encodes them to represent state. One question: is how will this be integrated for history? Env is partially observable? Easy solution is to sum and give as inputt to RNN.")
+    import ipdb; ipdb.set_trace()
     network_factory = functools.partial(
             r2d2.make_minigrid_networks, config=config)
 
@@ -118,6 +131,12 @@ def setup_experiment_inputs(
     env_kwargs = utils.load_config(env_config_file)
   logging.info(f'env_kwargs: {str(env_kwargs)}')
 
+  if agent in ('uvfa_object'):
+    env_kwargs['object_options'] = True
+
+  environment_factory = functools.partial(
+    make_environment,
+    **env_kwargs)
   # -----------------------
   # load agent config, builder, network factory
   # -----------------------
@@ -147,7 +166,7 @@ def setup_experiment_inputs(
     final_env_kwargs=env_kwargs,
     builder=builder,
     network_factory=network_factory,
-    environment_factory=make_environment,
+    environment_factory=environment_factory,
     observers=observers,
   )
 
@@ -257,10 +276,10 @@ def main(_):
   # env setup
   # -----------------------
   default_env_kwargs = dict(
-      tasks_file=FLAGS.tasks_file,
-      room_size=FLAGS.room_size,
-      num_dists=1,
-      partial_obs=False,
+      # tasks_file=FLAGS.tasks_file,
+      # room_size=FLAGS.room_size,
+      # num_dists=1,
+      # partial_obs=False,
   )
   agent_config_kwargs = dict()
   if FLAGS.debug:
@@ -283,7 +302,6 @@ def main(_):
       agent_config_kwargs=agent_config_kwargs)
   else:
     parallel.run(
-      name='babyai_online_trainer',
       wandb_init_kwargs=wandb_init_kwargs,
       default_env_kwargs=default_env_kwargs,
       use_wandb=FLAGS.use_wandb,

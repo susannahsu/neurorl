@@ -168,9 +168,9 @@ class GotoOptionsWrapper(Wrapper):
 
     def __init__(self,
                  env,
-                 max_options=30,
+                 max_options: int = 30,
                  use_options: bool = False,
-                 partial: bool = True):
+                 partial_obs: bool = True):
         """
         Args:
             env: The environment to apply the wrapper
@@ -189,7 +189,7 @@ class GotoOptionsWrapper(Wrapper):
         self.primitive_actions_arr = np.array(self.primitive_actions)
         self.max_options = max_options
 
-        if not partial:
+        if not partial_obs:
             raise NotImplementedError
         else:
             self.num_cols = self.agent_view_size
@@ -398,9 +398,6 @@ def main():
   env = GotoOptionsWrapper(env)
   env = PickupCategoryCumulantsWrapper(env)
   env = minigrid.wrappers.RGBImgObsWrapper(env, tile_size=12)
-
-  pprint(env.observation_space)
-  import ipdb; ipdb.set_trace()
 
 
   obs, info = env.reset()
