@@ -1,8 +1,6 @@
-import functools
+import copy
 from typing import NamedTuple, Tuple
-from enum import Enum
 
-# from minigrid.wrappers import RGBImgPartialObsWrapper, ImgObsWrapper
 from gymnasium.core import Wrapper
 from gymnasium import spaces
 import numpy as np
@@ -10,7 +8,8 @@ import numpy as np
 from minigrid.utils import baby_ai_bot as bot_lib
 from minigrid.core.constants import COLOR_TO_IDX, OBJECT_TO_IDX, STATE_TO_IDX, IDX_TO_COLOR, IDX_TO_OBJECT
 
-from minigrid.envs.babyai.core.verifier import ObjDesc
+
+from minigrid.envs.babyai.core.verifier import PickupInstr
 
 class GlobalObjDesc(NamedTuple):
     color: int
@@ -344,8 +343,11 @@ class PickupCategoryCumulantsWrapper(Wrapper):
         )
         self.observation_space = spaces.Dict(
             {**self.observation_space.spaces,
-             "cumulants": cumulants_space}
+             "cumulants": cumulants_space,
+             "task": copy.deepcopy(cumulants_space)  # equivalent specs
+            }
         )
+        assert isinstance(env.instruction, PickupInstr)
 
     def get_objects(self):
       objects = np.array(

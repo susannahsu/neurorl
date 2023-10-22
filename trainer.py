@@ -14,14 +14,12 @@ from acme.utils import paths
 import dm_env
 import minigrid
 
-import utils
-from utils import LevelAvgReturnObserver
-from envs import acme as acme_env_utils
-from envs import envs
-from envs import wrappers as minigrid_wrappers
+import envs
+import env_wrappers
 import experiment_builder
 import experiment_logger
 import parallel
+import utils
 
 import r2d2
 
@@ -47,8 +45,8 @@ def make_environment(seed: int, evaluation: bool = False) -> dm_env.Environment:
 
   gym_wrappers = [
     minigrid.wrappers.DictObservationSpaceWrapper,
-    minigrid_wrappers.GotoOptionsWrapper,
-    minigrid_wrappers.PickupCategoryCumulantsWrapper,
+    env_wrappers.GotoOptionsWrapper,
+    env_wrappers.PickupCategoryCumulantsWrapper,
     functools.partial(minigrid.wrappers.RGBImgObsWrapper,
                       tile_size=8),
   ]
@@ -139,8 +137,8 @@ def setup_experiment_inputs(
   # setup observer factory for environment
   # -----------------------
   observers = [
-      LevelAvgReturnObserver(
-              get_task_name=lambda env: str(env.env.current_levelname),
+      utils.LevelAvgReturnObserver(
+              # get_task_name=lambda env: str(env.env.current_levelname),
               reset=50 if not debug else 5),
       ]
 
@@ -149,7 +147,7 @@ def setup_experiment_inputs(
     final_env_kwargs=env_kwargs,
     builder=builder,
     network_factory=network_factory,
-    environment_factory=acme_env_utils.make_environment,
+    environment_factory=make_environment,
     observers=observers,
   )
 

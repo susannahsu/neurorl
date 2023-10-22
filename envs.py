@@ -151,6 +151,12 @@ class KeyRoom(LevelGen):
         self.instrs = DummyInstr()
         self.instruction = PickupInstr(obj_desc)
 
+    def get_objects(self):
+      objects = np.array(
+            [OBJECT_TO_IDX[o.type] if o is not None else -1 for o in self.grid.grid]
+        )
+      return sorted(list(set(objects)))
+
     def all_types(self):
         return set(self._goal_objects+self._non_goal_objects)
 
