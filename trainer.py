@@ -228,10 +228,16 @@ def train_single(
         "replay": PythonProcess(env={"CUDA_VISIBLE_DEVICES": ""}),
         "coordinator": PythonProcess(env={"CUDA_VISIBLE_DEVICES": ""}),
     }
-    lp.launch(program,
+    controller = lp.launch(program,
               lp.LaunchType.LOCAL_MULTI_PROCESSING,
               terminal='current_terminal',
               local_resources=local_resources)
+    controller.wait(return_on_first_completed=True)
+    logging.warning("Controller finished")
+    import time
+    time.sleep(60)
+    controller._kill()
+
   else:
     experiments.run_experiment(experiment=experiment)
 
