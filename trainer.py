@@ -21,7 +21,7 @@ import experiment_logger
 import parallel
 import utils
 
-import r2d2
+import td_agents import r2d2
 
 flags.DEFINE_string('search', 'default', 'which search to use.')
 flags.DEFINE_bool(
@@ -234,8 +234,6 @@ def train_single(
               local_resources=local_resources)
     controller.wait(return_on_first_completed=True)
     logging.warning("Controller finished")
-    import time
-    time.sleep(60)
     controller._kill()
 
   else:
