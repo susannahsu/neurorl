@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+from gymnasium import spaces
+from typing import Optional, Union, List
 import itertools
 import numpy as np
 
@@ -8,7 +11,7 @@ from minigrid.envs.babyai.core.levelgen import LevelGen
 
 import numpy as np
 
-from minigrid.core.constants import COLOR_NAMES
+from minigrid.core.constants import COLOR_NAMES, OBJECT_TO_IDX
 from minigrid.core.grid import Grid
 from minigrid.core.world_object import Ball, Box, Door, Key, WorldObj
 from minigrid.minigrid_env import MiniGridEnv
@@ -32,6 +35,9 @@ def rotate(array, n=1):
 
   # Rotate the array to the right by one position
   return[array[length - n]] + array[:length - n]
+
+def make_name(color, type):
+    return f"{color} {type}"
 
 class KeyRoom(LevelGen):
     """
@@ -66,6 +72,12 @@ class KeyRoom(LevelGen):
         self._goal_objects = []
         self._non_goal_objects = []
 
+        # object_types = OBJECT_TO_IDX.keys()
+        object_types = ['key', 'ball', 'box']
+        color_types = itertools.product(COLOR_NAMES, object_types)
+        self.token_2_idx = {make_name(color, type): idx for idx, (color, type) in enumerate(color_types)}
+        self.idx_2_token = {idx: name for name, idx in self.token_2_idx.items()}
+
         super().__init__(
             room_size=room_size,
             num_rows=num_rows,
@@ -76,6 +88,34 @@ class KeyRoom(LevelGen):
             implicit_unlock=implicit_unlock,
             **kwargs,
         )
+        cumulants_space = spaces.Box(
+            low=0,
+            high=max(self.token_2_idx.values()),
+            shape=(self.nfeatures,),  # number of cells
+            dtype="float32",
+        )
+        self.observation_space = spaces.Dict(
+            {**self.observation_space.spaces,
+             "state_features": cumulants_space,
+             "task_vector": copy.deepcopy(cumulants_space)  # equivalent specs
+            }
+        )
+
+    @property
+    def nfeatures(self):
+        return len(self.token_2_idx)
+
+    def make_features(self, idx: Optional[Union[List, int]]=None):
+        state_features = np.zeros(self.nfeatures)
+        if idx is not None:
+            if isinstance(idx, list):
+              for i in idx:
+                state_features[i] = 1
+            elif isinstance(idx, int):
+              state_features[idx] = 1
+            else:
+                raise NotImplementedError(f"idx type {type(idx)} not supported")
+        return state_features
 
     def gen_mission(self):
         """_summary_
@@ -86,6 +126,7 @@ class KeyRoom(LevelGen):
         """
         self._goal_objects = []
         self._non_goal_objects = []
+        self.task_vector = np.zeros(self.nfeatures)
 
         ###########################
         # Place agent in center room
@@ -136,7 +177,6 @@ class KeyRoom(LevelGen):
         for i in range(len(key_colors)):
             box = Box(box_colors[i])
             self.place_in_room(*goal_room_coords[i], box)
-            # self._non_goal_objects.append(box)
 
         # Generate random instructions
         if self._training:
@@ -147,14 +187,35 @@ class KeyRoom(LevelGen):
             idx = np.random.randint(len(self._non_goal_objects))
             obj = self._goal_objects[idx]
             obj_desc = ObjDesc(obj.type, obj.color)
+
+        obj_idx = self.token_2_idx[make_name(obj.color, obj.type)]
+        self.task_vector[obj_idx] = 1
+
         self.instrs = DummyInstr()
         self.instruction = PickupInstr(obj_desc)
+        self.instruction.reset_verifier(self)
 
-    def get_objects(self):
-      objects = np.array(
-            [OBJECT_TO_IDX[o.type] if o is not None else -1 for o in self.grid.grid]
-        )
-      return sorted(list(set(objects)))
+    def update_obs(self, obs):
+      state_features = self.make_features()
+      if self.carrying:
+          obj_idx = self.token_2_idx[
+              make_name(self.carrying.color, self.carrying.type)]
+          state_features[obj_idx] = 1
+
+      obs['task_vector'] = self.task_vector
+      obs['state_features'] = state_features
+
+    def reset(self, *args, **kwargs):
+        obs, info = super().reset(*args, **kwargs)
+        self.update_obs(obs)
+        return obs, info
+
+    def step(self, action, **kwargs):
+        obs, reward, terminated, truncated, info = super().step(action, **kwargs)
+
+        self.update_obs(obs)
+        reward = float(self.instruction.verify(action) == "success")
+        return obs, reward, terminated, truncated, info
 
     def all_types(self):
         return set(self._goal_objects+self._non_goal_objects)

@@ -328,67 +328,6 @@ class GotoOptionsWrapper(Wrapper):
         return obs, reward, terminated, truncated, info
 
 
-class PickupCategoryCumulantsWrapper(Wrapper):
-    """
-    Wrapper that 
-    """
-
-    def __init__(self, env):
-        super().__init__(env)
-        self.reset()
-        cumulants_space = spaces.Box(
-            low=0,
-            high=max(OBJECT_TO_IDX.values()),
-            shape=(len(self.all_types()),),  # number of cells
-            dtype="uint8",
-        )
-        self.observation_space = spaces.Dict(
-            {**self.observation_space.spaces,
-             "cumulants": cumulants_space,
-             "task": copy.deepcopy(cumulants_space)  # equivalent specs
-            }
-        )
-        assert isinstance(env.instruction, PickupInstr)
-
-    def get_objects(self):
-      objects = np.array(
-            [OBJECT_TO_IDX[o.type] if o is not None else -1 for o in self.grid.grid]
-        )
-      return sorted(list(set(objects)))
-
-    def post_env_iter_update(self, obs, info):
-      """Update after every env.reset() or env.step().
-
-      This will update the observation and env with relevant object information."""
-      #############
-      # Get visible objects
-      #############
-      objects = self.get_objects()
-      if self.carrying:
-        picked_up = [o.type == self.carrying for o in objects]
-        import ipdb; ipdb.set_trace()
-      else:
-        picked_up = [0]*len(objects)
-
-      #############
-      # Update observation
-      #############
-      obs['cumulants'] = picked_up
-
-    def reset(self, *args, **kwargs):
-      self.prior_primitive_action = None
-
-      obs, info = self.env.reset(*args, **kwargs)
-      self.post_env_iter_update(obs, info)
-      return obs, info
-
-    def step(self, action, *args, **kwargs):
-        """Steps through the environment with `action`."""
-        obs, reward, terminated, truncated, info = self.env.step(action, *args, **kwargs)
-        self.post_env_iter_update(obs, info)
-        return obs, reward, terminated, truncated, info
-
-
 def main():
   from envs import KeyRoom
   import minigrid
@@ -397,7 +336,6 @@ def main():
   env = KeyRoom(num_dists=0, fixed_door_locs=False)
   env = minigrid.wrappers.DictObservationSpaceWrapper(env)
   env = GotoOptionsWrapper(env)
-  env = PickupCategoryCumulantsWrapper(env)
   env = minigrid.wrappers.RGBImgObsWrapper(env, tile_size=12)
 
 
