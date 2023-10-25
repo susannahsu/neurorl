@@ -33,7 +33,6 @@ def rotate(array, n=1):
   # Rotate the array to the right by one position
   return[array[length - n]] + array[:length - n]
 
-
 class KeyRoom(LevelGen):
     """
 

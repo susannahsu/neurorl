@@ -169,7 +169,7 @@ class GotoOptionsWrapper(Wrapper):
     def __init__(self,
                  env,
                  max_options: int = 30,
-                 use_options: bool = False,
+                 use_options: bool = True,
                  partial_obs: bool = True):
         """
         Args:
@@ -320,7 +320,8 @@ class GotoOptionsWrapper(Wrapper):
             assert len(self.prior_visible_objects), "impossible"
             obs, reward, terminated, truncated, info = self.execute_option(action)
           else:
-            obs, reward, terminated, truncated, info = self.env.step(action, *args, **kwargs)
+            # ignore the action
+            obs, reward, terminated, truncated, info = self.env.step(self.actions.done, *args, **kwargs)
             self.prior_primitive_action = action
 
         self.post_env_iter_update(obs, info)
