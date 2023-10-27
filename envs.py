@@ -90,16 +90,36 @@ class KeyRoom(LevelGen):
         )
         cumulants_space = spaces.Box(
             low=0,
-            high=max(self.token_2_idx.values()),
+            high=100.0,
             shape=(self.nfeatures,),  # number of cells
+            dtype="float32",
+        )
+
+        self._train_tasks = list(itertools.product(self.train_colors, self.train_objects))
+        self._ntrain_tasks = len(self._train_tasks)
+        self._train_task_vectors = np.identity(self._ntrain_tasks)
+
+        train_task_vectors = spaces.Box(
+            low=0,
+            high=100.0,
+            shape=(self._ntrain_tasks, self.nfeatures,),  # number of cells
             dtype="float32",
         )
         self.observation_space = spaces.Dict(
             {**self.observation_space.spaces,
              "state_features": cumulants_space,
-             "task_vector": copy.deepcopy(cumulants_space)  # equivalent specs
+             "task_vector": copy.deepcopy(cumulants_space),  # equivalent specs
+             "train_task_vectors": train_task_vectors,
             }
         )
+
+    @property
+    def train_colors(self):
+      return COLOR_NAMES[:4]
+
+    @property
+    def train_objects(self):
+      return ['ball']
 
     @property
     def nfeatures(self):
@@ -139,7 +159,7 @@ class KeyRoom(LevelGen):
         # Place keys, door, and ball of same color
         ###########################
         # place keys in main room
-        key_colors = COLOR_NAMES[:4]
+        key_colors = self.train_colors
         key_idxs = list(range(len(key_colors)))
         goal_room_idxs = [0, 1, 2, 3]
         # starts to the right for some reason
@@ -173,6 +193,7 @@ class KeyRoom(LevelGen):
         ###########################
         # place non-task object
         ###########################
+        # to have consistent __other__ colors for objects in room, simply rotate this matrix by 1
         box_colors = rotate(key_colors)
         for i in range(len(key_colors)):
             box = Box(box_colors[i])
@@ -203,6 +224,7 @@ class KeyRoom(LevelGen):
           state_features[obj_idx] = 1
 
       obs['task_vector'] = self.task_vector
+      obs['train_task_vectors'] = self._train_task_vectors
       obs['state_features'] = state_features
 
     def reset(self, *args, **kwargs):

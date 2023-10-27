@@ -25,7 +25,7 @@ class TorsoOutput:
   task: Optional[jnp.ndarray] = None
 
 
-def struct_output(image, task, action, reward):
+def struct_output(image: Image, task: Task, action: Action, reward: Reward):
   return TorsoOutput(
     image=image,
     action=action,
@@ -33,7 +33,7 @@ def struct_output(image, task, action, reward):
     **(dict(task=task) if task is not None else {})
   )
 
-def concat(image, task, action, reward):
+def concat(image: Image, task: Task, action: Action, reward: Reward):
   pieces = (image, action, reward)
   if task is not None:
     pieces += (task, )
@@ -63,7 +63,7 @@ class AtariVisionTorso(hk.Module):
     else:
       self.out_net = lambda x: x
 
-  def __call__(self, inputs: Images) -> jnp.ndarray:
+  def __call__(self, inputs: Image) -> jnp.ndarray:
     inputs_rank = jnp.ndim(inputs)
     batched_inputs = inputs_rank == 4
     if inputs_rank < 3 or inputs_rank > 4:
@@ -137,18 +137,21 @@ class OarTorso(hk.Module):
 
   def __init__(self,
                num_actions: int,
-               task_encoder: hk.Module,
                vision_torso: hk.Module,
+               task_encoder: Optional[hk.Module] = None,
                flatten_image: bool = True,
                output_fn: Callable[[Image, Task, Action, Reward], Array] = concat,
                w_init: Optional[hk.initializers.Initializer] = None,
                name='torso'):
     super().__init__(name=name)
+    if task_encoder is None:
+      task_encoder = lambda x: x
+
     self._num_actions = num_actions
-    self._task_encoder = task_encoder
     self._vision_torso = vision_torso
     self._output_fn = output_fn
     self._flatten_image = flatten_image
+    self._task_encoder = task_encoder
     self._w_init = w_init
 
   def __call__(self, inputs: observation_action_reward.OAR):
@@ -161,6 +164,7 @@ class OarTorso(hk.Module):
   def unbatched(self, inputs: observation_action_reward.OAR):
     """_no_ batch [B] dimension."""
     # compute task encoding
+
     task = self._task_encoder(inputs.observation.mission)
 
     # get action one-hot

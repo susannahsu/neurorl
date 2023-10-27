@@ -3,17 +3,19 @@ import functools
 
 from absl import flags
 from absl import app
-from ray import tune
 from absl import logging
+import os
+from ray import tune
 from launchpad.nodes.python.local_multi_processing import PythonProcess
 import launchpad as lp
 
+from acme.wrappers import GymWrapper
 from acme import wrappers as acme_wrappers
 from acme.jax import experiments
-from acme.utils import paths
 import dm_env
 import minigrid
 
+from dm_env_wrappers import GymWrapper
 import envs
 import env_wrappers
 import experiment_builder
@@ -21,17 +23,15 @@ import experiment_logger
 import parallel
 import utils
 
-import td_agents import r2d2
 
 flags.DEFINE_string('search', 'default', 'which search to use.')
 flags.DEFINE_bool(
-    'train_single', False, 'Run many or 1 experiments')
+    'parallel', False, 'Run many or 1 experiments')
 flags.DEFINE_bool(
     'make_path', False, 'Create a path under `FLAGS>folder` for the experiment')
 flags.DEFINE_bool(
     'auto_name_wandb', False, 'automatically name wandb.')
 FLAGS = flags.FLAGS
-
 
 def make_environment(seed: int,
                      object_options: bool = True,
@@ -51,19 +51,25 @@ def make_environment(seed: int,
     functools.partial(env_wrappers.GotoOptionsWrapper,
                       use_options=object_options,
                       ),
-    env_wrappers.PickupCategoryCumulantsWrapper,
     functools.partial(minigrid.wrappers.RGBImgObsWrapper,
                       tile_size=8),
   ]
 
   fixed_door_locs = False if evaluation else True
+
+  # create gym environment
   env = envs.KeyRoom(
     num_dists=0,
     fixed_door_locs=fixed_door_locs)
   
+  # add wrappers
   for w in gym_wrappers:
     env = w(env)
 
+  # convert to dm_environment
+  env = GymWrapper(env)
+
+  # add acme wrappers
   wrapper_list = [
     acme_wrappers.ObservationActionRewardWrapper,
     acme_wrappers.SinglePrecisionWrapper,
@@ -71,45 +77,7 @@ def make_environment(seed: int,
 
   return acme_wrappers.wrap_all(env, wrapper_list)
 
-
-def setup_agents(
-    agent: str,
-    config_kwargs: dict = None,
-    env_kwargs: dict = None,
-    debug: bool = False,
-    update_logger_kwargs: dict = None,
-    setup_kwargs: dict = None,
-    config_class: r2d2.R2D2Config = None,
-):
-  config_kwargs = config_kwargs or dict()
-  update_logger_kwargs = update_logger_kwargs or dict()
-  setup_kwargs = setup_kwargs or dict()
-
-  # -----------------------
-  # load agent config, builder, network factory
-  # -----------------------
-  if agent in 'uvfa_flat':
-    config_class = config_class or r2d2.R2D2Config
-    config = config_class(**config_kwargs)
-    builder = r2d2.R2D2Builder(config)
-    network_factory = functools.partial(
-            r2d2.make_minigrid_networks, config=config)
-  elif agent in 'uvfa_object':
-    config_class = config_class or r2d2.R2D2Config
-    config = config_class(**config_kwargs)
-    builder = r2d2.R2D2Builder(config)
-    print("need/should make custom vision torso that takes in objects and encodes them to represent state. One question: is how will this be integrated for history? Env is partially observable? Easy solution is to sum and give as inputt to RNN.")
-    import ipdb; ipdb.set_trace()
-    network_factory = functools.partial(
-            r2d2.make_minigrid_networks, config=config)
-
-  else:
-    raise NotImplementedError
-
-  return config, builder, network_factory
-
 def setup_experiment_inputs(
-    agent : str,
     agent_config_kwargs: dict=None,
     agent_config_file: str=None,
     env_kwargs: dict=None,
@@ -131,26 +99,35 @@ def setup_experiment_inputs(
     env_kwargs = utils.load_config(env_config_file)
   logging.info(f'env_kwargs: {str(env_kwargs)}')
 
-  if agent in ('uvfa_object'):
-    env_kwargs['object_options'] = True
-
   environment_factory = functools.partial(
     make_environment,
     **env_kwargs)
+
   # -----------------------
   # load agent config, builder, network factory
   # -----------------------
-  # Configure the agent & update with config kwargs
-  config, builder, network_factory = setup_agents(
-      agent=agent,
-      debug=debug,
-      config_kwargs=config_kwargs,
-      env_kwargs=env_kwargs,
-      update_logger_kwargs=dict(
-          action_names=['left', 'right', 'forward', 'pickup_1',
-                        'pickup_2', 'place', 'toggle', 'slice'],
-      )
-  )
+  agent = agent_config_kwargs.get('agent', 'usfa_flat')
+  if agent == 'usfa_flat':
+    from td_agents import basics
+    from td_agents import sf_agents
+    config = sf_agents.Config(**config_kwargs)
+    builder = basics.Builder(
+      config=config,
+      get_actor_core_fn=sf_agents.get_actor_core,
+      LossFn=sf_agents.UsfaLossFn(
+        discount=config.discount,
+        importance_sampling_exponent=config.importance_sampling_exponent,
+        burn_in_length=config.burn_in_length,
+        max_replay_size=config.max_replay_size,
+        max_priority_weight=config.max_priority_weight,
+        bootstrap_n=config.bootstrap_n,
+      ))
+    network_factory = functools.partial(
+            sf_agents.make_minigrid_networks, config=config)
+
+  else:
+    raise NotImplementedError(agent)
+
 
   # -----------------------
   # setup observer factory for environment
@@ -162,6 +139,7 @@ def setup_experiment_inputs(
       ]
 
   return experiment_builder.OnlineExperimentConfigInputs(
+    agent=agent,
     agent_config=config,
     final_env_kwargs=env_kwargs,
     builder=builder,
@@ -180,15 +158,13 @@ def train_single(
   debug = FLAGS.debug
 
   experiment_config_inputs = setup_experiment_inputs(
-    agent=FLAGS.agent,
-    path=FLAGS.path,
     agent_config_kwargs=agent_config_kwargs,
     agent_config_file=FLAGS.agent_config,
     env_kwargs=default_env_kwargs,
     env_config_file=FLAGS.env_config,
     debug=debug)
 
-  log_dir = FLAGS.folder
+  log_dir = FLAGS.folder or os.environ.get('RL_RESULTS_DIR', '/tmp/rl_results_dir')
   if FLAGS.make_path:
     log_dir = experiment_logger.gen_log_dir(
         base_dir=log_dir,
@@ -200,16 +176,14 @@ def train_single(
       logging.info(f'wandb name: {str(date_time)}')
       wandb_init_kwargs['name'] = date_time
 
-  tasks_file = experiment_config_inputs.final_env_kwargs['tasks_file']
   logger_factory_kwargs = dict(
-    actor_label=f"actor_{tasks_file}",
-    evaluator_label=f"evaluator_{tasks_file}",
-    learner_label=f"learner_{FLAGS.agent}",
+    actor_label="actor",
+    evaluator_label="evaluator",
+    learner_label="learner",
   )
 
   experiment = experiment_builder.build_online_experiment_config(
     experiment_config_inputs=experiment_config_inputs,
-    agent=FLAGS.agent,
     log_dir=log_dir,
     wandb_init_kwargs=wandb_init_kwargs,
     logger_factory_kwargs=logger_factory_kwargs,
@@ -244,7 +218,7 @@ def sweep(search: str = 'default'):
     space = [
         {
             "seed": tune.grid_search([1]),
-            "agent": tune.grid_search(['uvfa_flat']),
+            "agent": tune.grid_search(['usfa_flat']),
         }
     ]
   else:
@@ -252,23 +226,26 @@ def sweep(search: str = 'default'):
 
   return space
 
+def extract_first_config(grid_search_space):
+  """Extract the very first possible setting from the search space."""
+  first_config = {}
+  if isinstance(grid_search_space, list):
+    grid_search_space = grid_search_space[0]
+  for param_name, param_values in grid_search_space.items():
+      first_value = next(iter(param_values.values()))[0]
+      first_config[param_name] = first_value
+  return first_config
+
 
 def setup_wandb_init_kwargs():
-  search = FLAGS.search or 'default'
   wandb_init_kwargs = dict(
       project=FLAGS.wandb_project,
       entity=FLAGS.wandb_entity,
       notes=FLAGS.wandb_notes,
       save_code=False,
   )
-  if FLAGS.train_single:
-    # overall group
-    wandb_init_kwargs['group'] = FLAGS.wandb_group if FLAGS.wandb_group else f"{search}_{FLAGS.search}"
-  else:
-    if FLAGS.wandb_group:
-      logging.info(f'IGNORING `wandb_group`. This will be set using the current `search`')
-    wandb_init_kwargs['group'] = search
-
+  search = FLAGS.search or 'default'
+  wandb_init_kwargs['group'] = search
   if FLAGS.wandb_name:
     wandb_init_kwargs['name'] = FLAGS.wandb_name
 
@@ -299,24 +276,26 @@ def main(_):
   # wandb setup
   # -----------------------
   wandb_init_kwargs = setup_wandb_init_kwargs()
-  if FLAGS.train_single:
-    train_single(
-      wandb_init_kwargs=wandb_init_kwargs,
-      default_env_kwargs=default_env_kwargs,
-      agent_config_kwargs=agent_config_kwargs)
-  else:
+  if FLAGS.parallel:
     parallel.run(
       wandb_init_kwargs=wandb_init_kwargs,
       default_env_kwargs=default_env_kwargs,
       use_wandb=FLAGS.use_wandb,
       debug=FLAGS.debug,
-      space=sweep(FLAGS.search, FLAGS.agent),
+      space=sweep(FLAGS.search),
       make_program_command=functools.partial(
         parallel.make_program_command,
         filename='trainer.py',
         run_distributed=FLAGS.run_distributed,
         num_actors=FLAGS.num_actors),
     )
+  else:
+    first_config = extract_first_config(sweep(FLAGS.search))
+    agent_config_kwargs.update(**first_config)
+    train_single(
+      wandb_init_kwargs=wandb_init_kwargs,
+      default_env_kwargs=default_env_kwargs,
+      agent_config_kwargs=agent_config_kwargs)
 
 if __name__ == '__main__':
   app.run(main)

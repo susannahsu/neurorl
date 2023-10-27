@@ -17,8 +17,8 @@ conda env update --name omodel --file conda_env.yaml
 # at the time, needed this version because the babyai bot was not available via pip
 #############################################
 
-git clone https://github.com/Farama-Foundation/Minigrid .minigrid
-cd .minigrid
+git clone https://github.com/Farama-Foundation/Minigrid _minigrid
+cd _minigrid
 git checkout e726259e86d555c7055fb48bd5842cf37af78bfd
 pip install --editable .
 cd ..
@@ -27,8 +27,8 @@ cd ..
 #############################################
 # ACME
 #############################################
-git clone https://github.com/google-deepmind/acme.git .acme
-cd .acme
+git clone https://github.com/google-deepmind/acme.git _acme
+cd _acme
 git checkout 4525ade7015c46f33556e18d76a8d542b916f264
 pip install --editable ".[jax,testing,tf,envs]" 
 cd ..
@@ -42,14 +42,18 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.
 pip install --upgrade "jax[cuda11_pip]==0.4.3" "jaxlib==0.4.3" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 
 #############################################
+# Setup activate/deactivate with correct PYTHONPATH and LD_LIBRARY_PATH
+#############################################
+mkdir -p $CONDA_PREFIX/etc/conda/activate.d
+mkdir -p $CONDA_PREFIX/etc/conda/deactivate.d
+echo 'export export PYTHONPATH:=$PYTHONPATH:.' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib/' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
+echo 'unset LD_LIBRARY_PATH' >> $CONDA_PREFIX/etc/conda/deactivate.d/env_vars.sh
+
+#############################################
 # test install
 #############################################
 python -c "import jax; jax.random.split(jax.random.PRNGKey(42), 2); print('hello world'); print(f'GPUS: {jax.device_count()}')"
 
-# inspired from: https://github.com/wcarvalho/oo-model/blob/fixing/Makefile
-CONDA_ENV_DIR=${HOME}/.conda
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_ENV_DIR}/envs/humansf/lib/
-
-python .acme/examples/baselines/rl_discrete/run_r2d2.py
-
-# git add install-fas.sh .gitignore; git add -u; git commit -m "added installation files
+python _acme/examples/baselines/rl_discrete/run_r2d2.py

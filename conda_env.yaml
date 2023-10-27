@@ -6,6 +6,7 @@ dependencies:
   - pip
   - pip:
     - pip
+    - ray[tune]
     - ipdb
     - matplotlib
     - wandb

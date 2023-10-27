@@ -18,11 +18,9 @@ Example runing model-based agents on discrete control tasks.
 Copied from: https://github.com/deepmind/acme/blob/master/examples/baselines/rl_discrete/run_r2d2.py
 """
 # Do not preallocate GPU memory for JAX.
-from launchpad.nodes.python.local_multi_processing import PythonProcess
-import pickle
 import os
-os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 # https://github.com/google/jax/issues/8302
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 
 import dataclasses
@@ -42,7 +40,6 @@ from acme import specs
 from acme.utils.observers import EnvLoopObserver
 
 import dm_env
-import launchpad as lp
 
 import experiment_logger
 import utils
@@ -51,14 +48,11 @@ import utils
 # -----------------------
 # flags
 # -----------------------
-flags.DEFINE_string('agent', 'muzero', 'which agent.')
 
 # Flags which modify the behavior of the launcher.
 flags.DEFINE_string('agent_config', '', 'config file')
 flags.DEFINE_string('env_config', '', 'config file')
 flags.DEFINE_string('path', '.', 'config file')
-flags.DEFINE_string('tasks_file', 'pickup_sanity', 'tasks_file')
-flags.DEFINE_integer('room_size', 7, 'room size')
 flags.DEFINE_bool(
     'run_distributed', False, 'Should an agent be executed in a distributed '
     'way. If False, will run single-threaded.')
@@ -198,6 +192,7 @@ def setup_evaluator_factories(
 
 
 class OnlineExperimentConfigInputs(NamedTuple):
+  agent: str
   agent_config: dict
   final_env_kwargs: dict
   builder: Any
@@ -208,7 +203,6 @@ class OnlineExperimentConfigInputs(NamedTuple):
 
 def build_online_experiment_config(
   experiment_config_inputs: OnlineExperimentConfigInputs,
-  agent: str,
   debug: bool = False,
   save_config_dict: dict = None,
   log_dir: str = None,
@@ -219,6 +213,7 @@ def build_online_experiment_config(
   logger_factory_kwargs: dict = None
   ):
   """Builds experiment config."""
+  agent = experiment_config_inputs.agent
   agent_config = experiment_config_inputs.agent_config
   builder = experiment_config_inputs.builder
   network_factory = experiment_config_inputs.network_factory

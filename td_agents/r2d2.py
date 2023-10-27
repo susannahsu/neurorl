@@ -31,13 +31,14 @@ import rlax
 import networks
 
 @dataclasses.dataclass
-class R2D2Config(r2d2.R2D2Config):
+class Config(r2d2.R2D2Config):
+  agent: str = 'agent'
   # Architecture
   # vocab_size: int = 50  # vocab size for env
   # sentence_dim: int = 128  # dimensionality of sentence embeddings
   # word_dim: int = 128  # dimensionality of word embeddings
   # task_dim: int = 128  # projection of task to lower dimension
-  # state_dim: int = 256
+  state_dim: int = 256
   # q_dim: int = 512
   # conv_out_dim: int = 0
 
@@ -49,12 +50,12 @@ class R2D2Config(r2d2.R2D2Config):
 
   # # Learner options
   # num_learner_steps: int = int(5e5)
-  # discount: float = 0.99
-  # burn_in_length: int = 0
-  # num_steps: int = 3e6
-  # seed: int = 1
-  # max_grad_norm: float = 80.0
-  # adam_eps: float = 1e-3
+  seed: int = 1
+  discount: float = 0.99
+  burn_in_length: int = 0
+  num_steps: int = 3e6
+  max_grad_norm: float = 80.0
+  adam_eps: float = 1e-3
 
   # # Replay options
   # # samples_per_insert_tolerance_rate: float = 0.1
@@ -140,7 +141,7 @@ class R2D2Builder(r2d2.R2D2Builder):
 
 def get_actor_core(
     networks: r2d2_networks.R2D2Networks,
-    config: R2D2Config,
+    config: Config,
     evaluation: bool = False,
 ) -> r2d2_actor.R2D2Policy:
   """Returns ActorCore for R2D2."""
@@ -237,7 +238,7 @@ class R2D2Arch(hk.RNNCore):
 
 def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,
-        config: R2D2Config) -> r2d2.R2D2Networks:
+        config: Config) -> r2d2.R2D2Networks:
   """Builds default R2D2 networks for Atari games."""
 
   num_actions = env_spec.actions.num_values
