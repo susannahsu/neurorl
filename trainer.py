@@ -48,7 +48,7 @@ def make_environment(seed: int,
   del seed
 
   gym_wrappers = [
-    minigrid.wrappers.DictObservationSpaceWrapper,
+    env_wrappers.DictObservationSpaceWrapper,
     functools.partial(env_wrappers.GotoOptionsWrapper,
                       use_options=object_options,
                       ),
@@ -58,8 +58,8 @@ def make_environment(seed: int,
 
   fixed_door_locs = False if evaluation else True
 
-  # create gym environment
-  gymnasium.Gym: env = envs.KeyRoom(
+  # create gymnasium.Gym environment
+  env = envs.KeyRoom(
     num_dists=0,
     fixed_door_locs=fixed_door_locs)
   
@@ -67,8 +67,8 @@ def make_environment(seed: int,
   for wrapper in gym_wrappers:
     env = wrapper(env)
 
-  # convert to dm_env Enironment
-  dm_env.Environment: env = GymWrapper(env)
+  # convert to dm_env.Environment enironment
+  env = GymWrapper(env)
 
   # add acme wrappers
   wrapper_list = [
@@ -240,8 +240,10 @@ def extract_first_config(grid_search_space):
       first_config[param_name] = first_value
   return first_config
 
-
 def setup_wandb_init_kwargs():
+  if not FLAGS.use_wandb:
+    return None
+
   wandb_init_kwargs = dict(
       project=FLAGS.wandb_project,
       entity=FLAGS.wandb_entity,
@@ -249,23 +251,19 @@ def setup_wandb_init_kwargs():
       save_code=False,
   )
   search = FLAGS.search or 'default'
-  if FLAGS.train_single:
-    wandb_init_kwargs['group'] = FLAGS.wandb_group or search
-  else:
+
+  if FLAGS.parallel:
     wandb_init_kwargs['group'] = search
+  else:
+    wandb_init_kwargs['group'] = FLAGS.wandb_group or search
 
   if FLAGS.wandb_name:
     wandb_init_kwargs['name'] = FLAGS.wandb_name
 
-  if not FLAGS.use_wandb:
-    wandb_init_kwargs = None
+  return wandb_init_kwargs
 
 def main(_):
-  # -----------------------
-  # env setup
-  # -----------------------
-  default_env_kwargs = dict(
-  )
+  default_env_kwargs = dict()
   agent_config_kwargs = dict()
   if FLAGS.debug:
     agent_config_kwargs.update(dict(
