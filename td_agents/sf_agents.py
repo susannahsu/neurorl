@@ -23,7 +23,7 @@ import networks
 @dataclasses.dataclass
 class Config(r2d2.Config):
   eval_task_support: str = "train"
-  nsamples: int = 1
+  nsamples: int = 0  # no samples outside of train vector
 
 def expand_tile_dim(x, size, axis=-1):
   """E.g. shape=[1,128] --> [1,10,128] if dim=1, size=10
@@ -93,14 +93,15 @@ def cumulants_from_preds(
 def sample_gauss(mean, var, key, nsamples, axis):
   # gaussian (mean=mean, var=.1I)
   # mean = [B, D]
-  if nsamples > 1:
+  if nsamples >= 1:
     mean = jnp.expand_dims(mean, -2) # [B, 1, ]
     samples = jnp.tile(mean, [1, nsamples, 1])
     dims = samples.shape # [B, N, D]
     samples =  samples + jnp.sqrt(var) * jax.random.normal(key, dims)
+    samples = samples.astype(mean.dtype)
   else:
     samples = jnp.expand_dims(mean, axis=1) # [B, N, D]
-  return samples.astype(mean.dtype)
+  return samples
 
 @dataclasses.dataclass
 class UsfaLossFn(basics.RecurrentLossFn):
@@ -235,14 +236,14 @@ def get_actor_core(
 
   def select_action(params: networks_lib.Params,
                     observation: networks_lib.Observation,
-                    state: r2d2.R2D2ActorState[actor_core_lib.RecurrentState]):
+                    state: r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]):
     rng, policy_rng = jax.random.split(state.rng)
 
     predictions, recurrent_state = networks.apply(
       params, policy_rng, observation, state.recurrent_state, evaluation)
     action = rlax.epsilon_greedy(state.epsilon).sample(policy_rng, predictions.q_values)
 
-    return action, r2d2.R2D2ActorState(
+    return action, r2d2_actor.R2D2ActorState(
         rng=rng,
         epsilon=state.epsilon,
         recurrent_state=recurrent_state,
@@ -250,7 +251,7 @@ def get_actor_core(
 
   def init(
       rng: networks_lib.PRNGKey
-  ) -> r2d2.R2D2ActorState[actor_core_lib.RecurrentState]:
+  ) -> r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]:
     rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
     if not evaluation:
       epsilon = jax.random.choice(epsilon_rng,
@@ -259,15 +260,15 @@ def get_actor_core(
       epsilon = evaluation_epsilon
     initial_core_state = networks.init_recurrent_state(state_rng, None)
 
-    return r2d2.R2D2ActorState(
+    return r2d2_actor.R2D2ActorState(
         rng=rng,
         epsilon=epsilon,
         recurrent_state=initial_core_state,
         prev_recurrent_state=initial_core_state)
 
   def get_extras(
-      state: r2d2.R2D2ActorState[actor_core_lib.RecurrentState]
-      ) -> r2d2.R2D2Extras:
+      state: r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]
+      ) -> r2d2_actor.R2D2Extras:
     return {'core_state': state.prev_recurrent_state}
 
   return actor_core_lib.ActorCore(init=init, select_action=select_action,
@@ -281,7 +282,7 @@ class USFAPreds(NamedTuple):
 
 class USFAInputs(NamedTuple):
   task: jnp.ndarray  # task vector
-  memory_out: jnp.ndarray  # memory output (e.g. LSTM)
+  usfa_input: jnp.ndarray  # memory output (e.g. LSTM)
   train_tasks: Optional[jnp.ndarray] = None  # train task vectors
 
 class UsfaHead(hk.Module):
@@ -314,79 +315,83 @@ class UsfaHead(hk.Module):
     self.nsamples = nsamples
     self.eval_task_support = eval_task_support
 
-    self.mlp = hk.nets.MLP(hidden_sizes+[num_actions * state_features_dim])
+    self.mlp = hk.nets.MLP(tuple(hidden_sizes)+(num_actions * state_features_dim,))
 
   def compute_sf_q(self, inputs: jnp.ndarray, w: jnp.ndarray) -> jnp.ndarray:
     """Forward pass
     
     Args:
-        inputs (jnp.ndarray): B x Z
-        w (jnp.ndarray): B x A x C
+        inputs (jnp.ndarray): Z
+        w (jnp.ndarray): A x C
     
     Returns:
         jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
     """
-    # [B, A * C]
+    # [A * C]
     sf = self.mlp(inputs)
-    # [B, A, C]
-    sf = jnp.reshape(sf, [sf.shape[0], self.num_actions, self.state_features_dim])
+    # [A, C]
+    sf = jnp.reshape(sf, (self.num_actions, self.state_features_dim))
+
+    # dot-product
     q_values = jnp.sum(sf*w, axis=-1) # [B, A]
     return sf, q_values
 
   def __call__(self,
-    inputs : USFAInputs,
-    key: networks_lib.PRNGKey) -> USFAPreds:
-
-    task_vector = inputs.task_vector # [B, D_w]
+    usfa_input: jnp.ndarray,  # memory output (e.g. LSTM)
+    task: jnp.ndarray,  # task vector
+    ) -> USFAPreds:
 
     # -----------------------
     # policies + embeddings
     # -----------------------
-    # sample N times: [B, D_w] --> [B, N, D_w]
-    z_samples = sample_gauss(
-      mean=task_vector, var=self.var, key=key, nsamples=self.nsamples, axis=-2)
-
-    # combine samples with original task vector
-    z_base = jnp.expand_dims(task_vector, axis=1) # [B, 1, D_w]
-    policy_embeddings = jnp.concatenate((z_base, z_samples), axis=1)  # [B, N+1, D_w]
+    if self.nsamples > 0:
+      # sample N times: [D_w] --> [N+1, D_w]
+      z_samples = sample_gauss(
+        mean=task, var=self.var, key=hk.next_rng_key(), nsamples=self.nsamples, axis=-2)
+      # combine samples with original task vector
+      z_base = jnp.expand_dims(task, axis=1) # [1, D_w]
+      policy_embeddings = jnp.concatenate((z_base, z_samples), axis=-2)  # [N+1, D_w]
+    else:
+      policy_embeddings = jnp.expand_dims(task, axis=-2) # [1, D_w]
 
     return self.sfgpi(
-      inputs=inputs,
+      usfa_input=usfa_input,
       z=policy_embeddings,
-      w=task_vector,
-      key=key)
+      w=task)
 
   def evaluate(self,
-    inputs : USFAInputs,
-    key: networks_lib.PRNGKey) -> USFAPreds:
+    task: jnp.ndarray,  # task vector
+    usfa_input: jnp.ndarray,  # memory output (e.g. LSTM)
+    train_tasks: jnp.ndarray,  # all train tasks
+    ) -> USFAPreds:
 
+    import ipdb; ipdb.set_trace()
     # -----------------------
     # embed task
     # -----------------------
-    w = inputs.w # [B, D]
-    B = w.shape[0]
+    w = task # [D]
 
     # train basis (z)
-    w_train = inputs.w_train # [N, D]
+    w_train = train_tasks # [N, D]
     N = w_train.shape[0]
 
     # -----------------------
     # policies + embeddings
     # -----------------------
     if len(w_train.shape)==2:
-      # z = [B, N, D]
-      # w = [B, D]
+      # z = [N, D]
+      # w = [D]
       z = expand_tile_dim(w_train, axis=0, size=B)
     else:
-      # [B, N, D]
+      # [N, D]
       z = w_train
 
 
     if self.eval_task_support == 'train':
       pass # z = w_train
-      # [B, N, D]
+      # [N, D]
     elif self.eval_task_support == 'eval':
-      # [B, 1, D]
+      # [1, D]
       z = jnp.expand_dims(w, axis=1)
 
     elif self.eval_task_support == 'train_eval':
@@ -397,67 +402,59 @@ class UsfaHead(hk.Module):
       raise RuntimeError(self.eval_task_support)
 
     preds = self.sfgpi(
-      inputs=inputs, z=z, w=w, key=key)
+      usfa_input=usfa_input, z=z, w=w)
 
     return preds
 
   def sfgpi(self,
-    inputs: USFAInputs,
+    usfa_input: jnp.ndarray,
     z: jnp.ndarray,
-    w: jnp.ndarray,
-    key: networks_lib.PRNGKey,
-    **kwargs) -> USFAPreds:
+    w: jnp.ndarray) -> USFAPreds:
     """Summary
     
     Args:
         inputs (USFAInputs): Description
-        z (jnp.ndarray): B x N x D
-        w (jnp.ndarray): B x D
-        key (networks_lib.PRNGKey): Description
-    
+        z (jnp.ndarray): N x D
+        w (jnp.ndarray): D
     Returns:
         USFAPreds: Description
     """
 
-    import ipdb; ipdb.set_trace()
-    n_policies = z.shape[1]
+    n_policies = z.shape[0]
 
-    # [B, N, D_s]
+    # [N, D_s]
     sf_input = jnp.concatenate(
-      (expand_tile_dim(inputs.memory_out, size=n_policies, axis=1),z),
+      (expand_tile_dim(usfa_input, size=n_policies, axis=-2),z),
       axis=-1)
     # -----------------------
     # prepare task vectors
     # -----------------------
-    # [B, D_z] --> [B, N, D_z]
-    w_expand = expand_tile_dim(w, axis=1, size=n_policies)
+    # [D_z] --> [N, D_z]
+    w_expand = expand_tile_dim(w, axis=-2, size=n_policies)
 
-    # [B, N, D_w] --> [B, N, A, D_w]
-    def add_actions_dimension(x):
-      x = expand_tile_dim(x, axis=2, size=self.num_actions)
-      return x
-
-    z = add_actions_dimension(z)
+    # [N, D_w] --> [N, A, D_w]
+    z = expand_tile_dim(z, axis=-2, size=self.num_actions)
+    w_expand = expand_tile_dim(w_expand, axis=-2, size=self.num_actions)
 
     # -----------------------
     # compute successor features
     # -----------------------
-    # inputs = [B, N, D_s], [B, N, A, D_w]
-    # ouputs = [B, N, A, D_w], [B, N, A]
-    w_expand = add_actions_dimension(w_expand)
-    sf, q_values = hk.BatchApply(self.sf_q_net)(sf_input, w_expand)
+    # inputs = [N, D_s], [N, A, D_w], ouputs = [N, A, D_w], [N, A]
+    # repeat once for each policy
+    sf, q_values = jax.vmap(self.compute_sf_q)(sf_input, w_expand)
 
     # -----------------------
     # GPI
     # -----------------------
-    # [B, A]
-    q_values = jnp.max(q_values, axis=1)
+    # [N, A] --> [A]
+    q_values = jnp.max(q_values, axis=-2)
 
     return USFAPreds(
-      sf=sf,       # [B, N, A, D_w]
-      z=z,         # [B, N, A, D_w]
-      q=q_values,  # [B, N, A]
-      w=w)         # [B, D_w]
+      sf=sf,       # [N, A, D_w]
+      policy=z,         # [N, A, D_w]
+      q_value=q_values,  # [N, A]
+      task=w)         # [D_w]
+
 
 class UsfaArch(hk.RNNCore):
   """Universal Successor Feature Approximator."""
@@ -474,26 +471,27 @@ class UsfaArch(hk.RNNCore):
 
   def __call__(
       self,
-      inputs: observation_action_reward.OAR,  # [B, ...]
-      state: hk.LSTMState,  # [B, ...]
+      inputs: observation_action_reward.OAR,  # [D]
+      state: hk.LSTMState,  # [D]
       evaluation: bool = False,
   ) -> Tuple[USFAPreds, hk.LSTMState]:
-    torso_outputs = self._torso(inputs)  # [B, D+A+1]
+    torso_outputs = self._torso(inputs)  # [D+A+1]
     memory_input = jnp.concatenate(
       (torso_outputs.image, torso_outputs.action), axis=-1)
-    import ipdb; ipdb.set_trace()
-    core_outputs, new_state = self._memory(torso_outputs, state)
-    head_inputs = USFAInputs(
-      task=torso_outputs.task,
-      memory_out=core_outputs,
-      train_tasks=inputs.train_task_vectors,
-    )
+
+    core_outputs, new_state = self._memory(memory_input, state)
+
     if evaluation:
-      predictions = self._head.evaluate(head_inputs)
-      import ipdb; ipdb.set_trace()
+      predictions = self._head.evaluate(
+        task=inputs.observation['task'],
+        usfa_input=core_outputs,
+        train_tasks=inputs.observation['train_tasks']
+        )
     else:
-      predictions = self._head(head_inputs)
-      import ipdb; ipdb.set_trace()
+      predictions = self._head(
+        task=inputs.observation['task'],
+        usfa_input=core_outputs,
+      )
     return predictions, new_state
 
   def initial_state(self, batch_size: Optional[int],
@@ -507,26 +505,29 @@ class UsfaArch(hk.RNNCore):
   ) -> Tuple[USFAPreds, hk.LSTMState]:
     """Efficient unroll that applies torso, core, and duelling mlp in one pass."""
     torso_outputs = hk.BatchApply(self._torso)(inputs)  # [T, B, D+A+1]
+
+    memory_input = jnp.concatenate(
+      (torso_outputs.image, torso_outputs.action), axis=-1)
+
     core_outputs, new_states = hk.static_unroll(
-      self._memory, torso_outputs, state)
-    head_inputs = USFAInputs(
-      task=torso_outputs.task,
-      memory_out=core_outputs,
-    )
-    predictions = hk.BatchApply(self._head)(head_inputs)  # [T, B, A]
+      self._memory, memory_input, state)
+
+    predictions = hk.BatchApply(self._head)(
+        task=inputs.observation['task'],
+        usfa_input=core_outputs,
+      )
     return predictions, new_states
 
-def make_minigrid_architecture(
+def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,
         config: Config) -> networks_lib.UnrollableNetwork:
   """Builds default USFA networks for Minigrid games."""
 
   num_actions = env_spec.actions.num_values
-  state_features_dim = env_spec.observations.observation.state_feature.shape[0]
+  state_features_dim = env_spec.observations.observation['state_features'].shape[0]
 
   def make_core_module() -> UsfaArch:
     vision_torso = networks.AtariVisionTorso(
-      conv_dim=config.conv_out_dim,
       out_dim=config.state_dim)
 
     observation_fn = networks.OarTorso(
@@ -550,17 +551,99 @@ def make_minigrid_architecture(
     env_spec, make_core_module)
 
 
-def make_object_oriented_minigrid_architecture(
+class ObjectOrientedUsfaArch(hk.RNNCore):
+  """Universal Successor Feature Approximator."""
+
+  def __init__(self,
+               torso: networks.OarTorso,
+               memory: hk.RNNCore,
+               head: UsfaHead,
+               name: str = 'usfa_arch'):
+    super().__init__(name=name)
+    self._torso = torso
+    self._memory = memory
+    self._head = head
+  def make_object_oriented_usfa_inputs(
+      self,
+      inputs: observation_action_reward.OAR,
+      core_outputs: jnp.ndarray,
+      ):
+    action_embdder = lambda x: hk.Linear(128, w_init=hk.initializers.RandomNormal)(x)
+    object_embdder = lambda x: hk.Linear(128, w_init=hk.initializers.RandomNormal)(x)
+
+    # each are [B, N, D] where N differs for action and object embeddings
+    action_embeddings = hk.BatchApply(action_embdder)(inputs.observation['actions'])
+    object_embeddings = hk.BatchApply(object_embdder)(inputs.observation['objects'])
+    option_inputs = jnp.concatenate((action_embeddings, object_embeddings), axis=-2)
+
+    # vmap concat over middle dimension to replicate concat across all "actions"
+    # [B, D1] + [B, A, D2] --> [B, A, D1+D2]
+    concat = lambda a, b: jnp.concatenate((a,b), axis=-1)
+    concat = jax.vmap(in_axes=(None, 1), out_axes=1)(concat)
+
+    return concat(core_outputs, option_inputs)
+
+  def __call__(
+      self,
+      inputs: observation_action_reward.OAR,  # [B, ...]
+      state: hk.LSTMState,  # [B, ...]
+      evaluation: bool = False,
+  ) -> Tuple[USFAPreds, hk.LSTMState]:
+    torso_outputs = self._torso(inputs)  # [B, D+A+1]
+    memory_input = jnp.concatenate(
+      (torso_outputs.image, torso_outputs.action), axis=-1)
+    core_outputs, new_state = self._memory(memory_input, state)
+
+    import ipdb; ipdb.set_trace()
+    head_inputs = USFAInputs(
+      task=inputs.observation['task'],
+      usfa_input=self.make_object_oriented_usfa_inputs(inputs, core_outputs),
+      train_tasks=inputs.observation['train_tasks'],
+    )
+    if evaluation:
+      predictions = self._head.evaluate(head_inputs)
+      import ipdb; ipdb.set_trace()
+    else:
+      predictions = self._head(head_inputs)
+      import ipdb; ipdb.set_trace()
+    return predictions, new_state
+
+  def initial_state(self, batch_size: Optional[int],
+                    **unused_kwargs) -> hk.LSTMState:
+    return self._memory.initial_state(batch_size)
+
+  def unroll(
+      self,
+      inputs: observation_action_reward.OAR,  # [T, B, ...]
+      state: hk.LSTMState  # [T, ...]
+  ) -> Tuple[USFAPreds, hk.LSTMState]:
+    """Efficient unroll that applies torso, core, and duelling mlp in one pass."""
+    torso_outputs = hk.BatchApply(self._torso)(inputs)  # [T, B, D+A+1]
+
+    memory_input = jnp.concatenate(
+      (torso_outputs.image, torso_outputs.action), axis=-1)
+
+    core_outputs, new_states = hk.static_unroll(
+      self._memory, memory_input, state)
+
+    head_inputs = USFAInputs(
+      task=torso_outputs.task,
+      usfa_input=core_outputs,
+    )
+    predictions = hk.BatchApply(self._head)(head_inputs)  # [T, B, A]
+    return predictions, new_states
+
+
+def make_object_oriented_minigrid_networks(
         env_spec: specs.EnvironmentSpec,
         config: Config) -> networks_lib.UnrollableNetwork:
   """Builds default USFA networks for Minigrid games."""
 
   num_actions = env_spec.actions.num_values
-  state_features_dim = env_spec.observations.observation.state_feature.shape[0]
+  state_features_dim = env_spec.observations.observation['state_features'].shape[0]
 
-  def make_core_module() -> UsfaArch:
+  def make_core_module() -> ObjectOrientedUsfaArch:
     vision_torso = networks.AtariVisionTorso(
-      conv_dim=config.conv_out_dim,
       out_dim=config.state_dim)
 
     observation_fn = networks.OarTorso(
@@ -575,7 +658,7 @@ def make_object_oriented_minigrid_architecture(
       nsamples=config.nsamples,
       eval_task_support=config.eval_task_support)
 
-    return UsfaArch(
+    return ObjectOrientedUsfaArch(
       torso=observation_fn,
       memory=hk.LSTM(config.state_dim),
       head=usfa_head)
