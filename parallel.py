@@ -89,7 +89,7 @@ def make_program_command(
     --env_config='{env_config}'
     --num_actors={num_actors}
     --run_distributed={run_distributed}
-    --train_single=True
+    --parallel=False
   """
   for k, v in kwargs.items():
     str += f"--{k}={v}"
