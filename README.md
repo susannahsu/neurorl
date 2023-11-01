@@ -28,6 +28,10 @@ chmod u+x install-fas.sh
 ./install-fas.sh
 ```
 
+**how does install work?**
+
+[TODO]
+
 ## (Optionally) permanently set the results directory
 ```
 echo 'export RL_RESULTS_DIR=${results_dir}' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
@@ -39,7 +43,7 @@ RL_RESULTS_DIR=${results_dir} python trainer.pu
 ```
 
 
-## Running experiments
+# Running experiments
 
 ```
 # load environment
@@ -47,3 +51,13 @@ source activate humansf
 # run experiment
 python trainer.py
 ```
+
+**how do experiments work?**
+
+[TODO]
+
+
+# Available Agents
+
+1. Flat Successor Features
+2. Object-oriented Successor Features
