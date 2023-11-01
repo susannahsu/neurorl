@@ -24,7 +24,6 @@ class TorsoOutput:
   reward: jnp.ndarray
   task: Optional[jnp.ndarray] = None
 
-
 def struct_output(image: Image, task: Task, action: Action, reward: Reward):
   return TorsoOutput(
     image=image,
@@ -38,7 +37,6 @@ def concat(image: Image, task: Task, action: Action, reward: Reward):
   if task is not None:
     pieces += (task, )
   return jnp.concatenate(pieces, axis=-1)
-
 
 class AtariVisionTorso(hk.Module):
   """Simple convolutional stack commonly used for Atari."""
@@ -155,7 +153,7 @@ class OarTorso(hk.Module):
     self._w_init = w_init
 
   def __call__(self, inputs: observation_action_reward.OAR):
-    batched = len(inputs.observation.image.shape) == 4
+    batched = len(inputs.observation['image'].shape) == 4
     observation_fn = self.unbatched
     if batched:
       observation_fn = jax.vmap(observation_fn)
@@ -165,7 +163,7 @@ class OarTorso(hk.Module):
     """_no_ batch [B] dimension."""
     # compute task encoding
 
-    task = self._task_encoder(inputs.observation.mission)
+    task = self._task_encoder(inputs.observation['mission'])
 
     # get action one-hot
     action = jax.nn.one_hot(
@@ -173,7 +171,7 @@ class OarTorso(hk.Module):
 
     # compute image encoding
     inputs = jax.tree_map(lambda x: x.astype(jnp.float32), inputs)
-    image = self._vision_torso(inputs.observation.image/255.0)
+    image = self._vision_torso(inputs.observation['image']/255.0)
 
     if self._flatten_image:
       image = jnp.reshape(image, (-1))
