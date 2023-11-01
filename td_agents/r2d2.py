@@ -40,16 +40,16 @@ class Config(r2d2.R2D2Config):
   # task_dim: int = 128  # projection of task to lower dimension
   state_dim: int = 256
   # q_dim: int = 512
-  # conv_out_dim: int = 0
 
-  # # value-based action-selection options
-  # num_epsilons: int = 256
-  # epsilon_min: float = 1
-  # epsilon_max: float = 3
-  # epsilon_base: float = .1
+  # value-based action-selection options
+  num_epsilons: int = 256
+  epsilon_min: float = 1
+  epsilon_max: float = 3
+  epsilon_base: float = .1
 
   # # Learner options
   # num_learner_steps: int = int(5e5)
+  num_sgd_steps_per_step: int = 1
   seed: int = 1
   discount: float = 0.99
   burn_in_length: int = 0

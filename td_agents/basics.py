@@ -542,10 +542,9 @@ class Builder(r2d2.R2D2Builder):
     # The learner updates the parameters (and initializes them).
     logger = logger_fn('learner')
     optimizer_chain = [
-      optax.clip_by_global_norm(self._config.max_gradient_norm),
-      optax.adam(self._config.learning_rate, eps=1e-3),
+      optax.clip_by_global_norm(self._config.max_grad_norm),
+      optax.adam(self._config.learning_rate, eps=self._config.adam_eps),
     ]
-
 
     return SGDLearner(
         network=networks,
