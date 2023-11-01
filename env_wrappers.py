@@ -4,6 +4,7 @@ from typing import NamedTuple, Tuple
 from gymnasium.core import Wrapper
 from gymnasium import spaces
 import numpy as np
+import minigrid
 
 from minigrid.utils import baby_ai_bot as bot_lib
 from minigrid.core.constants import COLOR_TO_IDX, OBJECT_TO_IDX, STATE_TO_IDX, IDX_TO_COLOR, IDX_TO_OBJECT
@@ -19,7 +20,6 @@ class GlobalObjDesc(NamedTuple):
     local_pos: Tuple[int, int]
     visible: bool
 
-
 def matrix_to_row(row, column, num_columns):
     unique_index = row * num_columns + column
     return unique_index
@@ -28,7 +28,6 @@ def flat_to_matrix(unique_index, num_columns):
     row = unique_index // num_columns
     col = unique_index % num_columns
     return int(row), int(col)
-
 
 class GotoBot(bot_lib.BabyAIBot):
   """"""
@@ -155,7 +154,6 @@ class GotoBot(bot_lib.BabyAIBot):
     # ignore this
     pass
 
-
 class GotoOptionsWrapper(Wrapper):
     """
     Wrapper that swaps actions for options.
@@ -186,7 +184,7 @@ class GotoOptionsWrapper(Wrapper):
           self.actions.drop,
           self.actions.toggle,
         ]
-        self.primitive_actions_arr = np.array(self.primitive_actions)
+        self.primitive_actions_arr = np.range(len(self.primitive_actions))
         self.max_options = max_options
 
         if not partial_obs:
@@ -210,8 +208,6 @@ class GotoOptionsWrapper(Wrapper):
              "objects": options_space
              }
         )
-
-
 
     def get_objects(self):
         grid, vis_mask = self.gen_obs_grid()
@@ -327,6 +323,28 @@ class GotoOptionsWrapper(Wrapper):
         self.post_env_iter_update(obs, info)
         return obs, reward, terminated, truncated, info
 
+class DictObservationSpaceWrapper(minigrid.wrappers.DictObservationSpaceWrapper):
+
+  def __init__(self, env, max_words_in_mission=50, word_dict=None):
+      """
+      Main change is to KEEP prior pieces of observation space and only over-ride the mission one.
+      """
+      super(minigrid.wrappers.DictObservationSpaceWrapper, self).__init__(env)
+
+      if word_dict is None:
+        word_dict = self.get_minigrid_words()
+
+      self.max_words_in_mission = max_words_in_mission
+      self.word_dict = word_dict
+
+      self.observation_space = spaces.Dict(
+          {
+             **self.observation_space.spaces,
+             "mission": spaces.MultiDiscrete(
+                [len(self.word_dict.keys())] * max_words_in_mission
+            ),
+          }
+      )
 
 def main():
   from envs import KeyRoom

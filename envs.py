@@ -39,93 +39,99 @@ def rotate(array, n=1):
 def make_name(color, type):
     return f"{color} {type}"
 
+def onehot(index: int, size: int):
+   x = np.zeros(size)
+   x[index] = 1
+   return x
+
 class KeyRoom(LevelGen):
     """
 
     """
 
     def __init__(self,
-        room_size=7,
-        num_rows=3,
-        num_cols=3,
-        num_dists=10,
-        locations=False,
-        unblocking=False,
-        implicit_unlock=False,
-        train_get_keys: bool = True,
-        training: bool = True,
-        fixed_door_locs:bool=True,
-        **kwargs):
-        """Keyroom.
+      room_size=7,
+      num_rows=3,
+      num_cols=3,
+      num_dists=10,
+      locations=False,
+      unblocking=False,
+      implicit_unlock=False,
+      train_get_keys: bool = True,
+      training: bool = True,
+      fixed_door_locs:bool=True,
+      **kwargs):
+      """Keyroom.
 
-        Args:
-            room_size (int, optional): _description_. Defaults to 7.
-            num_rows (int, optional): _description_. Defaults to 3.
-            num_cols (int, optional): _description_. Defaults to 3.
-            num_dists (int, optional): _description_. Defaults to 10.
-            locations (bool, optional): _description_. Defaults to False.
-            unblocking (bool, optional): _description_. Defaults to False.
-            implicit_unlock (bool, optional): _description_. Defaults to False.
-            fixed_door_locs (bool, optional): _description_. Defaults to True.
-        """
-        self._fixed_door_locs = fixed_door_locs
-        self._training = training
-        self._train_get_keys = train_get_keys
-        self._train_objects = []
-        self._transfer_objects = []
+      Args:
+          room_size (int, optional): _description_. Defaults to 7.
+          num_rows (int, optional): _description_. Defaults to 3.
+          num_cols (int, optional): _description_. Defaults to 3.
+          num_dists (int, optional): _description_. Defaults to 10.
+          locations (bool, optional): _description_. Defaults to False.
+          unblocking (bool, optional): _description_. Defaults to False.
+          implicit_unlock (bool, optional): _description_. Defaults to False.
+          fixed_door_locs (bool, optional): _description_. Defaults to True.
+      """
+      self._fixed_door_locs = fixed_door_locs
+      self._training = training
+      self._train_get_keys = train_get_keys
+      self._train_objects = []
+      self._transfer_objects = []
+      self._train_task_vectors = None # dummy
 
-        # object_types = OBJECT_TO_IDX.keys()
-        object_types = ['key', 'ball', 'box']
-        color_types = itertools.product(COLOR_NAMES, object_types)
-        self.token_2_idx = {make_name(color, type): idx for idx, (color, type) in enumerate(color_types)}
-        self.idx_2_token = {idx: name for name, idx in self.token_2_idx.items()}
+      # object_types = OBJECT_TO_IDX.keys()
+      object_types = ['key', 'ball', 'box']
+      color_types = itertools.product(COLOR_NAMES, object_types)
+      self.name_2_idx = {make_name(color, type): idx for idx, (color, type) in enumerate(color_types)}
+      self.idx_2_name = {idx: name for name, idx in self.name_2_idx.items()}
 
-        super().__init__(
-            room_size=room_size,
-            num_rows=num_rows,
-            num_cols=num_cols,
-            num_dists=num_dists,
-            locations=locations, # randomize locations?
-            unblocking=unblocking,  # require need to unblock
-            implicit_unlock=implicit_unlock,
-            **kwargs,
-        )
-        cumulants_space = spaces.Box(
-            low=0,
-            high=100.0,
-            shape=(self.nfeatures,),  # number of cells
-            dtype="float32",
-        )
+      super().__init__(
+          room_size=room_size,
+          num_rows=num_rows,
+          num_cols=num_cols,
+          num_dists=num_dists,
+          locations=locations, # randomize locations?
+          unblocking=unblocking,  # require need to unblock
+          implicit_unlock=implicit_unlock,
+          **kwargs,
+      )
+      cumulants_space = spaces.Box(
+          low=0,
+          high=100.0,
+          shape=(self.nfeatures,),  # number of cells
+          dtype="float32",
+      )
 
-        self._train_tasks = list(itertools.product(self.train_colors, self.train_objects))
-        self._ntrain_tasks = len(self._train_tasks)
-        self._train_task_vectors = np.identity(self._ntrain_tasks)
+      # 1 generation to get self._train_objects (which are fixed across episodes)
+      self.reset()
 
-        train_task_vectors = spaces.Box(
-            low=0,
-            high=100.0,
-            shape=(self._ntrain_tasks, self.nfeatures,),  # number of cells
-            dtype="float32",
-        )
-        self.observation_space = spaces.Dict(
-            {**self.observation_space.spaces,
-             "state_features": cumulants_space,
-             "task_vector": copy.deepcopy(cumulants_space),  # equivalent specs
-             "train_task_vectors": train_task_vectors,
-            }
-        )
+      self._train_tasks = [make_name(o.color, o.type) for o in self._train_objects]
+      # overwritten with correct, [n_train_tasks, n_features]
+      self._train_task_vectors = np.array([
+         onehot(self.name_2_idx[token], self.nfeatures) for token in self._train_tasks])
+
+      train_task_vectors = spaces.Box(
+          low=0,
+          high=100.0,
+          shape=self._train_task_vectors.shape,  # number of cells
+          dtype="float32",
+      )
+      self.observation_space = spaces.Dict(
+          {**self.observation_space.spaces,
+            "state_features": cumulants_space,
+            "task": copy.deepcopy(cumulants_space),  # equivalent specs
+            "train_tasks": train_task_vectors,
+          }
+      )
 
     @property
     def train_colors(self):
       return COLOR_NAMES[:4]
 
     @property
-    def train_objects(self):
-      return ['ball']
-
-    @property
     def nfeatures(self):
-        return len(self.token_2_idx)
+      return len(self.name_2_idx)
 
     def make_features(self, idx: Optional[Union[List, int]]=None):
         state_features = np.zeros(self.nfeatures)
@@ -213,7 +219,7 @@ class KeyRoom(LevelGen):
             obj = self._train_objects[idx]
             obj_desc = ObjDesc(obj.type, obj.color)
 
-        obj_idx = self.token_2_idx[make_name(obj.color, obj.type)]
+        obj_idx = self.name_2_idx[make_name(obj.color, obj.type)]
         self.task_vector[obj_idx] = 1
 
         self.instrs = DummyInstr()
@@ -223,7 +229,7 @@ class KeyRoom(LevelGen):
     def update_obs(self, obs):
       state_features = self.make_features()
       if self.carrying:
-          obj_idx = self.token_2_idx[
+          obj_idx = self.name_2_idx[
               make_name(self.carrying.color, self.carrying.type)]
           state_features[obj_idx] = 1
 
