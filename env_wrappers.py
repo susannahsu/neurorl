@@ -207,7 +207,7 @@ class GotoOptionsWrapper(Wrapper):
         self.observation_space = spaces.Dict(
             {**self.observation_space.spaces,
              "actions": actions_space,
-             "options": options_space
+             "objects": options_space
              }
         )
 
@@ -259,9 +259,9 @@ class GotoOptionsWrapper(Wrapper):
       # Update observation
       #############
       obs['actions'] = self.primitive_actions_arr
-      obs['options'] = object_info
+      obs['objects'] = object_info
       info['nactions'] = len(self.primitive_actions_arr) + nobjects
-      info['noptions'] = nobjects
+      info['nobjects'] = nobjects
 
       info['actions'] = self.primitive_actions + [
         f'go to {IDX_TO_COLOR[o.color]} {IDX_TO_OBJECT[o.type]}' for o in visible_objects

@@ -516,7 +516,41 @@ class UsfaArch(hk.RNNCore):
     predictions = hk.BatchApply(self._head)(head_inputs)  # [T, B, A]
     return predictions, new_states
 
-def make_minigrid_networks(
+def make_minigrid_architecture(
+        env_spec: specs.EnvironmentSpec,
+        config: Config) -> networks_lib.UnrollableNetwork:
+  """Builds default USFA networks for Minigrid games."""
+
+  num_actions = env_spec.actions.num_values
+  state_features_dim = env_spec.observations.observation.state_feature.shape[0]
+
+  def make_core_module() -> UsfaArch:
+    vision_torso = networks.AtariVisionTorso(
+      conv_dim=config.conv_out_dim,
+      out_dim=config.state_dim)
+
+    observation_fn = networks.OarTorso(
+      num_actions=num_actions,
+      vision_torso=vision_torso,
+      output_fn=networks.TorsoOutput,
+    )
+
+    usfa_head = UsfaHead(
+      num_actions=num_actions,
+      state_features_dim=state_features_dim,
+      nsamples=config.nsamples,
+      eval_task_support=config.eval_task_support)
+
+    return UsfaArch(
+      torso=observation_fn,
+      memory=hk.LSTM(config.state_dim),
+      head=usfa_head)
+
+  return networks_lib.make_unrollable_network(
+    env_spec, make_core_module)
+
+
+def make_object_oriented_minigrid_architecture(
         env_spec: specs.EnvironmentSpec,
         config: Config) -> networks_lib.UnrollableNetwork:
   """Builds default USFA networks for Minigrid games."""

@@ -22,21 +22,28 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.
 ```
 
 # Install
-Run `bash install-fas.sh` changing `LD_LIBRARY_PATH` on `line 41` as needed.
+Change `LD_LIBRARY_PATH` in `install-fas.sh` as needed based on above
+```
+chmod u+x install-fas.sh
+./install-fas.sh
+```
+
+## (Optionally) permanently set the results directory
+```
+echo 'export RL_RESULTS_DIR=${results_dir}' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
+```
+
+Otherwise, can set each time run experiment
+```
+RL_RESULTS_DIR=${results_dir} python trainer.pu
+```
 
 
 ## Running experiments
 
-Set up environment:
 ```
-module load cuda/11.3.1-fasrc01  
-module load cudnn/8.9.2.26_cuda11-fasrc01
-module load gcc/9.5.0-fasrc01
-```
-
-Set the results directory
-```
-export RL_RESULTS_DIR=results_dir
-# optionally add to conda activation
-echo 'export RL_RESULTS_DIR=results_dir' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
+# load environment
+source activate humansf 
+# run experiment
+python trainer.py
 ```

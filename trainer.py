@@ -12,6 +12,7 @@ import launchpad as lp
 from acme.wrappers import GymWrapper
 from acme import wrappers as acme_wrappers
 from acme.jax import experiments
+import gymnasium
 import dm_env
 import minigrid
 
@@ -58,16 +59,16 @@ def make_environment(seed: int,
   fixed_door_locs = False if evaluation else True
 
   # create gym environment
-  env = envs.KeyRoom(
+  gymnasium.Gym: env = envs.KeyRoom(
     num_dists=0,
     fixed_door_locs=fixed_door_locs)
   
   # add wrappers
-  for w in gym_wrappers:
-    env = w(env)
+  for wrapper in gym_wrappers:
+    env = wrapper(env)
 
-  # convert to dm_environment
-  env = GymWrapper(env)
+  # convert to dm_env Enironment
+  dm_env.Environment: env = GymWrapper(env)
 
   # add acme wrappers
   wrapper_list = [
@@ -99,10 +100,6 @@ def setup_experiment_inputs(
     env_kwargs = utils.load_config(env_config_file)
   logging.info(f'env_kwargs: {str(env_kwargs)}')
 
-  environment_factory = functools.partial(
-    make_environment,
-    **env_kwargs)
-
   # -----------------------
   # load agent config, builder, network factory
   # -----------------------
@@ -128,13 +125,21 @@ def setup_experiment_inputs(
   else:
     raise NotImplementedError(agent)
 
+  # -----------------------
+  # load environment factory
+  # -----------------------
+
+  environment_factory = functools.partial(
+    make_environment,
+    **env_kwargs)
+
 
   # -----------------------
   # setup observer factory for environment
+  # this logs the average every reset=50 episodes (instead of every episode)
   # -----------------------
   observers = [
       utils.LevelAvgReturnObserver(
-              # get_task_name=lambda env: str(env.env.current_levelname),
               reset=50 if not debug else 5),
       ]
 
@@ -207,7 +212,6 @@ def train_single(
               terminal='current_terminal',
               local_resources=local_resources)
     controller.wait(return_on_first_completed=True)
-    logging.warning("Controller finished")
     controller._kill()
 
   else:
@@ -261,10 +265,6 @@ def main(_):
   # env setup
   # -----------------------
   default_env_kwargs = dict(
-      # tasks_file=FLAGS.tasks_file,
-      # room_size=FLAGS.room_size,
-      # num_dists=1,
-      # partial_obs=False,
   )
   agent_config_kwargs = dict()
   if FLAGS.debug:

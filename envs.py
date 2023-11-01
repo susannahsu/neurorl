@@ -52,6 +52,7 @@ class KeyRoom(LevelGen):
         locations=False,
         unblocking=False,
         implicit_unlock=False,
+        train_get_keys: bool = True,
         training: bool = True,
         fixed_door_locs:bool=True,
         **kwargs):
@@ -69,8 +70,9 @@ class KeyRoom(LevelGen):
         """
         self._fixed_door_locs = fixed_door_locs
         self._training = training
-        self._goal_objects = []
-        self._non_goal_objects = []
+        self._train_get_keys = train_get_keys
+        self._train_objects = []
+        self._transfer_objects = []
 
         # object_types = OBJECT_TO_IDX.keys()
         object_types = ['key', 'ball', 'box']
@@ -144,8 +146,8 @@ class KeyRoom(LevelGen):
         Returns:
             _type_: _description_
         """
-        self._goal_objects = []
-        self._non_goal_objects = []
+        self._train_objects = []
+        self._transfer_objects = []
         self.task_vector = np.zeros(self.nfeatures)
 
         ###########################
@@ -187,8 +189,9 @@ class KeyRoom(LevelGen):
             ball = Ball(key_colors[i])
             self.place_in_room(*goal_room_coords[i], ball)
 
-            self._goal_objects.append(ball)
-            self._non_goal_objects.append(key)
+            self._train_objects.append(ball)
+            if self._train_get_keys:
+              self._train_objects.append(key)
 
         ###########################
         # place non-task object
@@ -198,15 +201,16 @@ class KeyRoom(LevelGen):
         for i in range(len(key_colors)):
             box = Box(box_colors[i])
             self.place_in_room(*goal_room_coords[i], box)
+            self._transfer_objects.append(box)
 
         # Generate random instructions
         if self._training:
-            idx = np.random.randint(len(self._goal_objects))
-            obj = self._goal_objects[idx]
+            idx = np.random.randint(len(self._train_objects))
+            obj = self._train_objects[idx]
             obj_desc = ObjDesc(obj.type, obj.color)
         else:
-            idx = np.random.randint(len(self._non_goal_objects))
-            obj = self._goal_objects[idx]
+            idx = np.random.randint(len(self._transfer_objects))
+            obj = self._train_objects[idx]
             obj_desc = ObjDesc(obj.type, obj.color)
 
         obj_idx = self.token_2_idx[make_name(obj.color, obj.type)]
@@ -240,7 +244,7 @@ class KeyRoom(LevelGen):
         return obs, reward, terminated, truncated, info
 
     def all_types(self):
-        return set(self._goal_objects+self._non_goal_objects)
+        return set(self._train_objects+self._transfer_objects)
 
     def _gen_grid(self, width, height):
         # We catch RecursionError to deal with rare cases where
