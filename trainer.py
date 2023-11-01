@@ -245,7 +245,11 @@ def setup_wandb_init_kwargs():
       save_code=False,
   )
   search = FLAGS.search or 'default'
-  wandb_init_kwargs['group'] = search
+  if FLAGS.train_single:
+    wandb_init_kwargs['group'] = FLAGS.wandb_group or search
+  else:
+    wandb_init_kwargs['group'] = search
+
   if FLAGS.wandb_name:
     wandb_init_kwargs['name'] = FLAGS.wandb_name
 
