@@ -33,9 +33,9 @@ class GymWrapper(dm_env.Environment):
   def reset(self) -> dm_env.TimeStep:
     """Resets the episode."""
     self._reset_next_step = False
-    observation = self._environment.reset()
+    observation, info = self._environment.reset()
     # Reset the diagnostic information.
-    self._last_info = None
+    self._last_info = info
     return dm_env.restart(observation)
 
   def step(self, action: types.NestedArray) -> dm_env.TimeStep:
@@ -43,8 +43,9 @@ class GymWrapper(dm_env.Environment):
     if self._reset_next_step:
       return self.reset()
 
-    observation, reward, done, info = self._environment.step(action)
+    observation, reward, done, truncated, info = self._environment.step(action)
     self._reset_next_step = done
+    self._last_truncated = truncated
     self._last_info = info
 
     # Convert the type of the reward based on the spec, respecting the scalar or
@@ -57,7 +58,6 @@ class GymWrapper(dm_env.Environment):
         self.reward_spec())
 
     if done:
-      truncated = info.get('TimeLimit.truncated', False)
       if truncated:
         return dm_env.truncation(reward, observation)
       return dm_env.termination(reward, observation)
