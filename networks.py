@@ -153,10 +153,13 @@ class OarTorso(hk.Module):
     self._w_init = w_init
 
   def __call__(self, inputs: observation_action_reward.OAR):
-    batched = len(inputs.observation['image'].shape) == 4
-    observation_fn = self.unbatched
-    if batched:
-      observation_fn = jax.vmap(observation_fn)
+    if len(inputs.observation['image'].shape) == 3:
+      observation_fn = self.unbatched
+    elif len(inputs.observation['image'].shape) == 4:
+      observation_fn = jax.vmap(self.unbatched)
+    else:
+      raise NotImplementedError
+
     return observation_fn(inputs)
 
   def unbatched(self, inputs: observation_action_reward.OAR):
@@ -172,7 +175,6 @@ class OarTorso(hk.Module):
     # compute image encoding
     inputs = jax.tree_map(lambda x: x.astype(jnp.float32), inputs)
     image = self._vision_torso(inputs.observation['image']/255.0)
-
     if self._flatten_image:
       image = jnp.reshape(image, (-1))
 
