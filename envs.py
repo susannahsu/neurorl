@@ -233,8 +233,8 @@ class KeyRoom(LevelGen):
               make_name(self.carrying.color, self.carrying.type)]
           state_features[obj_idx] = 1
 
-      obs['task_vector'] = self.task_vector
-      obs['train_task_vectors'] = self._train_task_vectors
+      obs['task'] = self.task_vector
+      obs['train_tasks'] = self._train_task_vectors
       obs['state_features'] = state_features
 
     def reset(self, *args, **kwargs):

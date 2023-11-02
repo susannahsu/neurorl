@@ -183,8 +183,9 @@ class GotoOptionsWrapper(Wrapper):
           self.actions.pickup,
           self.actions.drop,
           self.actions.toggle,
+          self.actions.done,  # does nothing
         ]
-        self.primitive_actions_arr = np.range(len(self.primitive_actions))
+        self.primitive_actions_arr = np.array([int(a) for a in self.primitive_actions])
         self.max_options = max_options
 
         if not partial_obs:
