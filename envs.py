@@ -56,6 +56,7 @@ class KeyRoom(LevelGen):
       num_dists=10,
       locations=False,
       unblocking=False,
+      max_steps_per_room: int = 50,
       implicit_unlock=False,
       train_get_keys: bool = True,
       training: bool = True,
@@ -96,12 +97,7 @@ class KeyRoom(LevelGen):
           implicit_unlock=implicit_unlock,
           **kwargs,
       )
-      cumulants_space = spaces.Box(
-          low=0,
-          high=100.0,
-          shape=(self.nfeatures,),  # number of cells
-          dtype="float32",
-      )
+      self._max_steps = max_steps_per_room*self.num_navs_needed(),
 
       # 1 generation to get self._train_objects (which are fixed across episodes)
       self.reset()
@@ -111,6 +107,12 @@ class KeyRoom(LevelGen):
       self._train_task_vectors = np.array([
          onehot(self.name_2_idx[token], self.nfeatures) for token in self._train_tasks])
 
+      cumulants_space = spaces.Box(
+          low=0,
+          high=100.0,
+          shape=(self.nfeatures,),  # number of cells
+          dtype="float32",
+      )
       train_task_vectors = spaces.Box(
           low=0,
           high=100.0,
@@ -246,7 +248,15 @@ class KeyRoom(LevelGen):
         obs, reward, terminated, truncated, info = super().step(action, **kwargs)
 
         self.update_obs(obs)
-        reward = float(self.instruction.verify(action) == "success")
+
+        if self.instruction.verify(action) == "success":
+           reward = 1.0
+           terminated = True
+
+        if self.step_count >= self.max_steps:
+            truncated = True
+            terminated = True
+
         return obs, reward, terminated, truncated, info
 
     def all_types(self):
@@ -279,6 +289,6 @@ class KeyRoom(LevelGen):
         # self.surface = self.instrs.surface(self)
         # self.mission = self.surface
 
-    def num_navs_needed(self, instr) -> int:
+    def num_navs_needed(self, instr: str = None) -> int:
         return 2
 

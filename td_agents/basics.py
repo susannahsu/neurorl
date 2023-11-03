@@ -55,7 +55,7 @@ import rlax
 import tree
 import typing_extensions
 
-_PMAP_AXIS_NAME = 'data'
+PMAP_AXIS_NAME = 'data'
 LossFn = learning_lib.LossFn
 TrainingState = learning_lib.TrainingState
 ReverbUpdate = learning_lib.ReverbUpdate
@@ -178,42 +178,42 @@ class RecurrentLossFn(learning_lib.LossFn):
 
     unroll = network.unroll  # convenience
 
-    # Convert sample data to sequence-major format [T, B, ...].
-    data = utils.batch_to_sequence(batch.data)
     if self.clip_rewards:
       data = data._replace(reward=jnp.clip(data.reward, -self.max_abs_reward, self.max_abs_reward))
-
 
     # Get core state & warm it up on observations for a burn-in period.
     if self.store_lstm_state:
       # Replay core state.
-      online_state = jax.tree_map(lambda x: x[0], data.extras['core_state'])
+      online_state = utils.maybe_recover_lstm_type(
+            batch.data.extras.get('core_state'))
     else:
       _, batch_size = data.action.shape
       key_grad, key = jax.random.split(key_grad)
-      online_state = network.initial_state.apply(params, key, batch_size)
+      online_state = network.init_recurrent_state(key, batch_size)
     target_state = online_state
+
+    # Convert sample data to sequence-major format [T, B, ...].
+    data = utils.batch_to_sequence(batch.data)
 
     # Maybe burn the core state in.
     burn_in_length = self.burn_in_length
     if burn_in_length:
       burn_obs = jax.tree_map(lambda x: x[:burn_in_length], data.observation)
       key_grad, key1, key2 = jax.random.split(key_grad, 3)
-      _, online_state = unroll.apply(params, key1, burn_obs, online_state, key2)
+      _, online_state = unroll(params, key1, burn_obs, online_state)
       key_grad, key1, key2 = jax.random.split(key_grad, 3)
-      _, target_state = unroll.apply(target_params, key1, burn_obs,
-                                     target_state, key2)
+      _, target_state = unroll(target_params, key2, burn_obs,
+                                     target_state)
 
     # Only get data to learn on from after the end of the burn in period.
     data = jax.tree_map(lambda seq: seq[burn_in_length:], data)
 
     # Unroll on sequences to get online and target Q-Values.
-
     key_grad, key1, key2 = jax.random.split(key_grad, 3)
-    online_preds, online_state = unroll.apply(params, key1, data.observation, online_state, key2)
+    online_preds, online_state = unroll(params, key1, data.observation, online_state)
     key_grad, key1, key2 = jax.random.split(key_grad, 3)
-    target_preds, target_state = unroll.apply(target_params, key1, data.observation,
-                               target_state, key2)
+    target_preds, target_state = unroll(target_params, key2, data.observation,
+                               target_state)
 
     # ======================================================
     # losses
@@ -222,7 +222,7 @@ class RecurrentLossFn(learning_lib.LossFn):
     # Importance weighting.
     probs = batch.info.probability
     # [B]
-    importance_weights = (1. / (probs + 1e-6)).astype(online_preds.q.dtype)
+    importance_weights = (1. / (probs + 1e-6)).astype(online_preds.q_values.dtype)
     importance_weights **= self.importance_sampling_exponent
     importance_weights /= jnp.max(importance_weights)
     # -----------------------
@@ -301,7 +301,8 @@ class RecurrentLossFn(learning_lib.LossFn):
       mean_loss = jnp.mean(importance_weights * batch_loss) # []
       mean_loss += total_aux_batch_loss.mean() + total_aux_scalar_loss # []
 
-    metrics[Cls(self)]['loss_w_aux'] = mean_loss
+    if self.aux_tasks:
+      metrics[Cls(self)]['loss_w_aux'] = mean_loss
 
     # -----------------------
     # priorities
@@ -312,16 +313,16 @@ class RecurrentLossFn(learning_lib.LossFn):
     else:
       total_elemwise_error = elemwise_error
 
-    abs_td_error = jnp.abs(total_elemwise_error).astype(online_preds.q.dtype)
+    abs_td_error = jnp.abs(total_elemwise_error).astype(online_preds.q_values.dtype)
     max_priority = self.max_priority_weight * jnp.max(abs_td_error, axis=0)
     mean_priority = (1 - self.max_priority_weight) * jnp.mean(total_elemwise_error, axis=0)
     priorities = (max_priority + mean_priority)
 
-    reverb_update = learning_lib.ReverbUpdate(
+    reverb_priorities = learning_lib.ReverbUpdate(
         keys=batch.info.key,
         priorities=priorities
         )
-    extra = learning_lib.LossExtra(metrics=metrics, reverb_update=reverb_update)
+    extra = learning_lib.LossExtra(metrics=metrics, reverb_priorities=reverb_priorities)
 
     return mean_loss, extra
 
@@ -345,18 +346,16 @@ class SGDLearner(learning_lib.SGDLearner):
                logger: Optional[loggers.Logger] = None,
                num_sgd_steps_per_step: int = 1,
                grad_period: int = 0,
-               clear_sgd_cache_period: int = 0):
+               ):
     """Initialize the SGD learner."""
-    self.network = network
-    self._clear_sgd_cache_period = clear_sgd_cache_period
     self._grad_period = grad_period*num_sgd_steps_per_step
     if self._grad_period > 0:
       logging.warning(f'Logging gradients every {self._grad_period} steps')
 
+    self.network = network
     # Internalize the loss_fn with network.
-    # self._loss = jax.jit(functools.partial(loss_fn, self.network))
-    self._loss = jax.pmap(functools.partial(loss_fn, self.network),
-                          axis_name=_PMAP_AXIS_NAME)
+    self._loss = jax.jit(functools.partial(loss_fn, self.network))
+
     # SGD performs the loss, optimizer update and periodic target net update.
     def sgd_step(state: TrainingState,
                  batch: reverb.ReplaySample) -> Tuple[TrainingState, LossExtra]:
@@ -365,10 +364,12 @@ class SGDLearner(learning_lib.SGDLearner):
       (loss, extra), grads = jax.value_and_grad(self._loss, has_aux=True)(
           state.params, state.target_params, batch, rng_key, state.steps)
 
+      loss = jax.lax.pmean(loss, axis_name=PMAP_AXIS_NAME)
+      # Average gradients over pmap replicas before optimizer update.
+      grads = jax.lax.pmean(grads, axis_name=PMAP_AXIS_NAME)
       # Apply the optimizer updates
       updates, new_opt_state = optimizer.update(grads, state.opt_state)
       new_params = optax.apply_updates(state.params, updates)
-
 
       # Periodically update target networks.
       steps = state.steps + 1
@@ -379,8 +380,8 @@ class SGDLearner(learning_lib.SGDLearner):
                                                  target_update_period)
       elif isinstance(target_update_period, int):
         assert target_update_period >= 1
-        target_params = rlax.periodic_update(
-            new_params, state.target_params, steps, target_update_period)
+        target_params = optax.periodic_update(new_params, state.target_params,
+                                              steps, target_update_period)
       else:
         raise NotImplementedError(type(target_update_period))
 
@@ -388,6 +389,7 @@ class SGDLearner(learning_lib.SGDLearner):
           new_params, target_params, new_opt_state, steps, next_rng_key)
 
       extra.metrics.update({
+        '0.total_loss': loss,
         '0.grad_norm': optax.global_norm(grads),
         '0.update_norm': optax.global_norm(updates),
         '0.param_norm': optax.global_norm(new_params),
@@ -396,19 +398,20 @@ class SGDLearner(learning_lib.SGDLearner):
       return new_training_state, extra
 
     def postprocess_aux(extra: LossExtra) -> LossExtra:
-      reverb_update = jax.tree_map(lambda a: jnp.reshape(a, (-1, *a.shape[2:])),
-                                   extra.reverb_update)
+      reverb_priorities = jax.tree_util.tree_map(
+          lambda a: jnp.reshape(a, (-1, *a.shape[2:])), extra.reverb_priorities)
       return extra._replace(
-          metrics=jax.tree_map(jnp.mean, extra.metrics),
-          reverb_update=reverb_update)
+          metrics=jax.tree_util.tree_map(jnp.mean, extra.metrics),
+          reverb_priorities=reverb_priorities)
 
     # Update replay priorities
-    def update_priorities(reverb_update: ReverbUpdate) -> None:
+    def update_priorities(reverb_priorities: ReverbUpdate) -> None:
       if replay_client is None:
         return
       keys, priorities = tree.map_structure(
-          utils.fetch_devicearray,
-          (reverb_update.keys, reverb_update.priorities))
+          # Fetch array and combine device and batch dimensions.
+          lambda x: utils.fetch_devicearray(x).reshape((-1,) + x.shape[2:]),
+          (reverb_priorities.keys, reverb_priorities.priorities))
       replay_client.mutate_priorities(
           table=replay_table_name,
           updates=dict(zip(keys, priorities)))
@@ -416,7 +419,7 @@ class SGDLearner(learning_lib.SGDLearner):
     #####################################
     # Internalise agent components
     #####################################
-    self._data_iterator = utils.prefetch(data_iterator)
+    self._data_iterator = data_iterator
     self._replay_client = replay_client
     self._counter = counter or counting.Counter()
     # self._logger = logger or loggers.TerminalLogger('learner', time_delta=1.)
@@ -427,16 +430,13 @@ class SGDLearner(learning_lib.SGDLearner):
         serialize_fn=utils.fetch_devicearray,
         time_delta=1.,
         steps_key=self._counter.get_steps_key())
-    if self._num_sgd_steps_per_step > 1:
-      sgd_step = utils.process_multiple_batches(
-        sgd_step,
-        num_sgd_steps_per_step,
-        # get aux from 1st batch
-        postprocess_aux=lambda aux: jax.tree_map(lambda x: x[0], aux))
 
+    if num_sgd_steps_per_step > 1:
+      sgd_step = utils.process_multiple_batches(sgd_step, num_sgd_steps_per_step,
+                                                postprocess_aux)
+    self._sgd_step = jax.pmap(
+      sgd_step, axis_name=PMAP_AXIS_NAME, devices=jax.devices())
 
-    self.make_sgd_step = lambda: jax.pmap(sgd_step, axis_name=_PMAP_AXIS_NAME)
-    self._sgd_step = self.make_sgd_step()
     self._async_priority_updater = async_utils.AsyncExecutor(update_priorities)
 
 
@@ -449,13 +449,15 @@ class SGDLearner(learning_lib.SGDLearner):
     key_params, key_target, key_state = jax.random.split(random_key, 3)
     initial_params = self.network.init(key_params)
     initial_target_params = self.network.init(key_target)
-    self._state = TrainingState(
+    state = TrainingState(
         params=initial_params,
         target_params=initial_target_params,
         opt_state=optimizer.init(initial_params),
         steps=0,
         rng_key=key_state,
     )
+    self._state = utils.replicate_in_all_devices(state, jax.local_devices())
+    self._current_step = 0
 
     # Log how many parameters the network has.
     sizes = tree.map_structure(jnp.size, initial_params)
@@ -463,51 +465,47 @@ class SGDLearner(learning_lib.SGDLearner):
 
     logging.info('Total number of params: %.3g', total_params)
     from pprint import pprint
-    pprint(param_sizes(initial_params))
+    [logging.debug(f"{k}: {v}") for k,v in param_sizes(initial_params).items()]
 
   def step(self):
     """Takes one SGD step on the learner."""
     with jax.profiler.StepTraceAnnotation('step',
-                                          step_num=self._state.steps):
-      batch = next(self._data_iterator)
+                                          step_num=self._current_step):
+      prefetching_split = next(self._data_iterator)
+      # In this case the host property of the prefetching split contains only
+      # replay keys and the device property is the prefetched full original
+      # sample. Key is on host since it's uint64 type.
+      reverb_keys = prefetching_split.host
+      batch: reverb.ReplaySample = prefetching_split.device
+
       self._state, extra = self._sgd_step(self._state, batch)
-
-      try:
-        jax.tree_map(isbad, extra.metrics['mean_grad'])
-      except Exception as e:
-        from pprint import pprint
-        pprint(extra.metrics['mean_grad'])
-        pass
-
-      if self._grad_period and self._state.steps % self._grad_period == 0:
-        for k, v in extra.metrics['mean_grad'].items():
-          # first val
-          extra.metrics['mean_grad'][k] = next(iter(v.values())) 
-      else:
-        extra.metrics.pop('mean_grad')
 
       # Compute elapsed time.
       timestamp = time.time()
       elapsed = timestamp - self._timestamp if self._timestamp else 0
       self._timestamp = timestamp
 
-      if self._replay_client and extra.reverb_update:
-        reverb_update = extra.reverb_update._replace(keys=batch.info.key)
-        self._async_priority_updater.put(reverb_update)
+      if self._replay_client and extra.reverb_priorities is not None:
+        reverb_priorities = ReverbUpdate(reverb_keys, extra.reverb_priorities)
+        self._async_priority_updater.put(reverb_priorities)
 
       steps_per_sec = (self._num_sgd_steps_per_step / elapsed) if elapsed else 0
-      extra.metrics['steps_per_second'] = steps_per_sec
+      self._current_step, metrics = utils.get_from_first_device(
+          (self._state.steps, extra.metrics))
+
+      metrics['steps_per_second'] = steps_per_sec
+      if self._grad_period and self._state.steps % self._grad_period == 0:
+        for k, v in metrics['mean_grad'].items():
+          # first val
+          metrics['mean_grad'][k] = next(iter(v.values())) 
+      else:
+        metrics.pop('mean_grad', None)
 
       # Update our counts and record it.
       result = self._counter.increment(
           steps=self._num_sgd_steps_per_step, walltime=elapsed)
-      result.update(extra.metrics)
+      result.update(metrics)
       self._logger.write(result)
-
-      if self._clear_sgd_cache_period > 0:
-        if self._state.steps % self._clear_sgd_cache_period*self._state.steps == 0:
-          # clear cache
-          self._sgd_step = self.make_sgd_step()
 
 class Builder(r2d2.R2D2Builder):
   """TD agent Builder. Agent is derivative of R2D2 but may use different network/loss function

@@ -111,24 +111,6 @@ class R2D2Builder(r2d2.R2D2Builder):
         counter=counter,
         logger=logger_fn('learner'))
 
-  def make_actor(
-      self,
-      random_key: networks_lib.PRNGKey,
-      policy: r2d2_actor.R2D2Policy,
-      environment_spec: specs.EnvironmentSpec,
-      variable_source: Optional[core.VariableSource] = None,
-      adder: Optional[adders.Adder] = None,
-  ) -> acme.Actor:
-    del environment_spec
-    # Create variable client.
-    variable_client = variable_utils.VariableClient(
-        variable_source,
-        key='actor_variables',
-        update_period=self._config.variable_update_period)
-
-    return actors.GenericActor(
-        policy, random_key, variable_client, adder, backend='cpu')
-
   def make_policy(self,
                   networks: r2d2_networks.R2D2Networks,
                   environment_spec: specs.EnvironmentSpec,

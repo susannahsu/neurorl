@@ -185,7 +185,8 @@ class GotoOptionsWrapper(Wrapper):
           self.actions.toggle,
           self.actions.done,  # does nothing
         ]
-        self.primitive_actions_arr = np.array([int(a) for a in self.primitive_actions])
+        self.primitive_actions_arr = np.array(
+           [int(a) for a in self.primitive_actions], dtype=np.uint8)
         self.max_options = max_options
 
         if not partial_obs:
@@ -198,15 +199,17 @@ class GotoOptionsWrapper(Wrapper):
             shape=(len(self.primitive_actions),),  # number of cells
             dtype="uint8",
         )
-        options_space = spaces.Box(
+        self.max_dims_per_feature = 100
+        nfeatures = 5  # x-pos, y-pos, color, type, state
+        objects_space = spaces.Box(
             low=0, high=255, # doesn't matter
-            shape=(max_options,),  # number of cells
+            shape=(max_options, self.max_dims_per_feature*nfeatures),  # number of cells
             dtype="uint8",
         )
         self.observation_space = spaces.Dict(
             {**self.observation_space.spaces,
              "actions": actions_space,
-             "objects": options_space
+             "objects": objects_space
              }
         )
 
@@ -248,9 +251,20 @@ class GotoOptionsWrapper(Wrapper):
       #############
       # Create matrix with object information
       #############
-      object_info = np.zeros((self.max_options, 5), dtype=np.int32)
+      def make_onehot(idx):
+        x = np.zeros(self.max_dims_per_feature, dtype=np.uint8)
+        x[idx] = 1
+        return x
+      object_info = np.zeros(
+         (self.max_options, 5*self.max_dims_per_feature),
+         dtype=np.uint8)
       for idx, obj in enumerate(objects):
-        object_info[idx] = (*obj.local_pos, obj.type, obj.color, obj.state)
+        object_info[idx] = np.concatenate(
+           (make_onehot(obj.local_pos[0]),
+            make_onehot(obj.local_pos[1]),
+            make_onehot(obj.type),
+            make_onehot(obj.color),
+            make_onehot(obj.state)))
 
       #############
       # Update observation
@@ -346,6 +360,12 @@ class DictObservationSpaceWrapper(minigrid.wrappers.DictObservationSpaceWrapper)
             ),
           }
       )
+  def observation(self, obs):
+    obs["mission"] = self.string_to_indices(obs["mission"])
+    assert len(obs["mission"]) < self.max_words_in_mission
+    obs["mission"] += [0] * (self.max_words_in_mission - len(obs["mission"]))
+    obs["mission"] = np.array(obs["mission"])
+    return obs
 
 def main():
   from envs import KeyRoom

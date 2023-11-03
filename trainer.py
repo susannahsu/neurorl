@@ -9,7 +9,6 @@ from ray import tune
 from launchpad.nodes.python.local_multi_processing import PythonProcess
 import launchpad as lp
 
-from acme.wrappers import GymWrapper
 from acme import wrappers as acme_wrappers
 from acme.jax import experiments
 import gymnasium
@@ -47,14 +46,6 @@ def make_environment(seed: int,
   """
   del seed
 
-  gym_wrappers = [
-    env_wrappers.DictObservationSpaceWrapper,
-    functools.partial(env_wrappers.GotoOptionsWrapper,
-                      use_options=object_options,
-                      ),
-    functools.partial(minigrid.wrappers.RGBImgObsWrapper,
-                      tile_size=8),
-  ]
 
   fixed_door_locs = False if evaluation else True
 
@@ -64,6 +55,15 @@ def make_environment(seed: int,
     fixed_door_locs=fixed_door_locs)
   
   # add wrappers
+  gym_wrappers = [env_wrappers.DictObservationSpaceWrapper]
+  if object_options:
+    gym_wrappers.append(functools.partial(
+      env_wrappers.GotoOptionsWrapper, use_options=object_options))
+  
+  # MUST GO LAST. GotoOptionsWrapper exploits symbolic obs
+  gym_wrappers.append(functools.partial(
+    minigrid.wrappers.RGBImgPartialObsWrapper, tile_size=8))
+
   for wrapper in gym_wrappers:
     env = wrapper(env)
 
@@ -103,8 +103,8 @@ def setup_experiment_inputs(
   # -----------------------
   # load agent config, builder, network factory
   # -----------------------
-  agent = agent_config_kwargs.get('agent', 'usfa_flat')
-  if agent == 'usfa_flat':
+  agent = agent_config_kwargs.get('agent', 'flat_usfa')
+  if agent == 'flat_usfa':
     from td_agents import basics
     from td_agents import sf_agents
     config = sf_agents.Config(**config_kwargs)
@@ -119,9 +119,29 @@ def setup_experiment_inputs(
         max_priority_weight=config.max_priority_weight,
         bootstrap_n=config.bootstrap_n,
       ))
+    # NOTE: main differences below
     network_factory = functools.partial(
             sf_agents.make_minigrid_networks, config=config)
-
+    env_kwargs['object_options'] = False  # has no mechanism to select from object options since dependent on what agent sees
+  elif agent == 'object_usfa':
+    from td_agents import basics
+    from td_agents import sf_agents
+    config = sf_agents.Config(**config_kwargs)
+    builder = basics.Builder(
+      config=config,
+      get_actor_core_fn=sf_agents.get_actor_core,
+      LossFn=sf_agents.UsfaLossFn(
+        discount=config.discount,
+        importance_sampling_exponent=config.importance_sampling_exponent,
+        burn_in_length=config.burn_in_length,
+        max_replay_size=config.max_replay_size,
+        max_priority_weight=config.max_priority_weight,
+        bootstrap_n=config.bootstrap_n,
+      ))
+    # NOTE: main differences below
+    network_factory = functools.partial(
+            sf_agents.make_object_oriented_minigrid_networks, config=config)
+    env_kwargs['object_options'] = True  # has no mechanism to select from object options since dependent on what agent sees
   else:
     raise NotImplementedError(agent)
 
@@ -140,7 +160,7 @@ def setup_experiment_inputs(
   # -----------------------
   observers = [
       utils.LevelAvgReturnObserver(
-              reset=50 if not debug else 5),
+        reset=50 if not debug else 5),
       ]
 
   return experiment_builder.OnlineExperimentConfigInputs(
@@ -217,19 +237,6 @@ def train_single(
   else:
     experiments.run_experiment(experiment=experiment)
 
-def sweep(search: str = 'default'):
-  if search == 'default':
-    space = [
-        {
-            "seed": tune.grid_search([1]),
-            "agent": tune.grid_search(['usfa_flat']),
-        }
-    ]
-  else:
-    raise NotImplementedError(search)
-
-  return space
-
 def extract_first_config(grid_search_space):
   """Extract the very first possible setting from the search space."""
   first_config = {}
@@ -262,12 +269,24 @@ def setup_wandb_init_kwargs():
 
   return wandb_init_kwargs
 
+def sweep(search: str = 'default'):
+  if search == 'default':
+    space = [
+        {
+            "seed": tune.grid_search([1]),
+            "agent": tune.grid_search(['flat_usfa']),
+        }
+    ]
+  else:
+    raise NotImplementedError(search)
+
+  return space
+
 def main(_):
   default_env_kwargs = dict()
   agent_config_kwargs = dict()
-  if FLAGS.debug:
+  if FLAGS.debug or not FLAGS.parallel:
     agent_config_kwargs.update(dict(
-      show_gradients=1,
       samples_per_insert=1,
       min_replay_size=100,
     ))
