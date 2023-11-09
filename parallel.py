@@ -108,7 +108,8 @@ def create_and_run_program(
   """Create and run launchpad program
   """
 
-  agent = config.pop('agent', 'muzero')
+  agent = config.get('agent', None)
+	    assert agent
   cuda = config.pop('cuda', None)
   label = config.pop('label', DEFAULT_LABEL)
 
