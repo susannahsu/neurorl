@@ -16,12 +16,12 @@ from acme.agents.jax import actor_core as actor_core_lib
 from acme.wrappers import observation_action_reward
 
 from td_agents import basics
-from td_agents import r2d2
+from td_agents import q_learning
 
 import networks
 
 @dataclasses.dataclass
-class Config(r2d2.Config):
+class Config(q_learning.Config):
   eval_task_support: str = "train"
   nsamples: int = 0  # no samples outside of train vector
 

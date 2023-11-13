@@ -29,7 +29,7 @@ import optax
 import reverb
 import numpy as np
 
-from td_agents import r2d2
+from td_agents import q_learning
 # from agents.td_agent import learning_lib
 # from agents.td_agent.losses import R2D2Learning
 
@@ -318,11 +318,11 @@ class RecurrentLossFn(learning_lib.LossFn):
     mean_priority = (1 - self.max_priority_weight) * jnp.mean(total_elemwise_error, axis=0)
     priorities = (max_priority + mean_priority)
 
-    reverb_priorities = learning_lib.ReverbUpdate(
-        keys=batch.info.key,
-        priorities=priorities
-        )
-    extra = learning_lib.LossExtra(metrics=metrics, reverb_priorities=reverb_priorities)
+    # reverb_priorities = learning_lib.ReverbUpdate(
+    #     keys=batch.info.key,
+    #     priorities=priorities
+    #     )
+    extra = learning_lib.LossExtra(metrics=metrics, reverb_priorities=priorities)
 
     return mean_loss, extra
 
@@ -507,7 +507,7 @@ class SGDLearner(learning_lib.SGDLearner):
       result.update(metrics)
       self._logger.write(result)
 
-class Builder(r2d2.R2D2Builder):
+class Builder(q_learning.R2D2Builder):
   """TD agent Builder. Agent is derivative of R2D2 but may use different network/loss function
   """
   def __init__(self,
@@ -520,7 +520,7 @@ class Builder(r2d2.R2D2Builder):
     super().__init__(config=config)
 
     if get_actor_core_fn is None:
-      get_actor_core_fn = r2d2.get_actor_core
+      get_actor_core_fn = q_learning.get_actor_core
     self._get_actor_core_fn = get_actor_core_fn
     self._loss_fn = LossFn
 
