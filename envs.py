@@ -97,7 +97,7 @@ class KeyRoom(LevelGen):
           implicit_unlock=implicit_unlock,
           **kwargs,
       )
-      self._max_steps = max_steps_per_room*self.num_navs_needed(),
+      self._max_steps = max_steps_per_room*self.num_navs_needed()
 
       # 1 generation to get self._train_objects (which are fixed across episodes)
       self.reset()
@@ -253,7 +253,7 @@ class KeyRoom(LevelGen):
            reward = 1.0
            terminated = True
 
-        if self.step_count >= self.max_steps:
+        if self.step_count >= self._max_steps:
             truncated = True
             terminated = True
 
