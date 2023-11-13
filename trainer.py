@@ -1,4 +1,11 @@
+"""
+Running experiment:
+- python trainer.py --search='search_name'
 
+Debugging experiment:
+- python -m ipdb -c continue trainer.py --search='search_name' --debug=True
+
+"""
 import functools 
 
 from absl import flags
@@ -28,6 +35,8 @@ flags.DEFINE_string('search', 'default', 'which search to use.')
 flags.DEFINE_bool(
     'parallel', False, 'Run many or 1 experiments')
 flags.DEFINE_bool(
+    'debug', False, 'If in debugging mode, only 1st config is run.')
+flags.DEFINE_bool(
     'make_path', False, 'Create a path under `FLAGS>folder` for the experiment')
 flags.DEFINE_bool(
     'auto_name_wandb', False, 'automatically name wandb.')
@@ -54,7 +63,9 @@ def make_environment(seed: int,
     num_dists=0,
     fixed_door_locs=fixed_door_locs)
   
-  # add wrappers
+  ####################################
+  # Gym wrappers
+  ####################################
   gym_wrappers = [env_wrappers.DictObservationSpaceWrapper]
   if object_options:
     gym_wrappers.append(functools.partial(
@@ -70,6 +81,9 @@ def make_environment(seed: int,
   # convert to dm_env.Environment enironment
   env = GymWrapper(env)
 
+  ####################################
+  # ACME wrappers
+  ####################################
   # add acme wrappers
   wrapper_list = [
     acme_wrappers.ObservationActionRewardWrapper,
@@ -285,7 +299,7 @@ def sweep(search: str = 'default'):
 def main(_):
   default_env_kwargs = dict()
   agent_config_kwargs = dict()
-  if FLAGS.debug or not FLAGS.parallel:
+  if FLAGS.debug:
     agent_config_kwargs.update(dict(
       samples_per_insert=1,
       min_replay_size=100,
@@ -298,6 +312,7 @@ def main(_):
   # -----------------------
   wandb_init_kwargs = setup_wandb_init_kwargs()
   if FLAGS.parallel:
+    assert FLAGS.debug is False, 'only run debug if not running many things in parallel'
     parallel.run(
       wandb_init_kwargs=wandb_init_kwargs,
       default_env_kwargs=default_env_kwargs,
@@ -311,8 +326,9 @@ def main(_):
         num_actors=FLAGS.num_actors),
     )
   else:
-    first_config = extract_first_config(sweep(FLAGS.search))
-    agent_config_kwargs.update(**first_config)
+    if FLAGS.debug:
+      first_config = extract_first_config(sweep(FLAGS.search))
+      agent_config_kwargs.update(**first_config)
     train_single(
       wandb_init_kwargs=wandb_init_kwargs,
       default_env_kwargs=default_env_kwargs,
