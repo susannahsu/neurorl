@@ -109,7 +109,7 @@ def create_and_run_program(
   """
 
   agent = config.get('agent', None)
-	    assert agent
+  assert agent
   cuda = config.pop('cuda', None)
   label = config.pop('label', DEFAULT_LABEL)
 
