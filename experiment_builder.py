@@ -50,8 +50,6 @@ import utils
 # -----------------------
 
 # Flags which modify the behavior of the launcher.
-flags.DEFINE_string('agent_config', '', 'config file')
-flags.DEFINE_string('env_config', '', 'config file')
 flags.DEFINE_string('path', '.', 'config file')
 flags.DEFINE_bool(
     'run_distributed', False, 'Should an agent be executed in a distributed '
@@ -60,14 +58,12 @@ flags.DEFINE_integer('seed', 0, 'Random seed (experiment).')
 flags.DEFINE_integer('num_steps', 1_000_000,
                      'Number of environment steps to run for.')
 
-
 # -----------------------
 # wandb
 # -----------------------
 flags.DEFINE_bool('use_wandb', False, 'whether to log.')
 flags.DEFINE_string('wandb_project', None, 'wand project.')
 flags.DEFINE_string('wandb_entity', None, 'wandb entity')
-flags.DEFINE_string('wandb_dir', None, 'wandb directory')
 flags.DEFINE_string('wandb_group', '', 'same as wandb group. way to group runs.')
 flags.DEFINE_string('wandb_name', '', 'name of run. way to group runs.')
 flags.DEFINE_string('wandb_notes', '', 'notes for wandb.')

@@ -36,12 +36,24 @@ chmod u+x install-fas.sh
 ```
 echo 'export RL_RESULTS_DIR=${results_dir}' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
 ```
+example:
+```
+echo 'export RL_RESULTS_DIR=$HOME/rl_results' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
+```
 
 Otherwise, can set each time run experiment
 ```
-RL_RESULTS_DIR=${results_dir} python trainer.pu
+RL_RESULTS_DIR=${results_dir} python trainer.py
 ```
 
+## (Optional) setup wandb
+```
+pip install wandb
+wandb login
+```
+Once you set up a wandb project and have logged runs, group them by the following settings:
+- Group: name of search run
+- Name: name of individual runs (this aggregates all seeds together)
 
 # Running experiments
 

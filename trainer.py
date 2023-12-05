@@ -1,9 +1,15 @@
 """
-Running experiment:
-- python trainer.py --search='search_name'
+Running experiments:
+- multiple distributed experiments in parallel:
+    python trainer.py --search='default'
 
-Debugging experiment:
-- python -m ipdb -c continue trainer.py --search='search_name' --debug=True
+  - single asynchronous experiment with actor/learner/evaluator:
+    python trainer.py --search='default' --run_distributed=True --debug=True
+
+  - single synchronous experiment (most useful for debugging):
+    python trainer.py --search='default' --run_distributed=False --debug=True
+
+Change "search" to what you want to search over.
 
 """
 import functools 
@@ -30,16 +36,16 @@ import experiment_logger
 import parallel
 import utils
 
-
+flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')
-flags.DEFINE_bool(
-    'parallel', False, 'Run many or 1 experiments')
+flags.DEFINE_string(
+    'parallel', 'none', "none: run 1 experiment. sbatch: run many experiments with SBATCH. ray: run many experiments with say. use sbatch with SLUM or ray otherwise.")
 flags.DEFINE_bool(
     'debug', False, 'If in debugging mode, only 1st config is run.')
 flags.DEFINE_bool(
-    'make_path', False, 'Create a path under `FLAGS>folder` for the experiment')
+    'make_path', True, 'Create a path under `FLAGS>folder` for the experiment')
 flags.DEFINE_bool(
-    'auto_name_wandb', False, 'automatically name wandb.')
+    'auto_name_wandb', True, 'automatically name wandb.')
 FLAGS = flags.FLAGS
 
 def make_environment(seed: int,
@@ -94,30 +100,19 @@ def make_environment(seed: int,
 
 def setup_experiment_inputs(
     agent_config_kwargs: dict=None,
-    agent_config_file: str=None,
     env_kwargs: dict=None,
-    env_config_file: str=None,
     debug: bool = False,
   ):
   """Setup."""
-
-  # -----------------------
-  # load agent and environment kwargs (potentially from files)
-  # -----------------------
   config_kwargs = agent_config_kwargs or dict()
-  if agent_config_file:
-    config_kwargs = utils.load_config(agent_config_file)
-  logging.info(f'config_kwargs: {str(config_kwargs)}')
-
   env_kwargs = env_kwargs or dict()
-  if env_config_file:
-    env_kwargs = utils.load_config(env_config_file)
-  logging.info(f'env_kwargs: {str(env_kwargs)}')
 
   # -----------------------
   # load agent config, builder, network factory
   # -----------------------
-  agent = agent_config_kwargs.get('agent', 'flat_usfa')
+  agent = agent_config_kwargs.get('agent', '')
+  assert agent != '', 'please set agent'
+
   if agent == 'flat_usfa':
     from td_agents import basics
     from td_agents import sf_agents
@@ -167,7 +162,6 @@ def setup_experiment_inputs(
     make_environment,
     **env_kwargs)
 
-
   # -----------------------
   # setup observer factory for environment
   # this logs the average every reset=50 episodes (instead of every episode)
@@ -188,32 +182,20 @@ def setup_experiment_inputs(
   )
 
 def train_single(
-    default_env_kwargs: dict = None,
+    env_kwargs: dict = None,
     wandb_init_kwargs: dict = None,
     agent_config_kwargs: dict = None,
-    **kwargs,
+    log_dir: str = None,
+    num_actors: int = 1,
+    run_distributed: bool = False,
 ):
 
   debug = FLAGS.debug
 
   experiment_config_inputs = setup_experiment_inputs(
     agent_config_kwargs=agent_config_kwargs,
-    agent_config_file=FLAGS.agent_config,
-    env_kwargs=default_env_kwargs,
-    env_config_file=FLAGS.env_config,
+    env_kwargs=env_kwargs,
     debug=debug)
-
-  log_dir = FLAGS.folder or os.environ.get('RL_RESULTS_DIR', '/tmp/rl_results_dir')
-  if FLAGS.make_path:
-    log_dir = experiment_logger.gen_log_dir(
-        base_dir=log_dir,
-        hourminute=True,
-        date=True,
-    )
-    if FLAGS.auto_name_wandb and wandb_init_kwargs is not None:
-      date_time = experiment_logger.date_time(time=True)
-      logging.info(f'wandb name: {str(date_time)}')
-      wandb_init_kwargs['name'] = date_time
 
   logger_factory_kwargs = dict(
     actor_label="actor",
@@ -226,13 +208,12 @@ def train_single(
     log_dir=log_dir,
     wandb_init_kwargs=wandb_init_kwargs,
     logger_factory_kwargs=logger_factory_kwargs,
-    debug=debug,
-    **kwargs,
+    debug=debug
   )
-  if FLAGS.run_distributed:
+  if run_distributed:
     program = experiments.make_distributed_experiment(
         experiment=experiment,
-        num_actors=FLAGS.num_actors)
+        num_actors=num_actors)
 
     local_resources = {
         "actor": PythonProcess(env={"CUDA_VISIBLE_DEVICES": ""}),
@@ -251,43 +232,128 @@ def train_single(
   else:
     experiments.run_experiment(experiment=experiment)
 
-def extract_first_config(grid_search_space):
-  """Extract the very first possible setting from the search space."""
-  first_config = {}
-  if isinstance(grid_search_space, list):
-    grid_search_space = grid_search_space[0]
-  for param_name, param_values in grid_search_space.items():
-      first_value = next(iter(param_values.values()))[0]
-      first_config[param_name] = first_value
-  return first_config
-
 def setup_wandb_init_kwargs():
   if not FLAGS.use_wandb:
-    return None
+    return dict()
 
   wandb_init_kwargs = dict(
       project=FLAGS.wandb_project,
       entity=FLAGS.wandb_entity,
       notes=FLAGS.wandb_notes,
+      name=FLAGS.wandb_name,
+      group=FLAGS.search or 'default',
       save_code=False,
   )
-  search = FLAGS.search or 'default'
-
-  if FLAGS.parallel:
-    wandb_init_kwargs['group'] = search
-  else:
-    wandb_init_kwargs['group'] = FLAGS.wandb_group or search
-
-  if FLAGS.wandb_name:
-    wandb_init_kwargs['name'] = FLAGS.wandb_name
-
   return wandb_init_kwargs
+
+def run_single():
+  ########################
+  # default settings
+  ########################
+  env_kwargs = dict()
+  agent_config_kwargs = dict()
+  num_actors = FLAGS.num_actors
+  run_distributed = FLAGS.run_distributed
+  wandb_init_kwargs = setup_wandb_init_kwargs()
+  if FLAGS.debug:
+    agent_config_kwargs.update(dict(
+      samples_per_insert=1,
+      min_replay_size=100,
+    ))
+    env_kwargs.update(dict(
+    ))
+
+  folder = FLAGS.folder or os.environ.get('RL_RESULTS_DIR', None)
+  if not folder:
+    folder = '/tmp/rl_results'
+
+  if FLAGS.make_path:
+    # i.e. ${folder}/runs/${date_time}/
+    folder = parallel.gen_log_dir(
+        base_dir=os.path.join(folder, 'rl_results'),
+        hourminute=True,
+        date=True,
+    )
+
+  ########################
+  # override with config settings, e.g. from parallel run
+  ########################
+  if FLAGS.config_file:
+    configs = utils.load_config(FLAGS.config_file)
+    config = configs[FLAGS.config_idx-1]  # starts at 1 with SLURM
+    logging.info(f'loaded config: {str(config)}')
+
+    agent_config_kwargs.update(config['agent_config'])
+    env_kwargs.update(config['env_config'])
+    folder = config['folder']
+
+    num_actors = config['num_actors']
+    run_distributed = config['run_distributed']
+
+    wandb_init_kwargs['group'] = config['wandb_group']
+    wandb_init_kwargs['name'] = config['wandb_name']
+    wandb_init_kwargs['project'] = config['wandb_project']
+    wandb_init_kwargs['entity'] = config['wandb_entity']
+
+    if not config['use_wandb']:
+      wandb_init_kwargs = dict()
+
+
+  if FLAGS.debug and not FLAGS.subprocess:
+      configs = parallel.get_all_configurations(spaces=sweep(FLAGS.search))
+      first_agent_config, first_env_config = parallel.get_agent_env_configs(
+          config=configs[0])
+      agent_config_kwargs.update(first_agent_config)
+      env_kwargs.update(first_env_config)
+
+  train_single(
+    wandb_init_kwargs=wandb_init_kwargs,
+    env_kwargs=env_kwargs,
+    agent_config_kwargs=agent_config_kwargs,
+    log_dir=folder,
+    num_actors=num_actors,
+    run_distributed=run_distributed
+    )
+
+def run_many():
+  wandb_init_kwargs = setup_wandb_init_kwargs()
+
+  folder = FLAGS.folder or os.environ.get('RL_RESULTS_DIR', None)
+  if not folder:
+    folder = '/tmp/rl_results_dir'
+
+  assert FLAGS.debug is False, 'only run debug if not running many things in parallel'
+
+  if FLAGS.parallel == 'ray':
+    parallel.run_ray(
+      wandb_init_kwargs=wandb_init_kwargs,
+      use_wandb=FLAGS.use_wandb,
+      debug=FLAGS.debug,
+      folder=folder,
+      space=sweep(FLAGS.search),
+      make_program_command=functools.partial(
+        parallel.make_program_command,
+        trainer_filename=__file__,
+        run_distributed=FLAGS.run_distributed,
+        num_actors=FLAGS.num_actors),
+    )
+  elif FLAGS.parallel == 'sbatch':
+    parallel.run_sbatch(
+      trainer_filename=__file__,
+      wandb_init_kwargs=wandb_init_kwargs,
+      use_wandb=FLAGS.use_wandb,
+      folder=folder,
+      run_distributed=FLAGS.run_distributed,
+      search_name=FLAGS.search,
+      debug=FLAGS.debug_parallel,
+      spaces=sweep(FLAGS.search),
+      num_actors=FLAGS.num_actors)
 
 def sweep(search: str = 'default'):
   if search == 'default':
     space = [
         {
-            "seed": tune.grid_search([1]),
+            "seed": tune.grid_search([5,6,7,8]),
             "agent": tune.grid_search(['flat_usfa']),
         }
     ]
@@ -297,42 +363,11 @@ def sweep(search: str = 'default'):
   return space
 
 def main(_):
-  default_env_kwargs = dict()
-  agent_config_kwargs = dict()
-  if FLAGS.debug:
-    agent_config_kwargs.update(dict(
-      samples_per_insert=1,
-      min_replay_size=100,
-    ))
-    default_env_kwargs.update(dict(
-    ))
-
-  # -----------------------
-  # wandb setup
-  # -----------------------
-  wandb_init_kwargs = setup_wandb_init_kwargs()
-  if FLAGS.parallel:
-    assert FLAGS.debug is False, 'only run debug if not running many things in parallel'
-    parallel.run(
-      wandb_init_kwargs=wandb_init_kwargs,
-      default_env_kwargs=default_env_kwargs,
-      use_wandb=FLAGS.use_wandb,
-      debug=FLAGS.debug,
-      space=sweep(FLAGS.search),
-      make_program_command=functools.partial(
-        parallel.make_program_command,
-        filename='trainer.py',
-        run_distributed=FLAGS.run_distributed,
-        num_actors=FLAGS.num_actors),
-    )
+  assert FLAGS.parallel in ('ray', 'sbatch', 'none')
+  if FLAGS.parallel in ('ray', 'sbatch'):
+    run_many()
   else:
-    if FLAGS.debug:
-      first_config = extract_first_config(sweep(FLAGS.search))
-      agent_config_kwargs.update(**first_config)
-    train_single(
-      wandb_init_kwargs=wandb_init_kwargs,
-      default_env_kwargs=default_env_kwargs,
-      agent_config_kwargs=agent_config_kwargs)
+    run_single()
 
 if __name__ == '__main__':
   app.run(main)

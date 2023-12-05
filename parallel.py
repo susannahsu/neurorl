@@ -1,11 +1,13 @@
 from typing import Optional, Union, List, Dict
 
 from absl import flags
+from absl import logging
 
 import multiprocessing as mp
 import os
 import time
 import datetime
+import pickle 
 
 from pathlib import Path
 from ray import tune
@@ -16,13 +18,17 @@ from acme.utils import paths
 import utils
 
 flags.DEFINE_integer('num_actors', 1, 'number of actors.')
-flags.DEFINE_integer('num_cpus', 4, 'number of cpus.')
-flags.DEFINE_float('num_gpus', 1, 'number of gpus.')
-flags.DEFINE_bool('skip', True, 'whether to skip experiments that have already run.')
+flags.DEFINE_integer('config_idx', 1, 'number of actors.')
+flags.DEFINE_integer('num_cpus', 16, 'number of cpus.')
+flags.DEFINE_integer('memory', 1000, 'memory (in mbs).')
+flags.DEFINE_string('account', '', 'account on slurm servers to use.')
+flags.DEFINE_string('partition', 'kempner', 'account on slurm servers to use.')
+flags.DEFINE_integer('num_gpus', 1, 'number of gpus.')
+flags.DEFINE_bool('skip', False, 'whether to skip experiments that have already run.')
+flags.DEFINE_bool('subprocess', False, 'label for whether this run is a subprocess.')
+flags.DEFINE_bool('debug_parallel', False, 'whether to debug parallel runs.')
 
 FLAGS = flags.FLAGS
-
-DEFAULT_LABEL = ''
 
 def directory_not_empty(directory_path):
     return len(os.listdir(directory_path)) > 0
@@ -35,17 +41,17 @@ def date_time(time: bool=False):
 
 def gen_log_dir(
     base_dir="results/",
-    date=True,
+    date=False,
     hourminute=False,
     seed=None,
     return_kwpath=False,
     path_skip=[],
     **kwargs):
 
-  job_name = date_time(time=hourminute)
   kwpath = ','.join([f'{key[:4]}={value}' for key, value in kwargs.items() if not key in path_skip])
 
   if date:
+    job_name = date_time(time=hourminute)
     path = Path(base_dir).joinpath(job_name).joinpath(kwpath)
   else:
     path = Path(base_dir).joinpath(kwpath)
@@ -59,7 +65,6 @@ def gen_log_dir(
     return str(path)
 
 def make_program_command(
-    agent: str,
     folder: str,
     agent_config: str,
     env_config: str,
@@ -73,17 +78,14 @@ def make_program_command(
   wandb_group = wandb_init_kwargs['group']
   wandb_name = wandb_init_kwargs['name']
   wandb_entity = wandb_init_kwargs['entity']
-  wandb_dir = wandb_init_kwargs.get("dir", None)
 
   assert filename, 'please provide file'
   str = f"""python {filename}
-		--agent={agent}
 		--use_wandb=True
 		--wandb_project='{wandb_project}'
 		--wandb_entity='{wandb_entity}'
 		--wandb_group='{wandb_group}'
     --wandb_name='{wandb_name}'
-    --wandb_dir='{wandb_dir}'
     --folder='{folder}'
     --agent_config='{agent_config}'
     --env_config='{env_config}'
@@ -96,7 +98,7 @@ def make_program_command(
   return str
 
 
-def create_and_run_program(
+def create_and_run_ray_program(
     config,
     make_program_command,
     root_path: str = '.',
@@ -111,7 +113,6 @@ def create_and_run_program(
   agent = config.get('agent', None)
   assert agent
   cuda = config.pop('cuda', None)
-  label = config.pop('label', DEFAULT_LABEL)
 
   # -----------------------
   # update env kwargs with config. HACK
@@ -129,14 +130,11 @@ def create_and_run_program(
   for k,v in env_kwargs.items():
     if v != default_env_kwargs[k]:
       env_path[k]=v
-  if label:
-    env_path['L']=label
 
   # -----------------------
   # get log dir for experiment
   # -----------------------
-  log_path_config=dict(
-    agent=agent,
+  setting=dict(
     **env_path,
     **config
     )
@@ -189,9 +187,7 @@ def create_and_run_program(
   utils.save_config(agent_config_file, config)
   utils.save_config(env_config_file, env_kwargs)
 
-  #TODO: could be made more general...
   command = make_program_command(
-    agent=agent,
     wandb_init_kwargs=wandb_init_kwargs,
     folder=log_dir,
     agent_config=agent_config_file,
@@ -206,9 +202,10 @@ def create_and_run_program(
   process.wait()
 
 
-def run(
+def run_ray(
     wandb_init_kwargs: dict,
     default_env_kwargs: dict,
+    folder: str,
     space: Union[Dict, List[Dict]],
     use_wandb: bool = False,
     debug: bool = False,
@@ -216,7 +213,6 @@ def run(
 
   mp.set_start_method('spawn')
   root_path = str(Path().absolute())
-  folder = FLAGS.folder
   skip = FLAGS.skip
 
 
@@ -224,7 +220,7 @@ def run(
     """Run inside threads and creates new process.
     """
     p = mp.Process(
-      target=create_and_run_program, 
+      target=create_and_run_ray_program, 
       args=(config,),
       kwargs=dict(
         root_path=root_path,
@@ -264,3 +260,172 @@ def run(
     wandb_dir = wandb_init_kwargs.get("dir", './wandb')
     if os.path.exists(wandb_dir):
       shutil.rmtree(wandb_dir)
+
+def get_all_configurations(spaces: Union[Dict, List[Dict]]):
+    import itertools
+    all_settings = []
+    if isinstance(spaces, dict):
+      spaces = [spaces]
+    for space in spaces:
+      # Extract keys and their corresponding lists from the space dictionary
+      keys, value_lists = zip(*[(key, space[key]['grid_search']) for key in space])
+
+      # Generate the Cartesian product of the value lists
+      cartesian_product = itertools.product(*value_lists)
+
+      # Create a list of dictionaries for each combination
+      all_settings += [dict(zip(keys, values)) for values in cartesian_product]
+
+    return all_settings
+
+def get_agent_env_configs(config: dict, default_env_kwargs: Optional[dict]=None):
+  """
+  Separate config into agent and env configs. Example below. Basically if key starts with "env.", it goes into an env_config.
+  Example:
+  config = {
+    seed: 1,
+    width: 2,
+    env.room_size: 7
+  }
+  agent_config = {seed: 1, width: 2}
+  env_config = {room_size: 7}
+  """
+  agent_config = dict()
+  env_config = dict()
+
+  for k, v in config.items():
+    if 'env.' in k:
+      # e.g. "env.room_size"
+      env_config[k.strip("env.")] = v
+    elif default_env_kwargs and k in default_env_kwargs:
+      # e.g. "room_size"
+      env_config[k] = v
+    else:
+      agent_config[k] = v
+  
+  return agent_config, env_config
+
+def run_sbatch(
+    trainer_filename: str,
+    wandb_init_kwargs: dict,
+    folder: str,
+    search_name: str,
+    spaces: Union[Dict, List[Dict]],
+    use_wandb: bool = False,
+    num_actors: int = 4,
+    max_concurrent: int = 36,
+    debug: bool = False,
+    run_distributed: bool = True):
+  """For each possible configuration of a run, create a config entry. save a list of all config entries. When SBATCH is called, it will use the ${SLURM_ARRAY_TASK_ID} to run a particular one.
+  """
+
+  #################################
+  # create configs for all runs
+  #################################
+  root_path = str(Path().absolute())
+  configurations = get_all_configurations(spaces=spaces)
+  save_configs = []
+  for config in configurations:
+    # either look for group name in setting, wandb_init_kwargs, or use search name
+    if 'group' in config:
+      group = config.pop('group')
+    else:
+      group = wandb_init_kwargs.get('group', search_name)
+
+    agent_config, env_config = get_agent_env_configs(
+        config=config)
+
+    # dir will be root_path/folder/group/exp_name
+    # exp_name is also name in wandb
+    log_dir, exp_name = gen_log_dir(
+      base_dir=os.path.join(root_path, folder, group),
+      return_kwpath=True,
+      path_skip=['num_steps', 'num_learner_steps', 'group'],
+      **config,
+      )
+
+    save_config = dict(
+      agent_config=agent_config,
+      env_config=env_config,
+      use_wandb=use_wandb,
+      wandb_group=group,
+      wandb_name=exp_name,
+      wandb_project=wandb_init_kwargs['project'],
+      wandb_entity=wandb_init_kwargs['entity'],
+      folder=log_dir,
+      num_actors=num_actors,
+      run_distributed=run_distributed,
+    )
+    save_configs.append(save_config)
+
+  #################################
+  # save configs for all runs
+  #################################
+  # root_path/run_{search_name}-date-hour.pkl
+  base_path = os.path.join(root_path, folder, 'runs')
+
+  paths.process_path(base_path)
+  base_filename = os.path.join(base_path, search_name, date_time(time=True))
+  configs_file = f"{base_filename}_config.pkl"
+  with open(configs_file, 'wb') as fp:
+      pickle.dump(save_configs, fp)
+      logging.info(f'Saved: {configs_file}')
+
+  #################################
+  # create run.sh file to run with sbatch
+  #################################
+  python_file_contents = f"python {trainer_filename}"
+  python_file_contents += f" --config_file={configs_file}"
+  python_file_contents += f" --use_wandb={use_wandb}"
+  python_file_contents += f" --num_actors={num_actors}"
+  if debug:
+    python_file_contents += f" --config_idx=1"
+  else:
+    python_file_contents += f" --config_idx=$SLURM_ARRAY_TASK_ID"
+  python_file_contents += f" --run_distributed={run_distributed}"
+  python_file_contents += f" --subprocess={True}"
+  python_file_contents += f" --make_path={False}"
+
+  run_file = f"{base_filename}_run.sh"
+
+  if debug:
+    # create file and run single python command
+    run_file_contents = "#!/bin/bash\n" + python_file_contents
+    logging.warning("only running first config")
+    print(run_file_contents)
+    with open(run_file, 'w') as file:
+      # Write the string to the file
+      file.write(run_file_contents)
+    process = subprocess.Popen(f"chmod +x {run_file}", shell=True)
+    process = subprocess.Popen(run_file, shell=True)
+    process.wait()
+    return
+
+  #################################
+  # create sbatch file
+  #################################
+  sbatch_contents = f"#SBATCH --gres=gpu:{FLAGS.num_gpus}\n"
+  sbatch_contents += f"#SBATCH -c {FLAGS.num_cpus}\n"
+  # sbatch_contents += f"#SBATCH --mem {FLAGS.memory}\n"
+  sbatch_contents += f"#SBATCH --mem-per-cpu={FLAGS.memory}\n"
+  sbatch_contents += f"#SBATCH -p {FLAGS.partition}\n"
+  sbatch_contents += f"#SBATCH --account {FLAGS.account}\n"
+  sbatch_contents += f"#SBATCH -o {base_filename}_%j.out\n"
+  sbatch_contents += f"#SBATCH -e {base_filename}_%j.err\n"
+
+  run_file_contents = "#!/bin/bash\n" + sbatch_contents + python_file_contents
+  print("-"*20)
+  print(run_file_contents)
+  print("-"*20)
+  with open(run_file, 'w') as file:
+    # Write the string to the file
+    file.write(run_file_contents)
+
+  total_jobs = len(save_configs)
+  max_concurrent = min(max_concurrent, total_jobs)
+  sbatch_command = f"sbatch --array=1-{total_jobs}%{max_concurrent} {run_file}"
+  logging.info(sbatch_command)
+  process = subprocess.Popen(f"chmod +x {run_file}", shell=True)
+  process = subprocess.Popen(sbatch_command, shell=True)
+  process.wait()
+
