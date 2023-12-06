@@ -1,4 +1,5 @@
 from __future__ import annotations
+from enum import Enum
 
 import copy
 from gymnasium import spaces
@@ -44,6 +45,33 @@ def onehot(index: int, size: int):
    x[index] = 1
    return x
 
+
+class TaskOptions(Enum):
+    keys = 0
+    keys_balls = 1
+    balls = 2
+    boxes = 3
+    keys_balls_boxes = 4
+
+def update_task_set(obj: WorldObj, task_option: TaskOptions, task_set: List[WorldObj]):
+  """Hacky way to update task set."""
+  if task_option == TaskOptions.balls.value:
+    if obj.type == 'ball': task_set.append(obj)
+  elif task_option == TaskOptions.keys.value:
+    if obj.type == 'key': task_set.append(obj)
+  elif task_option == TaskOptions.boxes.value:
+    if obj.type == 'box': task_set.append(obj)
+  elif task_option == TaskOptions.keys_balls.value:
+    if obj.type == 'key': task_set.append(obj)
+    if obj.type == 'ball': task_set.append(obj)
+  elif task_option == TaskOptions.keys_balls_boxes.value:
+    if obj.type == 'key': task_set.append(obj)
+    if obj.type == 'ball': task_set.append(obj)
+    if obj.type == 'box': task_set.append(obj)
+  else:
+      raise RuntimeError(
+          f"setting not known. Options: {TaskOptions}")
+
 class KeyRoom(LevelGen):
     """
 
@@ -58,7 +86,8 @@ class KeyRoom(LevelGen):
       unblocking=False,
       max_steps_per_room: int = 50,
       implicit_unlock=False,
-      train_get_keys: bool = True,
+      train_task_option: TaskOptions = 1,
+      transfer_task_option: TaskOptions = 2,
       training: bool = True,
       fixed_door_locs:bool=True,
       **kwargs):
@@ -76,7 +105,8 @@ class KeyRoom(LevelGen):
       """
       self._fixed_door_locs = fixed_door_locs
       self._training = training
-      self._train_get_keys = train_get_keys
+      self._train_task_option = train_task_option
+      self._transfer_task_option = transfer_task_option
       self._train_objects = []
       self._transfer_objects = []
       self._train_task_vectors = None # dummy
@@ -185,6 +215,7 @@ class KeyRoom(LevelGen):
         goal_room_idxs = permute(goal_room_idxs)
         goal_room_coords = permute(goal_room_coords)
 
+        room_objects = []
         for i in range(len(key_colors)):
             key = Key(key_colors[i])
             self.place_in_room(*center_room, key)
@@ -196,10 +227,9 @@ class KeyRoom(LevelGen):
 
             ball = Ball(key_colors[i])
             self.place_in_room(*goal_room_coords[i], ball)
+            room_objects.append(ball)
+            room_objects.append(key)
 
-            self._train_objects.append(ball)
-            if self._train_get_keys:
-              self._train_objects.append(key)
 
         ###########################
         # place non-task object
@@ -209,7 +239,11 @@ class KeyRoom(LevelGen):
         for i in range(len(key_colors)):
             box = Box(box_colors[i])
             self.place_in_room(*goal_room_coords[i], box)
-            self._transfer_objects.append(box)
+            room_objects.append(box)
+
+        for obj in room_objects:
+            update_task_set(obj, self._train_task_option, self._train_objects)
+            update_task_set(obj, self._transfer_task_option, self._transfer_objects)
 
         # Generate random instructions
         if self._training:
@@ -218,7 +252,7 @@ class KeyRoom(LevelGen):
             obj_desc = ObjDesc(obj.type, obj.color)
         else:
             idx = np.random.randint(len(self._transfer_objects))
-            obj = self._train_objects[idx]
+            obj = self._transfer_objects[idx]
             obj_desc = ObjDesc(obj.type, obj.color)
 
         obj_idx = self.name_2_idx[make_name(obj.color, obj.type)]
