@@ -107,6 +107,7 @@ class KeyRoom(LevelGen):
       self._training = training
       self._train_task_option = train_task_option
       self._transfer_task_option = transfer_task_option
+      self.task_option = self._train_task_option if training else self._transfer_task_option
       self._train_objects = []
       self._transfer_objects = []
       self._train_task_vectors = None # dummy
@@ -210,7 +211,6 @@ class KeyRoom(LevelGen):
 
         def permute(x):
             return [x[i] for i in key_idxs]
-
 
         goal_room_idxs = permute(goal_room_idxs)
         goal_room_coords = permute(goal_room_coords)

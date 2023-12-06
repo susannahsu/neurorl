@@ -50,6 +50,8 @@ FLAGS = flags.FLAGS
 
 def make_environment(seed: int,
                      object_options: bool = True,
+                     train_task_option: envs.TaskOptions = 1,
+                     transfer_task_option: envs.TaskOptions = 3,
                      evaluation: bool = False) -> dm_env.Environment:
   """Loads environments.
   
@@ -67,6 +69,8 @@ def make_environment(seed: int,
   # create gymnasium.Gym environment
   env = envs.KeyRoom(
     num_dists=0,
+    train_task_option=train_task_option,
+    transfer_task_option=transfer_task_option,
     fixed_door_locs=fixed_door_locs)
   
   ####################################
@@ -168,7 +172,9 @@ def setup_experiment_inputs(
   # -----------------------
   observers = [
       utils.LevelAvgReturnObserver(
-        reset=50 if not debug else 5),
+        reset=50 if not debug else 5,
+        get_task_name=lambda e: envs.TaskOptions(e.task_option).name
+        ),
       ]
 
   return experiment_builder.OnlineExperimentConfigInputs(
@@ -353,7 +359,9 @@ def sweep(search: str = 'default'):
   if search == 'flat':
     space = [
         {
-            "seed": tune.grid_search([5,6,7,8]),
+            "seed": tune.grid_search([5,6]),
+            "train_task_option": tune.grid_search([0, 1, 4]),
+            "transfer_task_option": tune.grid_search([0, 3]),
             "eval_task_support": tune.grid_search(['train', 'eval']),
             "agent": tune.grid_search(['flat_usfa']),
         }
