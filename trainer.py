@@ -52,7 +52,8 @@ def make_environment(seed: int,
                      object_options: bool = True,
                      train_task_option: envs.TaskOptions = 1,
                      transfer_task_option: envs.TaskOptions = 3,
-                     evaluation: bool = False) -> dm_env.Environment:
+                     evaluation: bool = False,
+                     **kwargs) -> dm_env.Environment:
   """Loads environments.
   
   Args:
@@ -72,7 +73,8 @@ def make_environment(seed: int,
     training=not evaluation,
     train_task_option=train_task_option,
     transfer_task_option=transfer_task_option,
-    fixed_door_locs=fixed_door_locs)
+    fixed_door_locs=fixed_door_locs,
+    **kwargs)
   
   ####################################
   # Gym wrappers
@@ -372,6 +374,7 @@ def sweep(search: str = 'default'):
             "seed": tune.grid_search([1]),
             "env.train_task_option": tune.grid_search([0]),
             "env.transfer_task_option": tune.grid_search([0]),
+            "env.respawn": tune.grid_search([True, False]),
             "eval_task_support": tune.grid_search(['eval']),
             "importance_sampling_exponent": tune.grid_search([0]),
             "batch_size": tune.grid_search([32, 16]),

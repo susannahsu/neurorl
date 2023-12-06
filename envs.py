@@ -94,6 +94,7 @@ class KeyRoom(LevelGen):
       num_rows=3,
       num_cols=3,
       num_dists=10,
+      respawn: bool = True,
       locations=False,
       unblocking=False,
       max_steps_per_room: int = 100,
@@ -115,6 +116,7 @@ class KeyRoom(LevelGen):
           implicit_unlock (bool, optional): _description_. Defaults to False.
           fixed_door_locs (bool, optional): _description_. Defaults to True.
       """
+      self.respawn = respawn
       self._fixed_door_locs = fixed_door_locs
       self._training = training
       self._train_task_option = train_task_option
@@ -293,22 +295,24 @@ class KeyRoom(LevelGen):
         self.update_obs(obs)
         return obs, info
 
-    def replace_object(self, action):
-      if not self.carrying: return
+    def check_object_picked_up(self, action):
+      terminate = False
+      if not self.carrying:
+          return 0.0, terminate
 
       # get reward
       object = self.carrying
-      obj_idx = self.name_2_idx[make_name(object.color, object.type)]
+      object_name = make_name(object.color, object.type)
+      obj_idx = self.name_2_idx[object_name]
 
       reward = float(self.task_vector[obj_idx])
-
-      if self.instruction.verify(action) == "success":
+      if reward != 0.0:
         # reward = float(self.object2reward[obj_type])
         self.carrying = None
 
         if self.respawn:
           # move object
-          room = self.get_room(0, 0)
+          room = self.room_from_pos(*self.agent_pos)
 
           pos = self.place_obj(
               object,
@@ -319,18 +323,15 @@ class KeyRoom(LevelGen):
           )
           # self.object_occurrences[obj_idx] += 1
         else:
-          # self.remaining[obj_idx] -= 1
-          pass
+          terminate = True
+        return reward, terminate
 
-        return reward
-      return reward
+      return reward, terminate
 
     def step(self, action, **kwargs):
         obs, reward, terminated, truncated, info = super().step(action, **kwargs)
-
+        reward, terminated = self.check_object_picked_up(action)
         self.update_obs(obs)
-
-        reward = (obs['task']*obs['state_features']).sum(-1)
 
         # if self.instruction.verify(action) == "success":
         #    terminated = True
