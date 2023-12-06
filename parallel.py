@@ -23,6 +23,7 @@ flags.DEFINE_integer('num_cpus', 16, 'number of cpus.')
 flags.DEFINE_integer('memory', 1000, 'memory (in mbs).')
 flags.DEFINE_string('account', '', 'account on slurm servers to use.')
 flags.DEFINE_string('partition', 'kempner', 'account on slurm servers to use.')
+flags.DEFINE_string('time', '0-06:00:00', '6 hours.')
 flags.DEFINE_integer('num_gpus', 1, 'number of gpus.')
 flags.DEFINE_bool('skip', False, 'whether to skip experiments that have already run.')
 flags.DEFINE_bool('subprocess', False, 'label for whether this run is a subprocess.')
@@ -362,10 +363,10 @@ def run_sbatch(
   # save configs for all runs
   #################################
   # root_path/run_{search_name}-date-hour.pkl
-  base_path = os.path.join(root_path, folder, 'runs')
-
+  base_path = os.path.join(root_path, folder, 'runs', search_name)
   paths.process_path(base_path)
-  base_filename = os.path.join(base_path, search_name, date_time(time=True))
+
+  base_filename = os.path.join(base_path, date_time(time=True))
   configs_file = f"{base_filename}_config.pkl"
   with open(configs_file, 'wb') as fp:
       pickle.dump(save_configs, fp)
@@ -409,9 +410,10 @@ def run_sbatch(
   # sbatch_contents += f"#SBATCH --mem {FLAGS.memory}\n"
   sbatch_contents += f"#SBATCH --mem-per-cpu={FLAGS.memory}\n"
   sbatch_contents += f"#SBATCH -p {FLAGS.partition}\n"
+  sbatch_contents += f"#SBATCH -t {FLAGS.time}"
   sbatch_contents += f"#SBATCH --account {FLAGS.account}\n"
-  sbatch_contents += f"#SBATCH -o {base_filename}_%j.out\n"
-  sbatch_contents += f"#SBATCH -e {base_filename}_%j.err\n"
+  sbatch_contents += f"#SBATCH -o {base_filename}_id=%j.out\n"
+  sbatch_contents += f"#SBATCH -e {base_filename}_id=%j.err\n"
 
   run_file_contents = "#!/bin/bash\n" + sbatch_contents + python_file_contents
   print("-"*20)

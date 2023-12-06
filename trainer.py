@@ -350,11 +350,19 @@ def run_many():
       num_actors=FLAGS.num_actors)
 
 def sweep(search: str = 'default'):
-  if search == 'default':
+  if search == 'flat':
     space = [
         {
             "seed": tune.grid_search([5,6,7,8]),
+            "eval_task_support": tune.grid_search(['train', 'eval']),
             "agent": tune.grid_search(['flat_usfa']),
+        }
+    ]
+  elif search == 'objects':
+    space = [
+        {
+            "seed": tune.grid_search([5,6,7,8]),
+            "agent": tune.grid_search(['object_usfa']),
         }
     ]
   else:

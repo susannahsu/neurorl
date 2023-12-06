@@ -505,6 +505,8 @@ class SGDLearner(learning_lib.SGDLearner):
       result = self._counter.increment(
           steps=self._num_sgd_steps_per_step, walltime=elapsed)
       result.update(metrics)
+      print("proper flatten metrics")
+      import ipdb; ipdb.set_trace()
       self._logger.write(result)
 
 class Builder(q_learning.R2D2Builder):

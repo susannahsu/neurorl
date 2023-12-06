@@ -22,7 +22,7 @@ import networks
 
 @dataclasses.dataclass
 class Config(q_learning.Config):
-  eval_task_support: str = "train"
+  eval_task_support: str = "train"  # options:
   nsamples: int = 0  # no samples outside of train vector
 
 def expand_tile_dim(x, size, axis=-1):
@@ -114,6 +114,7 @@ class UsfaLossFn(basics.RecurrentLossFn):
     # ======================================================
     # all are [T+1, B, N, A, C]
     # N = num policies, A = actions, C = cumulant dim
+    import ipdb; ipdb.set_trace()
     online_sf = online_preds.sf
     online_z = online_preds.policy
     target_sf = target_preds.sf
@@ -211,10 +212,10 @@ class UsfaLossFn(basics.RecurrentLossFn):
 
     metrics = {
       f'0.loss_Sf': batch_loss.mean(),
-      'z.sf_mean': online_sf.mean(),
-      'z.sf_var': online_sf.var(),
-      'z.sf_max': online_sf.max(),
-      'z.sf_min': online_sf.min()}
+      '2.sf_mean': online_sf.mean(),
+      '2.sf_var': online_sf.var(),
+      '2.sf_max': online_sf.max(),
+      '2.sf_min': online_sf.min()}
 
     return batch_td_error, batch_loss, metrics # [T, B], [B]
 
@@ -341,12 +342,14 @@ class SfGpiHead(hk.Module):
     # -----------------------
     if self.nsamples > 0:
       # sample N times: [D_w] --> [N+1, D_w]
+      import ipdb; ipdb.set_trace()
       policy_samples = sample_gauss(
         mean=policy, var=self.var, key=hk.next_rng_key(), nsamples=self.nsamples, axis=-2)
       # combine samples with the original policy vector
       policy_base = jnp.expand_dims(policy, axis=1) # [1, D_w]
       policies = jnp.concatenate((policy_base, policy_samples), axis=-2)  # [N+1, D_w]
     else:
+      import ipdb; ipdb.set_trace()
       policies = jnp.expand_dims(policy, axis=-2) # [1, D_w]
 
     return self.sfgpi(

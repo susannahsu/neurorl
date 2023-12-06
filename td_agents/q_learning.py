@@ -59,12 +59,12 @@ class Config(r2d2.R2D2Config):
 
   # # Replay options
   # # samples_per_insert_tolerance_rate: float = 0.1
-  # samples_per_insert: float = 6.0
-  # min_replay_size: int = 1_000
-  # max_replay_size: int = 80_000
-  # batch_size: Optional[int] = 64
-  # trace_length: Optional[int] = 20
-  # sequence_period: Optional[int] = 20
+  samples_per_insert: float = 6.0
+  min_replay_size: int = 10_000
+  # max_replay_size: int = 100_000
+  batch_size: Optional[int] = 64
+  trace_length: Optional[int] = 20
+  sequence_period: Optional[int] = 20
   # prefetch_size: int = 0
   # num_parallel_calls: int = 1
 
