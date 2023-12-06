@@ -1,4 +1,9 @@
+
+import functools
+import time
 from typing import Callable, Iterator, List, Optional, Union, Sequence
+from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
+from absl import logging
 
 import dataclasses
 import haiku as hk
@@ -11,9 +16,20 @@ from acme.adders import reverb as adders_reverb
 from acme.agents.jax import actors
 from acme import types as acme_types
 
-from acme.agents.jax import builders
-# from acme.agents.jax import r2d2
+import acme
+from acme.adders import reverb as adders
+from acme.agents.jax.dqn import learning_lib
+from acme.jax import networks as networks_lib
 from acme.jax import utils
+from acme.utils import async_utils
+from acme.utils import counting
+from acme.utils import loggers
+from acme.agents.jax import builders
+from acme.agents.jax import r2d2
+from acme.jax import utils
+from acme.agents.jax import actors
+from acme.agents.jax import actor_core as actor_core_lib
+from acme.agents.jax.r2d2 import actor as r2d2_actor
 from acme.agents.jax.r2d2 import actor as r2d2_actor
 from acme.agents.jax.r2d2 import config as r2d2_config
 from acme.agents.jax.r2d2 import learning as r2d2_learning
@@ -24,28 +40,16 @@ from acme.jax import utils
 from acme.jax import variable_utils
 from acme.utils import counting
 from acme.utils import loggers
+
+
+
+
+
 import jax
 import optax
 import reverb
 import numpy as np
 
-from td_agents import q_learning
-# from agents.td_agent import learning_lib
-# from agents.td_agent.losses import R2D2Learning
-
-import functools
-import time
-from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
-from absl import logging
-
-import acme
-from acme.adders import reverb as adders
-from acme.agents.jax.dqn import learning_lib
-from acme.jax import networks as networks_lib
-from acme.jax import utils
-from acme.utils import async_utils
-from acme.utils import counting
-from acme.utils import loggers
 import jax
 import jax.numpy as jnp
 from jax._src.lib import xla_bridge # for clearing cache
@@ -54,6 +58,8 @@ import reverb
 import rlax
 import tree
 import typing_extensions
+
+import utils as data_utils
 
 PMAP_AXIS_NAME = 'data'
 LossFn = learning_lib.LossFn
@@ -74,23 +80,6 @@ ValueFn = Callable[[networks_lib.Params, Observation, hk.LSTMState],
                          networks_lib.Value]
 
 
-@dataclasses.dataclass
-class NetworkFn:
-  """Pure functions representing recurrent network components.
-
-  Attributes:
-    init: Initializes params.
-    forward: Computes Q-values using the network at the given recurrent
-      state.
-    unroll: Applies the unrolled network to a sequence of 
-      observations, for learning.
-    initial_state: Recurrent state at the beginning of an episode.
-  """
-  init: ValueInitFn
-  forward: ValueFn
-  unroll: ValueFn
-  initial_state: RecurrentStateFn
-  evaluation: Optional[ValueFn] = None
 
 def isbad(x):
   if np.isnan(x):
@@ -119,6 +108,66 @@ def param_sizes(params):
 
 def overlapping(dict1, dict2):
   return set(dict1.keys()).intersection(dict2.keys())
+
+
+@dataclasses.dataclass
+class Config(r2d2.R2D2Config):
+  agent: str = 'agent'
+
+  # Architecture
+  state_dim: int = 512
+
+  # value-based action-selection options
+  num_epsilons: int = 256
+  evaluation_epsilon: float = 0.01
+  epsilon_min: float = 1
+  epsilon_max: float = 3
+  epsilon_base: float = .1
+
+  # # Learner options
+  # num_learner_steps: int = int(5e5)
+  variable_update_period: int = 400  # how often to update actor
+  num_sgd_steps_per_step: int = 1
+  seed: int = 1
+  discount: float = 0.99
+  num_steps: int = 3e6
+  max_grad_norm: float = 80.0
+  adam_eps: float = 1e-3
+
+  # Replay options
+  samples_per_insert_tolerance_rate: float = 0.1
+  samples_per_insert: float = 6.0
+  min_replay_size: int = 1_000
+  max_replay_size: int = 100_000
+  batch_size: Optional[int] = 32  # number of batch_elements
+  burn_in_length: int = 0  # burn in during learning
+  trace_length: Optional[int] = 40  # how long training_batch should be
+  sequence_period: Optional[int] = None  # how often to add
+  prefetch_size: int = 0
+  num_parallel_calls: int = 1
+
+  # Priority options
+  importance_sampling_exponent: float = 0.0
+  priority_exponent: float = 0.9
+  max_priority_weight: float = 0.9
+
+@dataclasses.dataclass
+class NetworkFn:
+  """Pure functions representing recurrent network components.
+
+  Attributes:
+    init: Initializes params.
+    forward: Computes Q-values using the network at the given recurrent
+      state.
+    unroll: Applies the unrolled network to a sequence of 
+      observations, for learning.
+    initial_state: Recurrent state at the beginning of an episode.
+  """
+  init: ValueInitFn
+  forward: ValueFn
+  unroll: ValueFn
+  initial_state: RecurrentStateFn
+  evaluation: Optional[ValueFn] = None
 
 @dataclasses.dataclass
 class RecurrentLossFn(learning_lib.LossFn):
@@ -505,11 +554,10 @@ class SGDLearner(learning_lib.SGDLearner):
       result = self._counter.increment(
           steps=self._num_sgd_steps_per_step, walltime=elapsed)
       result.update(metrics)
-      print("proper flatten metrics")
-      import ipdb; ipdb.set_trace()
+      result = data_utils.flatten_dict(result, sep="_")
       self._logger.write(result)
 
-class Builder(q_learning.R2D2Builder):
+class Builder(r2d2.R2D2Builder):
   """TD agent Builder. Agent is derivative of R2D2 but may use different network/loss function
   """
   def __init__(self,
@@ -519,10 +567,13 @@ class Builder(q_learning.R2D2Builder):
                get_actor_core_fn = None,
                LossFnKwargs=None,
                learner_kwargs=None):
+    if config.sequence_period is None:
+      config.sequence_period = config.trace_length
+
     super().__init__(config=config)
 
     if get_actor_core_fn is None:
-      get_actor_core_fn = q_learning.get_actor_core
+      get_actor_core_fn = get_actor_core
     self._get_actor_core_fn = get_actor_core_fn
     self._loss_fn = LossFn
 
@@ -569,3 +620,58 @@ class Builder(q_learning.R2D2Builder):
       networks=networks,
       evaluation=evaluation,
       config=self._config)
+
+def get_actor_core(
+    networks: r2d2_networks.R2D2Networks,
+    config: Config,
+    evaluation: bool = False,
+) -> r2d2_actor.R2D2Policy:
+  """Returns ActorCore for R2D2."""
+
+  num_epsilons = config.num_epsilons
+  evaluation_epsilon = config.evaluation_epsilon
+  if (not num_epsilons and evaluation_epsilon is None) or (num_epsilons and
+                                                           evaluation_epsilon):
+    raise ValueError(
+        'Exactly one of `num_epsilons` or `evaluation_epsilon` must be '
+        f'specified. Received num_epsilon={num_epsilons} and '
+        f'evaluation_epsilon={evaluation_epsilon}.')
+
+  def select_action(params: networks_lib.Params,
+                    observation: networks_lib.Observation,
+                    state: r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]):
+    rng, policy_rng = jax.random.split(state.rng)
+
+    q_values, recurrent_state = networks.apply(params, policy_rng, observation,
+                                               state.recurrent_state)
+    action = rlax.epsilon_greedy(state.epsilon).sample(policy_rng, q_values)
+
+    return action, r2d2_actor.R2D2ActorState(
+        rng=rng,
+        epsilon=state.epsilon,
+        recurrent_state=recurrent_state,
+        prev_recurrent_state=state.recurrent_state)
+
+  def init(
+      rng: networks_lib.PRNGKey
+  ) -> r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]:
+    rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
+    if not evaluation:
+      epsilon = jax.random.choice(epsilon_rng,
+                                  np.logspace(config.epsilon_min, config.epsilon_max, config.num_epsilons, base=config.epsilon_base))
+    else:
+      epsilon = evaluation_epsilon
+    initial_core_state = networks.init_recurrent_state(state_rng, None)
+    return r2d2_actor.R2D2ActorState(
+        rng=rng,
+        epsilon=epsilon,
+        recurrent_state=initial_core_state,
+        prev_recurrent_state=initial_core_state)
+
+  def get_extras(
+      state: r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]
+  ) -> r2d2_actor.R2D2Extras:
+    return {'core_state': state.prev_recurrent_state}
+
+  return actor_core_lib.ActorCore(init=init, select_action=select_action,
+                                  get_extras=get_extras)

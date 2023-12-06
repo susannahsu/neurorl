@@ -1,20 +1,14 @@
 
 from typing import Optional, Tuple, Iterator, Optional
 
-import acme
-from acme import adders
 
 from acme import core
 from acme import specs
-from acme.agents.jax import actors
-from acme.agents.jax import actor_core as actor_core_lib
 from acme.agents.jax import r2d2
-from acme.agents.jax.r2d2 import actor as r2d2_actor
 from acme.agents.jax.r2d2 import learning as r2d2_learning
 from acme.agents.jax.r2d2 import networks as r2d2_networks
 from acme.jax.networks import base
 from acme.jax import networks as networks_lib
-from acme.jax import variable_utils
 from acme.utils import counting
 from acme.utils import loggers
 from acme.wrappers import observation_action_reward
@@ -22,57 +16,18 @@ from acme.jax.networks import duelling
 
 import dataclasses
 import haiku as hk
-import jax
-import numpy as np
 import optax
 import reverb
-import rlax
 
 import networks
+from td_agents import basics
+
 
 @dataclasses.dataclass
-class Config(r2d2.R2D2Config):
-  agent: str = 'agent'
-  # Architecture
-  # vocab_size: int = 50  # vocab size for env
-  # sentence_dim: int = 128  # dimensionality of sentence embeddings
-  # word_dim: int = 128  # dimensionality of word embeddings
-  # task_dim: int = 128  # projection of task to lower dimension
-  state_dim: int = 256
-  # q_dim: int = 512
+class Config(basics.Config):
+  q_dim: int = 512
 
-  # value-based action-selection options
-  num_epsilons: int = 256
-  epsilon_min: float = 1
-  epsilon_max: float = 3
-  epsilon_base: float = .1
-
-  # # Learner options
-  # num_learner_steps: int = int(5e5)
-  num_sgd_steps_per_step: int = 1
-  seed: int = 1
-  discount: float = 0.99
-  burn_in_length: int = 0
-  num_steps: int = 3e6
-  max_grad_norm: float = 80.0
-  adam_eps: float = 1e-3
-
-  # # Replay options
-  # # samples_per_insert_tolerance_rate: float = 0.1
-  samples_per_insert: float = 6.0
-  min_replay_size: int = 10_000
-  # max_replay_size: int = 100_000
-  batch_size: Optional[int] = 64
-  trace_length: Optional[int] = 20
-  sequence_period: Optional[int] = 20
-  # prefetch_size: int = 0
-  # num_parallel_calls: int = 1
-
-  # Priority options
-  importance_sampling_exponent: float = 0.6
-  priority_exponent: float = 0.9
-
-class R2D2Builder(r2d2.R2D2Builder):
+class R2D2Builder(basics.R2D2Builder):
 
   def make_learner(
       self,
@@ -110,71 +65,6 @@ class R2D2Builder(r2d2.R2D2Builder):
         replay_client=replay_client,
         counter=counter,
         logger=logger_fn('learner'))
-
-  def make_policy(self,
-                  networks: r2d2_networks.R2D2Networks,
-                  environment_spec: specs.EnvironmentSpec,
-                  evaluation: bool = False) -> r2d2_actor.R2D2Policy:
-
-    return get_actor_core(
-        networks,
-        config=self._config,
-        evaluation=evaluation)
-
-def get_actor_core(
-    networks: r2d2_networks.R2D2Networks,
-    config: Config,
-    evaluation: bool = False,
-) -> r2d2_actor.R2D2Policy:
-  """Returns ActorCore for R2D2."""
-
-  num_epsilons = config.num_epsilons
-  evaluation_epsilon = config.evaluation_epsilon
-  if (not num_epsilons and evaluation_epsilon is None) or (num_epsilons and
-                                                           evaluation_epsilon):
-    raise ValueError(
-        'Exactly one of `num_epsilons` or `evaluation_epsilon` must be '
-        f'specified. Received num_epsilon={num_epsilons} and '
-        f'evaluation_epsilon={evaluation_epsilon}.')
-
-  def select_action(params: networks_lib.Params,
-                    observation: networks_lib.Observation,
-                    state: r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]):
-    rng, policy_rng = jax.random.split(state.rng)
-
-    q_values, recurrent_state = networks.apply(params, policy_rng, observation,
-                                               state.recurrent_state)
-    action = rlax.epsilon_greedy(state.epsilon).sample(policy_rng, q_values)
-
-    return action, r2d2_actor.R2D2ActorState(
-        rng=rng,
-        epsilon=state.epsilon,
-        recurrent_state=recurrent_state,
-        prev_recurrent_state=state.recurrent_state)
-
-  def init(
-      rng: networks_lib.PRNGKey
-  ) -> r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]:
-    rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
-    if not evaluation:
-      epsilon = jax.random.choice(epsilon_rng,
-                                  np.logspace(config.epsilon_min, config.epsilon_max, config.num_epsilons, base=config.epsilon_base))
-    else:
-      epsilon = evaluation_epsilon
-    initial_core_state = networks.init_recurrent_state(state_rng, None)
-    return r2d2_actor.R2D2ActorState(
-        rng=rng,
-        epsilon=epsilon,
-        recurrent_state=initial_core_state,
-        prev_recurrent_state=initial_core_state)
-
-  def get_extras(
-      state: r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]
-      ) -> r2d2_actor.R2D2Extras:
-    return {'core_state': state.prev_recurrent_state}
-
-  return actor_core_lib.ActorCore(init=init, select_action=select_action,
-                                  get_extras=get_extras)
 
 class R2D2Arch(hk.RNNCore):
   """A duelling recurrent network for use with Atari observations as seen in R2D2.

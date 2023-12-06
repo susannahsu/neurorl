@@ -69,6 +69,7 @@ def make_environment(seed: int,
   # create gymnasium.Gym environment
   env = envs.KeyRoom(
     num_dists=0,
+    training=not evaluation,
     train_task_option=train_task_option,
     transfer_task_option=transfer_task_option,
     fixed_door_locs=fixed_door_locs)
@@ -358,12 +359,24 @@ def run_many():
 def sweep(search: str = 'default'):
   if search == 'flat':
     space = [
+        # {
+        #     "agent": tune.grid_search(['flat_usfa']),
+        #     "seed": tune.grid_search([1,2]),
+        #     "env.train_task_option": tune.grid_search([0, 1, 4]),
+        #     "env.transfer_task_option": tune.grid_search([0, 3]),
+        #     "eval_task_support": tune.grid_search(['eval']),
+        #     "group": tune.grid_search(['flat-3']),
+        # },
         {
-            "seed": tune.grid_search([5,6]),
-            "train_task_option": tune.grid_search([0, 1, 4]),
-            "transfer_task_option": tune.grid_search([0, 3]),
-            "eval_task_support": tune.grid_search(['train', 'eval']),
             "agent": tune.grid_search(['flat_usfa']),
+            "seed": tune.grid_search([1]),
+            "env.train_task_option": tune.grid_search([0]),
+            "env.transfer_task_option": tune.grid_search([0]),
+            "eval_task_support": tune.grid_search(['eval']),
+            "importance_sampling_exponent": tune.grid_search([0]),
+            "batch_size": tune.grid_search([32, 16]),
+            "trace_length": tune.grid_search([20, 40]),
+            "group": tune.grid_search(['flat-4-speed']),
         }
     ]
   elif search == 'objects':

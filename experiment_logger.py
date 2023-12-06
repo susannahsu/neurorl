@@ -170,7 +170,6 @@ class WandbLogger(base.Logger):
     self._name_fn = name_fn
 
   def write(self, values: base.LoggingData):
-    label = self.label
     if self._steps_key is not None and self._steps_key not in values:
       logging.warning('steps key "%s" not found. Skip logging.', self._steps_key)
       logging.warning('Available keys:', str(values.keys()))
@@ -180,8 +179,9 @@ class WandbLogger(base.Logger):
 
     to_log={}
     for key in values.keys() - [self._steps_key]:
+      value = values[key]
       name = self._name_fn(self.label, key)
-      to_log[name] = values[key]
+      to_log[name] = value
 
     to_log[f'{self.label}/step']  = step
 

@@ -21,6 +21,7 @@ flags.DEFINE_integer('num_actors', 1, 'number of actors.')
 flags.DEFINE_integer('config_idx', 1, 'number of actors.')
 flags.DEFINE_integer('num_cpus', 16, 'number of cpus.')
 flags.DEFINE_integer('memory', 1000, 'memory (in mbs).')
+flags.DEFINE_integer('max_concurrent', 12, 'number of concurrent jobs')
 flags.DEFINE_string('account', '', 'account on slurm servers to use.')
 flags.DEFINE_string('partition', 'kempner', 'account on slurm servers to use.')
 flags.DEFINE_string('time', '0-06:00:00', '6 hours.')
@@ -279,14 +280,18 @@ def get_all_configurations(spaces: Union[Dict, List[Dict]]):
 
     return all_settings
 
-def get_agent_env_configs(config: dict, default_env_kwargs: Optional[dict]=None):
+def get_agent_env_configs(
+    config: dict,
+    neither: List[str] = ['group', 'label'],
+    default_env_kwargs: Optional[dict]=None):
   """
   Separate config into agent and env configs. Example below. Basically if key starts with "env.", it goes into an env_config.
   Example:
   config = {
     seed: 1,
     width: 2,
-    env.room_size: 7
+    env.room_size: 7,
+    group: 'wandb_group4'
   }
   agent_config = {seed: 1, width: 2}
   env_config = {room_size: 7}
@@ -297,10 +302,12 @@ def get_agent_env_configs(config: dict, default_env_kwargs: Optional[dict]=None)
   for k, v in config.items():
     if 'env.' in k:
       # e.g. "env.room_size"
-      env_config[k.strip("env.")] = v
+      env_config[k.replace("env.", "")] = v
     elif default_env_kwargs and k in default_env_kwargs:
       # e.g. "room_size"
       env_config[k] = v
+    elif k in neither:
+      pass
     else:
       agent_config[k] = v
   
@@ -314,7 +321,6 @@ def run_sbatch(
     spaces: Union[Dict, List[Dict]],
     use_wandb: bool = False,
     num_actors: int = 4,
-    max_concurrent: int = 36,
     debug: bool = False,
     run_distributed: bool = True):
   """For each possible configuration of a run, create a config entry. save a list of all config entries. When SBATCH is called, it will use the ${SLURM_ARRAY_TASK_ID} to run a particular one.
@@ -325,6 +331,9 @@ def run_sbatch(
   #################################
   root_path = str(Path().absolute())
   configurations = get_all_configurations(spaces=spaces)
+  from pprint import pprint
+  logging.info("searching:")
+  pprint(configurations)
   save_configs = []
   for config in configurations:
     # either look for group name in setting, wandb_init_kwargs, or use search name
@@ -342,7 +351,8 @@ def run_sbatch(
       base_dir=os.path.join(root_path, folder, group),
       return_kwpath=True,
       path_skip=['num_steps', 'num_learner_steps', 'group'],
-      **config,
+      **agent_config,
+      **env_config,
       )
 
     save_config = dict(
@@ -424,7 +434,7 @@ def run_sbatch(
     file.write(run_file_contents)
 
   total_jobs = len(save_configs)
-  max_concurrent = min(max_concurrent, total_jobs)
+  max_concurrent = min(FLAGS.max_concurrent, total_jobs)
   sbatch_command = f"sbatch --array=1-{total_jobs}%{max_concurrent} {run_file}"
   logging.info(sbatch_command)
   process = subprocess.Popen(f"chmod +x {run_file}", shell=True)

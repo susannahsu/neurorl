@@ -16,6 +16,18 @@ from acme.utils.observers import EnvLoopObserver
 
 Number = Union[int, float, np.float32, jnp.float32]
 
+
+def flatten_dict(d, parent_key='', sep='_'):
+  items = []
+  for k, v in d.items():
+      new_key = parent_key + sep + k if parent_key else k
+      if isinstance(v, collections.MutableMapping):
+          items.extend(flatten_dict(v, new_key, sep=sep).items())
+      else:
+          items.append((new_key, v))
+  return dict(items)
+
+
 def load_config(filename):
   with open(filename, 'rb') as fp:
     config = pickle.load(fp)
@@ -34,6 +46,7 @@ def save_config(filename, config):
       new = {k:v for k,v in config.items() if fits(v)}
       pickle.dump(new, fp)
       logging.info(f'Saved: {filename}')
+
 
 def update_config(config, strict: bool = True, **kwargs):
   for k, v in kwargs.items():

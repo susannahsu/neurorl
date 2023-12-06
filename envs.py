@@ -45,6 +45,18 @@ def onehot(index: int, size: int):
    x[index] = 1
    return x
 
+def reject_next_to(env, pos):
+    """
+    Function to filter out object positions that are right next to
+    the agent's starting point
+    """
+
+    sx, sy = env.agent_pos
+    x, y = pos
+    d = abs(sx - x) + abs(sy - y)
+    return d < 2
+
+
 
 class TaskOptions(Enum):
     keys = 0
@@ -84,10 +96,10 @@ class KeyRoom(LevelGen):
       num_dists=10,
       locations=False,
       unblocking=False,
-      max_steps_per_room: int = 50,
+      max_steps_per_room: int = 100,
       implicit_unlock=False,
       train_task_option: TaskOptions = 1,
-      transfer_task_option: TaskOptions = 2,
+      transfer_task_option: TaskOptions = 3,
       training: bool = True,
       fixed_door_locs:bool=True,
       **kwargs):
@@ -107,7 +119,6 @@ class KeyRoom(LevelGen):
       self._training = training
       self._train_task_option = train_task_option
       self._transfer_task_option = transfer_task_option
-      self.task_option = self._train_task_option if training else self._transfer_task_option
       self._train_objects = []
       self._transfer_objects = []
       self._train_task_vectors = None # dummy
@@ -157,6 +168,10 @@ class KeyRoom(LevelGen):
             "train_tasks": train_task_vectors,
           }
       )
+
+    @property
+    def task_option(self):
+      return self._train_task_option if self._training else self._transfer_task_option
 
     @property
     def train_colors(self):
@@ -256,7 +271,7 @@ class KeyRoom(LevelGen):
             obj_desc = ObjDesc(obj.type, obj.color)
 
         obj_idx = self.name_2_idx[make_name(obj.color, obj.type)]
-        self.task_vector[obj_idx] = 1
+        self.task_vector[obj_idx] = 1.0
 
         self.instrs = DummyInstr()
         self.instruction = PickupInstr(obj_desc)
@@ -278,14 +293,47 @@ class KeyRoom(LevelGen):
         self.update_obs(obs)
         return obs, info
 
+    def replace_object(self, action):
+      if not self.carrying: return
+
+      # get reward
+      object = self.carrying
+      obj_idx = self.name_2_idx[make_name(object.color, object.type)]
+
+      reward = float(self.task_vector[obj_idx])
+
+      if self.instruction.verify(action) == "success":
+        # reward = float(self.object2reward[obj_type])
+        self.carrying = None
+
+        if self.respawn:
+          # move object
+          room = self.get_room(0, 0)
+
+          pos = self.place_obj(
+              object,
+              room.top,
+              room.size,
+              reject_fn=reject_next_to,
+              max_tries=1000
+          )
+          # self.object_occurrences[obj_idx] += 1
+        else:
+          # self.remaining[obj_idx] -= 1
+          pass
+
+        return reward
+      return reward
+
     def step(self, action, **kwargs):
         obs, reward, terminated, truncated, info = super().step(action, **kwargs)
 
         self.update_obs(obs)
 
-        if self.instruction.verify(action) == "success":
-           reward = 1.0
-           terminated = True
+        reward = (obs['task']*obs['state_features']).sum(-1)
+
+        # if self.instruction.verify(action) == "success":
+        #    terminated = True
 
         if self.step_count >= self._max_steps:
             truncated = True

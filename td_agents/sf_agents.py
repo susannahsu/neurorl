@@ -16,12 +16,11 @@ from acme.agents.jax import actor_core as actor_core_lib
 from acme.wrappers import observation_action_reward
 
 from td_agents import basics
-from td_agents import q_learning
 
 import networks
 
 @dataclasses.dataclass
-class Config(q_learning.Config):
+class Config(basics.Config):
   eval_task_support: str = "train"  # options:
   nsamples: int = 0  # no samples outside of train vector
 
@@ -107,6 +106,7 @@ def sample_gauss(mean, var, key, nsamples, axis):
 class UsfaLossFn(basics.RecurrentLossFn):
 
   extract_cumulants: Callable = cumulants_from_env
+  extract_task: Callable = lambda data: data.observation.observation['task']
 
   def error(self, data, online_preds, online_state, target_preds, target_state, **kwargs):
     # ======================================================
@@ -114,7 +114,6 @@ class UsfaLossFn(basics.RecurrentLossFn):
     # ======================================================
     # all are [T+1, B, N, A, C]
     # N = num policies, A = actions, C = cumulant dim
-    import ipdb; ipdb.set_trace()
     online_sf = online_preds.sf
     online_z = online_preds.policy
     target_sf = target_preds.sf
@@ -210,8 +209,13 @@ class UsfaLossFn(basics.RecurrentLossFn):
 
     batch_td_error = batch_td_error.mean(axis=(2, 3)) # [T, B]
 
+    cumulant_reward = (cumulants*self.extract_task(data)).sum(-1)
+    reward_error = data.reward - cumulant_reward
     metrics = {
       f'0.loss_Sf': batch_loss.mean(),
+      '2.cumulants': cumulants.mean(),
+      '2.cumulant_reward': cumulant_reward.mean(),
+      '2.reward_error': reward_error.mean(),
       '2.sf_mean': online_sf.mean(),
       '2.sf_var': online_sf.var(),
       '2.sf_max': online_sf.max(),
@@ -228,12 +232,6 @@ def get_actor_core(
 
   num_epsilons = config.num_epsilons
   evaluation_epsilon = config.evaluation_epsilon
-  if (not num_epsilons and evaluation_epsilon is None) or (num_epsilons and
-                                                           evaluation_epsilon):
-    raise ValueError(
-        'Exactly one of `num_epsilons` or `evaluation_epsilon` must be '
-        f'specified. Received num_epsilon={num_epsilons} and '
-        f'evaluation_epsilon={evaluation_epsilon}.')
 
   def select_action(params: networks_lib.Params,
                     observation: networks_lib.Observation,
@@ -256,7 +254,10 @@ def get_actor_core(
     rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
     if not evaluation:
       epsilon = jax.random.choice(epsilon_rng,
-                                  np.logspace(config.epsilon_min, config.epsilon_max, config.num_epsilons, base=config.epsilon_base))
+        np.logspace(config.epsilon_min,
+                    config.epsilon_max,
+                    config.num_epsilons,
+                    base=config.epsilon_base))
     else:
       epsilon = evaluation_epsilon
     initial_core_state = networks.init_recurrent_state(state_rng, None)
@@ -311,7 +312,8 @@ class SfGpiHead(hk.Module):
     self.nsamples = nsamples
     self.eval_task_support = eval_task_support
 
-    self.mlp = hk.nets.MLP(tuple(hidden_sizes)+(num_actions * state_features_dim,))
+    self.mlp = hk.nets.MLP(
+      tuple(hidden_sizes)+(num_actions * state_features_dim,))
 
   def compute_sf_q(self, inputs: jnp.ndarray, task: jnp.ndarray) -> jnp.ndarray:
     """Forward pass
@@ -342,14 +344,12 @@ class SfGpiHead(hk.Module):
     # -----------------------
     if self.nsamples > 0:
       # sample N times: [D_w] --> [N+1, D_w]
-      import ipdb; ipdb.set_trace()
       policy_samples = sample_gauss(
         mean=policy, var=self.var, key=hk.next_rng_key(), nsamples=self.nsamples, axis=-2)
       # combine samples with the original policy vector
-      policy_base = jnp.expand_dims(policy, axis=1) # [1, D_w]
+      policy_base = jnp.expand_dims(policy, axis=-2) # [1, D_w]
       policies = jnp.concatenate((policy_base, policy_samples), axis=-2)  # [N+1, D_w]
     else:
-      import ipdb; ipdb.set_trace()
       policies = jnp.expand_dims(policy, axis=-2) # [1, D_w]
 
     return self.sfgpi(
@@ -369,10 +369,10 @@ class SfGpiHead(hk.Module):
 
     elif self.eval_task_support == 'eval':
       # [1, D]
-      policies = jnp.expand_dims(task, axis=1)
+      policies = jnp.expand_dims(task, axis=-2)
 
     elif self.eval_task_support == 'train_eval':
-      task_expand = jnp.expand_dims(task, axis=1)
+      task_expand = jnp.expand_dims(task, axis=-2)
       # [N+1, D]
       policies = jnp.concatenate((train_tasks, task_expand), axis=-2)
     else:
@@ -505,8 +505,7 @@ def make_minigrid_networks(
   state_features_dim = env_spec.observations.observation['state_features'].shape[0]
 
   def make_core_module() -> UsfaArch:
-    vision_torso = networks.AtariVisionTorso(
-      out_dim=config.state_dim)
+    vision_torso = networks.AtariVisionTorso()
 
     observation_fn = networks.OarTorso(
       num_actions=num_actions,
