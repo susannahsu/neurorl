@@ -1,4 +1,4 @@
-name: humansf
+name: neurorl
 channels:
   - defaults
   - conda-forge

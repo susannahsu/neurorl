@@ -6,11 +6,11 @@ module load cuda/11.3.1-fasrc01
 module load cudnn/8.9.2.26_cuda11-fasrc01
 module load gcc/9.5.0-fasrc01
 
-mamba create --name humansf python=3.9 pip wheel -y
+mamba create --name neurorl python=3.9 pip wheel -y
 
-source activate humansf
+source activate neurorl
 
-conda env update --name omodel --file conda_env.yaml
+conda env update --name neurorl --file conda_env.yaml
 
 #############################################
 # Minigrid
