@@ -19,7 +19,7 @@ import haiku as hk
 import optax
 import reverb
 
-import networks
+import lib.networks as networks
 from td_agents import basics
 
 

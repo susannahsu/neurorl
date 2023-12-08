@@ -28,13 +28,13 @@ import gymnasium
 import dm_env
 import minigrid
 
-from dm_env_wrappers import GymWrapper
-import envs
-import env_wrappers
-import experiment_builder
-import experiment_logger
-import parallel
-import utils
+from lib.dm_env_wrappers import GymWrapper
+import envs.key_room as key_room
+import lib.env_wrappers as env_wrappers
+import lib.experiment_builder as experiment_builder
+import lib.experiment_logger as experiment_logger
+import lib.parallel as parallel
+import lib.utils as utils
 
 flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')
@@ -50,8 +50,8 @@ FLAGS = flags.FLAGS
 
 def make_environment(seed: int,
                      object_options: bool = True,
-                     train_task_option: envs.TaskOptions = 1,
-                     transfer_task_option: envs.TaskOptions = 3,
+                     train_task_option: key_room.TaskOptions = 1,
+                     transfer_task_option: key_room.TaskOptions = 3,
                      evaluation: bool = False,
                      **kwargs) -> dm_env.Environment:
   """Loads environments.
@@ -68,7 +68,7 @@ def make_environment(seed: int,
   fixed_door_locs = False if evaluation else True
 
   # create gymnasium.Gym environment
-  env = envs.KeyRoom(
+  env = key_room.KeyRoom(
     num_dists=0,
     training=not evaluation,
     train_task_option=train_task_option,
@@ -176,7 +176,7 @@ def setup_experiment_inputs(
   observers = [
       utils.LevelAvgReturnObserver(
         reset=50 if not debug else 5,
-        get_task_name=lambda e: envs.TaskOptions(e.task_option).name
+        get_task_name=lambda e: key_room.TaskOptions(e.task_option).name
         ),
       ]
 

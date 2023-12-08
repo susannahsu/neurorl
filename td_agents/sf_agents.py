@@ -17,7 +17,7 @@ from acme.wrappers import observation_action_reward
 
 from td_agents import basics
 
-import networks
+import lib.networks as networks
 
 @dataclasses.dataclass
 class Config(basics.Config):

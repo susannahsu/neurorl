@@ -41,8 +41,8 @@ from acme.utils.observers import EnvLoopObserver
 
 import dm_env
 
-import experiment_logger
-import utils
+import lib.experiment_logger as experiment_logger
+import lib.utils as utils
 
 
 # -----------------------

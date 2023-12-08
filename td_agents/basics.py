@@ -59,7 +59,7 @@ import rlax
 import tree
 import typing_extensions
 
-import utils as data_utils
+import lib.utils as data_utils
 
 PMAP_AXIS_NAME = 'data'
 LossFn = learning_lib.LossFn
