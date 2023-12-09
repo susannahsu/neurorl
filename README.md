@@ -57,16 +57,23 @@ Once you set up a wandb project and have logged runs, group them by the followin
 
 # Running experiments
 
+load environment
 ```
-# load environment
-source activate humansf 
-# run experiment
-python trainer.py
+source activate neurorl 
 ```
 
 **how do experiments work?**
 
-[TODO]
+Experiments are defined by configs. To make your own experiment, copy one of the configs (e.g. [biorl_trainer.py](configs/biorl_trainer.py)). You will need to change two functions:
+1. `make_environment`: this function specifies how environments are constructed. This codebase assumes `dm_env` environments so make sure to convert `gym` environments to `dm_env`.
+2. `setup_experiment_inputs`: this function specifies how agents are loaded. In the example given, a q-learning agent is loaded.
+
+Agents are defined with 3 things:
+1. a config ([example](td_agents/q_learning.py:27)), which specified default values
+2. a builder ([example](td_agents/q_learning.py:30)), which specifies how the learner/replay buffer/actor will be created. you mainly change this object in order to change something about learning.
+3. a network_factory ([example](td_agents/q_learning.py:11)), which creates the neural networks that define the agnet.
+
+
 
 
 # Available (Recurrent) Agents
