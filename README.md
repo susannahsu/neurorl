@@ -69,7 +69,8 @@ python trainer.py
 [TODO]
 
 
-# Available Agents
+# Available (Recurrent) Agents
 
-1. Flat Successor Features
-2. Object-oriented Successor Features
+1. [Q-learning](td_agents/q_learning.py)
+2. [Successor Features](td_agents/sf_agents.py)
+<!-- 2. Object-oriented Successor Features -->
