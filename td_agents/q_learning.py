@@ -27,7 +27,7 @@ from td_agents import basics
 class Config(basics.Config):
   q_dim: int = 512
 
-class R2D2Builder(basics.R2D2Builder):
+class R2D2Builder(basics.Builder):
 
   def make_learner(
       self,
@@ -110,24 +110,29 @@ class R2D2Arch(hk.RNNCore):
 
 def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,
-        config: Config) -> r2d2.R2D2Networks:
+        config: Config,
+        use_language: bool = False,
+        ) -> r2d2.R2D2Networks:
   """Builds default R2D2 networks for Atari games."""
 
   num_actions = env_spec.actions.num_values
-  ncumulants = env_spec.observations.observation.cumulants.shape[0]
 
   def make_core_module() -> R2D2Arch:
     vision_torso = networks.AtariVisionTorso(
-      conv_dim=config.conv_out_dim,
       out_dim=config.state_dim)
-    task_encoder = hk.Embed(
-        vocab_size=ncumulants,
-        embed_dim=config.task_dim)
+
+    if use_language:
+      task_encoder = networks.LanguageEncoder(
+          vocab_size=1000, word_dim=128)
+    else:
+      task_encoder = lambda obs: None
+
     observation_fn = networks.OarTorso(
       num_actions=num_actions,
       vision_torso=vision_torso,
       task_encoder=task_encoder,
     )
+
     return R2D2Arch(
       torso=observation_fn,
       memory=hk.LSTM(config.state_dim),

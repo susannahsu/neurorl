@@ -119,7 +119,7 @@ class Config(r2d2.R2D2Config):
 
   # value-based action-selection options
   num_epsilons: int = 256
-  evaluation_epsilon: float = 0.01
+  evaluation_epsilon: float = 0.00
   epsilon_min: float = 1
   epsilon_max: float = 3
   epsilon_base: float = .1
@@ -630,12 +630,6 @@ def get_actor_core(
 
   num_epsilons = config.num_epsilons
   evaluation_epsilon = config.evaluation_epsilon
-  if (not num_epsilons and evaluation_epsilon is None) or (num_epsilons and
-                                                           evaluation_epsilon):
-    raise ValueError(
-        'Exactly one of `num_epsilons` or `evaluation_epsilon` must be '
-        f'specified. Received num_epsilon={num_epsilons} and '
-        f'evaluation_epsilon={evaluation_epsilon}.')
 
   def select_action(params: networks_lib.Params,
                     observation: networks_lib.Observation,

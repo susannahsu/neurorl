@@ -84,13 +84,13 @@ class LanguageEncoder(hk.Module):
   def __init__(self,
                vocab_size: int,
                word_dim: int,
-               sentence_dim: int,
-               mask_words: bool = True,
+               sentence_dim: Optional[int] = None,
+               mask_words: bool = False,
                compress: str = 'last'):
     super(LanguageEncoder, self).__init__()
     self.vocab_size = vocab_size
     self.word_dim = word_dim
-    self.sentence_dim = sentence_dim
+    self.sentence_dim = sentence_dim or word_dim
     self.compress = compress
     self.mask_words = mask_words
     self.embedder = hk.Embed(

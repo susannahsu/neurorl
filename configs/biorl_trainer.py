@@ -1,19 +1,33 @@
 """
 Running experiments:
-- multiple distributed experiments in parallel:
-    python trainer.py --search='default'
+--------------------
 
-  - single asynchronous experiment with actor/learner/evaluator:
-    python trainer.py --search='default' --run_distributed=True --debug=True
+# DEBUGGING, single stream
+python -m ipdb -c continue configs/biorl_trainer.py \
+  --search='qlearning' \
+  --parallel='none' \
+  --run_distributed=False \
+  --debug=True \
+  --use_wandb=False \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=neurorl_debug
 
-  - single synchronous experiment (most useful for debugging):
-    python trainer.py --search='default' --run_distributed=False --debug=True
+# running a search, single-stream
+python configs/biorl_trainer.py \
+  --search='qlearning' \
+  --parallel='sbatch' \
+  --run_distributed=False \
+  --use_wandb=True \
+  --partition=kempner \
+  --account=kempner_fellows \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=neurorl
 
-Change "search" to what you want to search over.
 
 """
 import functools 
 
+import dataclasses
 from absl import flags
 from absl import app
 from absl import logging
@@ -28,13 +42,14 @@ import gymnasium
 import dm_env
 import minigrid
 
+from td_agents import q_learning
+
 from lib.dm_env_wrappers import GymWrapper
-import envs.key_room as key_room
 import lib.env_wrappers as env_wrappers
 import lib.experiment_builder as experiment_builder
-import lib.experiment_logger as experiment_logger
 import lib.parallel as parallel
 import lib.utils as utils
+from lib.single_thread_experiment import run_experiment
 
 flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')
@@ -47,7 +62,15 @@ flags.DEFINE_bool(
 
 FLAGS = flags.FLAGS
 
+@dataclasses.dataclass
+class QlearningConfig(q_learning.Config):
+  q_dim: int = 512
+
+  eval_every: int = 100
+  num_eval_episodes: int = 10
+
 def make_environment(seed: int,
+                     level="BabyAI-GoToRedBallNoDists-v0",
                      evaluation: bool = False,
                      **kwargs) -> dm_env.Environment:
   """Loads environments. For now, just "goto X" from minigrid. change as needed.
@@ -62,9 +85,10 @@ def make_environment(seed: int,
   del evaluation
 
   # create gymnasium.Gym environment
-  # environments: https://minigrid.farama.org/environments/minigrid/
-  env = gymnasium.make("BabyAI-GoToObjS6-v0")
-  env = minigrid.wrappers.RGBImgObsWrapper(env)
+  # environments: https://minigrid.farama.org/environments/babyai/
+  env = gymnasium.make(level)
+  env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
+  env = env_wrappers.DictObservationSpaceWrapper(env)
 
   # convert to dm_env.Environment enironment
   env = GymWrapper(env)
@@ -97,32 +121,17 @@ def setup_experiment_inputs(
   agent = agent_config_kwargs.get('agent', '')
   assert agent != '', 'please set agent'
 
-  if agent == 'q_learning':
-    from td_agents import basics
-    from td_agents import sf_agents
-    config = sf_agents.Config(**config_kwargs)
-    builder = basics.Builder(
-      config=config,
-      get_actor_core_fn=sf_agents.get_actor_core,
-      LossFn=sf_agents.UsfaLossFn(
-        discount=config.discount,
-        importance_sampling_exponent=config.importance_sampling_exponent,
-        burn_in_length=config.burn_in_length,
-        max_replay_size=config.max_replay_size,
-        max_priority_weight=config.max_priority_weight,
-        bootstrap_n=config.bootstrap_n,
-      ))
-    # NOTE: main differences below
+  if agent == 'qlearning':
+    config = QlearningConfig(**config_kwargs)
+    builder = q_learning.R2D2Builder(config=config)
     network_factory = functools.partial(
-            sf_agents.make_minigrid_networks, config=config)
-    env_kwargs['object_options'] = False  # has no mechanism to select from object options since dependent on what agent sees
+            q_learning.make_minigrid_networks, config=config)
   else:
     raise NotImplementedError(agent)
 
   # -----------------------
   # load environment factory
   # -----------------------
-
   environment_factory = functools.partial(
     make_environment,
     **env_kwargs)
@@ -156,7 +165,7 @@ def train_single(
     num_actors: int = 1,
     run_distributed: bool = False,
 ):
-
+  del num_actors
   debug = FLAGS.debug
 
   experiment_config_inputs = setup_experiment_inputs(
@@ -177,10 +186,16 @@ def train_single(
     logger_factory_kwargs=logger_factory_kwargs,
     debug=debug
   )
+
+
+  config = experiment_config_inputs.agent_config
   if run_distributed:
     raise NotImplementedError('distributed not implemented')
   else:
-    experiments.run_experiment(experiment=experiment)
+    run_experiment(
+      experiment=experiment,
+      eval_every=config.eval_every,
+      num_eval_episodes=config.num_eval_episodes)
 
 def setup_wandb_init_kwargs():
   if not FLAGS.use_wandb:
@@ -191,7 +206,7 @@ def setup_wandb_init_kwargs():
       entity=FLAGS.wandb_entity,
       notes=FLAGS.wandb_notes,
       name=FLAGS.wandb_name,
-      group=FLAGS.search or 'default',
+      group=FLAGS.search,
       save_code=False,
   )
   return wandb_init_kwargs
@@ -207,8 +222,6 @@ def run_single():
   wandb_init_kwargs = setup_wandb_init_kwargs()
   if FLAGS.debug:
     agent_config_kwargs.update(dict(
-      samples_per_insert=1,
-      min_replay_size=100,
     ))
     env_kwargs.update(dict(
     ))
@@ -300,34 +313,15 @@ def run_many():
       num_actors=FLAGS.num_actors)
 
 def sweep(search: str = 'default'):
-  if search == 'flat':
+  if search == 'qlearning':
     space = [
-        # {
-        #     "agent": tune.grid_search(['flat_usfa']),
-        #     "seed": tune.grid_search([1,2]),
-        #     "env.train_task_option": tune.grid_search([0, 1, 4]),
-        #     "env.transfer_task_option": tune.grid_search([0, 3]),
-        #     "eval_task_support": tune.grid_search(['eval']),
-        #     "group": tune.grid_search(['flat-3']),
-        # },
         {
-            "agent": tune.grid_search(['flat_usfa']),
+            "agent": tune.grid_search(['qlearning']),
             "seed": tune.grid_search([1]),
-            "env.train_task_option": tune.grid_search([0]),
-            "env.transfer_task_option": tune.grid_search([0]),
-            "env.respawn": tune.grid_search([True, False]),
-            "eval_task_support": tune.grid_search(['eval']),
-            "importance_sampling_exponent": tune.grid_search([0]),
-            "batch_size": tune.grid_search([32, 16]),
-            "trace_length": tune.grid_search([20, 40]),
-            "group": tune.grid_search(['flat-4-speed']),
-        }
-    ]
-  elif search == 'objects':
-    space = [
-        {
-            "seed": tune.grid_search([5,6,7,8]),
-            "agent": tune.grid_search(['object_usfa']),
+            "env.level": tune.grid_search([
+                "BabyAI-GoToRedBallNoDists-v0",
+                "BabyAI-GoToObjS6-v1",
+            ]),
         }
     ]
   else:
