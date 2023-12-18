@@ -23,6 +23,7 @@ import lib.networks as networks
 class Config(basics.Config):
   eval_task_support: str = "train"  # options:
   nsamples: int = 0  # no samples outside of train vector
+  importance_sampling_exponent: float = 0.0
 
 def expand_tile_dim(x, size, axis=-1):
   """E.g. shape=[1,128] --> [1,10,128] if dim=1, size=10
