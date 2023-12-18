@@ -14,6 +14,9 @@ from acme.agents.jax.r2d2 import actor as r2d2_actor
 from acme.jax import networks as networks_lib
 from acme.agents.jax import actor_core as actor_core_lib
 from acme.wrappers import observation_action_reward
+from lib.utils import episode_mean
+from lib.utils import make_episode_mask
+from lib.utils import expand_tile_dim
 
 from td_agents import basics
 
@@ -25,52 +28,9 @@ class Config(basics.Config):
   nsamples: int = 0  # no samples outside of train vector
   importance_sampling_exponent: float = 0.0
 
-def expand_tile_dim(x, size, axis=-1):
-  """E.g. shape=[1,128] --> [1,10,128] if dim=1, size=10
-  """
-  ndims = len(x.shape)
-  _axis = axis
-  if axis < 0: # go AFTER -axis dims, e.g. x=[1,128], axis=-2 --> [1,10,128]
-    axis += 1
-    _axis = axis % ndims # to account for negative
-
-  x = jnp.expand_dims(x, _axis)
-  tiling = [1]*_axis + [size] + [1]*(ndims-_axis)
-  return jnp.tile(x, tiling)
-
-def make_episode_mask(data, include_final=False, **kwargs):
-  """Look at where have valid task data. Everything until 1 before final valid data counts towards task. Data.discount always ends two before final data. 
-  e.g. if valid data is [x1, x2, x3, 0, 0], data.discount is [1,0,0,0,0]. So can use that to obtain masks.
-  
-  Args:
-      data (TYPE): Description
-      include_final (bool, optional): if True, include all data. if False, include until 1 time-step before final data
-  
-  Returns:
-      TYPE: Description
-  """
-  T, B = data.discount.shape
-  # for data [x1, x2, x3, 0, 0]
-  if include_final:
-    # return [1,1,1,0,0]
-    return jnp.concatenate((jnp.ones((2, B)), data.discount[:-2]), axis=0)
-  else:
-    # return [1,1,0,0,0]
-    return jnp.concatenate((jnp.ones((1, B)), data.discount[:-1]), axis=0)
-
-def episode_mean(x, mask):
-  if len(mask.shape) < len(x.shape):
-    nx = len(x.shape)
-    nd = len(mask.shape)
-    extra = nx - nd
-    dims = list(range(nd, nd+extra))
-    batch_loss = jnp.multiply(x, jnp.expand_dims(mask, dims))
-  else:
-    batch_loss = jnp.multiply(x, mask)
-  return (batch_loss.sum(0))/(mask.sum(0)+1e-5)
 
 def cumulants_from_env(data, online_preds, online_state, target_preds, target_state):
-  return data.observation.observation['state_features'] # [T, B, C]
+  return data.observation.observation['state_features']  # [T, B, C]
 
 def cumulants_from_preds(
   data,
@@ -106,6 +66,7 @@ def sample_gauss(mean, var, key, nsamples, axis):
 @dataclasses.dataclass
 class UsfaLossFn(basics.RecurrentLossFn):
 
+  extract_q: Callable = lambda preds: preds.q_values
   extract_cumulants: Callable = cumulants_from_env
   extract_task: Callable = lambda data: data.observation.observation['task']
 
@@ -118,7 +79,6 @@ class UsfaLossFn(basics.RecurrentLossFn):
     online_sf = online_preds.sf
     online_z = online_preds.policy
     target_sf = target_preds.sf
-
     # pseudo rewards, [T/T+1, B, C]
     cumulants = self.extract_cumulants(
       data=data, online_preds=online_preds, online_state=online_state,
@@ -146,7 +106,6 @@ class UsfaLossFn(basics.RecurrentLossFn):
       raise RuntimeError("This should never happen?")
     else:
       raise NotImplementedError
-
 
     # ======================================================
     # Loss for SF
@@ -177,7 +136,7 @@ class UsfaLossFn(basics.RecurrentLossFn):
         online_actions[:-1],  # [T]       (vmap None) 
         target_sf[1:],        # [T, A, C] (vmap 2) 
         selector_actions[1:], # [T]       (vmap None) 
-        cumulants[:cum_idx],       # [T, C]    (vmap 1) 
+        cumulants[:cum_idx],  # [T, C]    (vmap 1) 
         discounts[:-1])       # [T]       (vmap None)
 
 
@@ -219,63 +178,11 @@ class UsfaLossFn(basics.RecurrentLossFn):
       '2.reward_error': reward_error.mean(),
       '2.sf_mean': online_sf.mean(),
       '2.sf_var': online_sf.var(),
-      '2.sf_max': online_sf.max(),
-      '2.sf_min': online_sf.min()}
+      # '2.sf_max': online_sf.max(),
+      # '2.sf_min': online_sf.min()
+      }
 
     return batch_td_error, batch_loss, metrics # [T, B], [B]
-
-def get_actor_core(
-    networks: basics.NetworkFn,
-    config: Config,
-    evaluation: bool = False,
-) -> r2d2_actor.R2D2Policy:
-  """Returns ActorCore for R2D2."""
-
-  num_epsilons = config.num_epsilons
-  evaluation_epsilon = config.evaluation_epsilon
-
-  def select_action(params: networks_lib.Params,
-                    observation: networks_lib.Observation,
-                    state: r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]):
-    rng, policy_rng = jax.random.split(state.rng)
-
-    predictions, recurrent_state = networks.apply(
-      params, policy_rng, observation, state.recurrent_state, evaluation)
-    action = rlax.epsilon_greedy(state.epsilon).sample(policy_rng, predictions.q_values)
-
-    return action, r2d2_actor.R2D2ActorState(
-        rng=rng,
-        epsilon=state.epsilon,
-        recurrent_state=recurrent_state,
-        prev_recurrent_state=state.recurrent_state)
-
-  def init(
-      rng: networks_lib.PRNGKey
-  ) -> r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]:
-    rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
-    if not evaluation:
-      epsilon = jax.random.choice(epsilon_rng,
-        np.logspace(config.epsilon_min,
-                    config.epsilon_max,
-                    config.num_epsilons,
-                    base=config.epsilon_base))
-    else:
-      epsilon = evaluation_epsilon
-    initial_core_state = networks.init_recurrent_state(state_rng, None)
-
-    return r2d2_actor.R2D2ActorState(
-        rng=rng,
-        epsilon=epsilon,
-        recurrent_state=initial_core_state,
-        prev_recurrent_state=initial_core_state)
-
-  def get_extras(
-      state: r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]
-      ) -> r2d2_actor.R2D2Extras:
-    return {'core_state': state.prev_recurrent_state}
-
-  return actor_core_lib.ActorCore(init=init, select_action=select_action,
-                                  get_extras=get_extras)
 
 class USFAPreds(NamedTuple):
   q_values: jnp.ndarray  # q-value
@@ -313,7 +220,9 @@ class SfGpiHead(hk.Module):
     self.nsamples = nsamples
     self.eval_task_support = eval_task_support
 
-    self.mlp = hk.nets.MLP(
+    self.policy_net = hk.Linear(32)
+
+    self.sf_net = hk.nets.MLP(
       tuple(hidden_sizes)+(num_actions * state_features_dim,))
 
   def compute_sf_q(self, inputs: jnp.ndarray, task: jnp.ndarray) -> jnp.ndarray:
@@ -327,12 +236,14 @@ class SfGpiHead(hk.Module):
         jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
     """
     # [A * C]
-    sf = self.mlp(inputs)
+    sf = self.sf_net(inputs)
     # [A, C]
     sf = jnp.reshape(sf, (self.num_actions, self.state_features_dim))
 
     # dot-product
-    q_values = jnp.sum(sf * task, axis=-1) # [B, A]
+    q_values = jnp.sum(sf * task, axis=-1) # [A]
+    assert q_values.shape[0] == self.num_actions, 'wrong shape'
+
     return sf, q_values
 
   def __call__(self,
@@ -402,7 +313,8 @@ class SfGpiHead(hk.Module):
 
       # [N, D_s]
       sf_input = jnp.concatenate(
-        (expand_tile_dim(usfa_input, size=n_policies, axis=-2), policies),
+        (expand_tile_dim(usfa_input, size=n_policies, axis=-2),
+         self.policy_net(policies)),
         axis=-1)
       # -----------------------
       # prepare policies vectors

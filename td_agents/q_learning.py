@@ -1,6 +1,7 @@
 
-from typing import Optional, Tuple, Iterator, Optional
+from typing import Optional, Tuple, Iterator, Optional, NamedTuple
 
+import functools
 
 from acme import core
 from acme import specs
@@ -18,8 +19,13 @@ import dataclasses
 import haiku as hk
 import optax
 import reverb
+import jax
+import jax.numpy as jnp
+import rlax
 
 import lib.networks as networks
+
+from lib import utils 
 from td_agents import basics
 
 
@@ -27,44 +33,63 @@ from td_agents import basics
 class Config(basics.Config):
   q_dim: int = 512
 
-class R2D2Builder(basics.Builder):
+@dataclasses.dataclass
+class R2D2LossFn(basics.RecurrentLossFn):
 
-  def make_learner(
-      self,
-      random_key: networks_lib.PRNGKey,
-      networks: r2d2_networks.R2D2Networks,
-      dataset: Iterator[r2d2_learning.R2D2ReplaySample],
-      logger_fn: loggers.LoggerFactory,
-      environment_spec: specs.EnvironmentSpec,
-      replay_client: Optional[reverb.Client] = None,
-      counter: Optional[counting.Counter] = None,
-  ) -> core.Learner:
-    del environment_spec
-    optimizer_chain = []
-    if self._config.max_grad_norm:
-      optimizer_chain.append(
-        optax.clip_by_global_norm(self._config.max_grad_norm))
-    optimizer_chain.append(
-      optax.adam(self._config.learning_rate, eps=self._config.adam_eps)),
-    # The learner updates the parameters (and initializes them).
-    return r2d2_learning.R2D2Learner(
-        networks=networks,
-        batch_size=self._batch_size_per_device,
-        random_key=random_key,
-        burn_in_length=self._config.burn_in_length,
-        discount=self._config.discount,
-        importance_sampling_exponent=(
-            self._config.importance_sampling_exponent),
-        max_priority_weight=self._config.max_priority_weight,
-        target_update_period=self._config.target_update_period,
-        iterator=dataset,
-        optimizer=optax.chain(*optimizer_chain),
-        bootstrap_n=self._config.bootstrap_n,
-        tx_pair=self._config.tx_pair,
-        clip_rewards=self._config.clip_rewards,
-        replay_client=replay_client,
-        counter=counter,
-        logger=logger_fn('learner'))
+  loss: str = 'n_step_q_learning'
+
+  def error(self, data, online_preds, online_state, target_preds, target_state, **kwargs):
+    """R2D2 learning
+    """
+    # Get value-selector actions from online Q-values for double Q-learning.
+    selector_actions = jnp.argmax(self.extract_q(online_preds), axis=-1)  # [T+1, B]
+    # Preprocess discounts & rewards.
+    discounts = (data.discount * self.discount).astype(self.extract_q(online_preds).dtype)
+    rewards = data.reward
+    rewards = rewards.astype(self.extract_q(online_preds).dtype)
+
+    # Get N-step transformed TD error and loss.
+    if self.loss == "transformed_n_step_q_learning":
+      tx_pair = rlax.SIGNED_HYPERBOLIC_PAIR
+    elif self.loss == "n_step_q_learning":
+      tx_pair = rlax.IDENTITY_PAIR
+    else:
+      raise NotImplementedError(self.loss)
+
+    batch_td_error_fn = jax.vmap(
+        functools.partial(
+            rlax.transformed_n_step_q_learning,
+            n=self.bootstrap_n,
+            tx_pair=tx_pair),
+        in_axes=1,
+        out_axes=1)
+
+    batch_td_error = batch_td_error_fn(
+        self.extract_q(online_preds)[:-1],  # [T+1] --> [T]
+        data.action[:-1],    # [T+1] --> [T]
+        self.extract_q(target_preds)[1:],  # [T+1] --> [T]
+        selector_actions[1:],  # [T+1] --> [T]
+        rewards[:-1],        # [T+1] --> [T]
+        discounts[:-1])      # [T+1] --> [T]
+
+    # average over {T} --> # [B]
+    if self.mask_loss:
+      # [T, B]
+      episode_mask = utils.make_episode_mask(data, include_final=False)
+      batch_loss = utils.episode_mean(
+          x=(0.5 * jnp.square(batch_td_error)),
+          mask=episode_mask[:-1])
+    else:
+      batch_loss = 0.5 * jnp.square(batch_td_error).mean(axis=0)
+
+    metrics = {
+        'z.q_mean': self.extract_q(online_preds).mean(),
+        'z.q_var': self.extract_q(online_preds).var(),
+        # 'z.q_max': online_preds.q_values.max(),
+        # 'z.q_min': online_preds.q_values.min(),
+        }
+
+    return batch_td_error, batch_loss, metrics  # [T-1, B], [B]
 
 class R2D2Arch(hk.RNNCore):
   """A duelling recurrent network for use with Atari observations as seen in R2D2.

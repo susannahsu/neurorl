@@ -116,3 +116,50 @@ class LevelAvgReturnObserver(EnvLoopObserver):
       result['log_data'] = True
 
     return result
+
+
+def episode_mean(x, mask):
+  if len(mask.shape) < len(x.shape):
+    nx = len(x.shape)
+    nd = len(mask.shape)
+    extra = nx - nd
+    dims = list(range(nd, nd+extra))
+    batch_loss = jnp.multiply(x, jnp.expand_dims(mask, dims))
+  else:
+    batch_loss = jnp.multiply(x, mask)
+  return (batch_loss.sum(0))/(mask.sum(0)+1e-5)
+
+
+def make_episode_mask(data, include_final=False, **kwargs):
+  """Look at where have valid task data. Everything until 1 before final valid data counts towards task. Data.discount always ends two before final data. 
+  e.g. if valid data is [x1, x2, x3, 0, 0], data.discount is [1,0,0,0,0]. So can use that to obtain masks.
+
+  Args:
+      data (TYPE): Description
+      include_final (bool, optional): if True, include all data. if False, include until 1 time-step before final data
+
+  Returns:
+      TYPE: Description
+  """
+  T, B = data.discount.shape
+  # for data [x1, x2, x3, 0, 0]
+  if include_final:
+    # return [1,1,1,0,0]
+    return jnp.concatenate((jnp.ones((2, B)), data.discount[:-2]), axis=0)
+  else:
+    # return [1,1,0,0,0]
+    return jnp.concatenate((jnp.ones((1, B)), data.discount[:-1]), axis=0)
+
+
+def expand_tile_dim(x, size, axis=-1):
+  """E.g. shape=[1,128] --> [1,10,128] if dim=1, size=10
+  """
+  ndims = len(x.shape)
+  _axis = axis
+  if axis < 0: # go AFTER -axis dims, e.g. x=[1,128], axis=-2 --> [1,10,128]
+    axis += 1
+    _axis = axis % ndims # to account for negative
+
+  x = jnp.expand_dims(x, _axis)
+  tiling = [1]*_axis + [size] + [1]*(ndims-_axis)
+  return jnp.tile(x, tiling)

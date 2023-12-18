@@ -119,16 +119,41 @@ def setup_experiment_inputs(
   # -----------------------
   agent = agent_config_kwargs.get('agent', '')
   assert agent != '', 'please set agent'
+  
+  if agent == 'flat_q':
+    from td_agents import basics
+    from td_agents import q_learning
+    config = q_learning.Config(**config_kwargs)
+    builder = basics.Builder(
+      config=config,
+      get_actor_core_fn=basics.get_actor_core,
+      LossFn=q_learning.R2D2LossFn(
+        discount=config.discount,
+        
+        importance_sampling_exponent=config.importance_sampling_exponent,
+        burn_in_length=config.burn_in_length,
+        max_replay_size=config.max_replay_size,
+        max_priority_weight=config.max_priority_weight,
+        bootstrap_n=config.bootstrap_n,
+      ))
+    # NOTE: main differences below
+    network_factory = functools.partial(
+            q_learning.make_minigrid_networks, config=config)
+    env_kwargs['object_options'] = False  # has no mechanism to select from object options since dependent on what agent sees
 
-  if agent == 'flat_usfa':
+  elif agent == 'flat_usfa':
     from td_agents import basics
     from td_agents import sf_agents
     config = sf_agents.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      get_actor_core_fn=sf_agents.get_actor_core,
+      get_actor_core_fn=functools.partial(
+        basics.get_actor_core,
+        extract_q_values=lambda preds: preds.q_values,
+        ),
       LossFn=sf_agents.UsfaLossFn(
         discount=config.discount,
+
         importance_sampling_exponent=config.importance_sampling_exponent,
         burn_in_length=config.burn_in_length,
         max_replay_size=config.max_replay_size,
@@ -145,9 +170,13 @@ def setup_experiment_inputs(
     config = sf_agents.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      get_actor_core_fn=sf_agents.get_actor_core,
+      get_actor_core_fn=functools.partial(
+        basics.get_actor_core,
+        extract_q_values=lambda preds: preds.q_values,
+        ),
       LossFn=sf_agents.UsfaLossFn(
         discount=config.discount,
+
         importance_sampling_exponent=config.importance_sampling_exponent,
         burn_in_length=config.burn_in_length,
         max_replay_size=config.max_replay_size,
@@ -372,15 +401,20 @@ def sweep(search: str = 'default'):
         {
             "agent": tune.grid_search(['flat_usfa']),
             "seed": tune.grid_search([1]),
+            "group": tune.grid_search(['sanity-1']),
             "env.train_task_option": tune.grid_search([0]),
             "env.transfer_task_option": tune.grid_search([0]),
-            "env.respawn": tune.grid_search([True, False]),
+            "env.respawn": tune.grid_search([False]),
             "eval_task_support": tune.grid_search(['eval']),
-            "importance_sampling_exponent": tune.grid_search([0]),
-            "batch_size": tune.grid_search([32, 16]),
-            "trace_length": tune.grid_search([20, 40]),
-            "group": tune.grid_search(['flat-4-speed']),
-        }
+        },
+        {
+            "agent": tune.grid_search(['flat_q', 'flat_q_acme']),
+            "seed": tune.grid_search([1]),
+            "group": tune.grid_search(['sanity-1']),
+            "env.train_task_option": tune.grid_search([0]),
+            "env.transfer_task_option": tune.grid_search([0]),
+            "env.respawn": tune.grid_search([False]),
+        },
     ]
   elif search == 'objects':
     space = [
