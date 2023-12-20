@@ -14,6 +14,8 @@ Change "search" to what you want to search over.
 """
 import functools 
 
+from typing import Callable, Optional
+
 from enum import Enum
 
 from absl import flags
@@ -63,7 +65,7 @@ class TestOptions(Enum):
   ambigious = 2
 
 
-def make_environment(seed: int,
+def make_keyroom_object_test_env(seed: int,
                      room_size: int = 5,
                      setting: TestOptions = 0,
                      evaluation: bool = False,
@@ -175,6 +177,8 @@ def make_environment(seed: int,
   return acme_wrappers.wrap_all(env, wrapper_list)
 
 def setup_experiment_inputs(
+    make_environment_fn: Callable,
+    env_get_task_name: Optional[Callable[[dm_env.Environment], str]] = None,
     agent_config_kwargs: dict=None,
     env_kwargs: dict=None,
     debug: bool = False,
@@ -268,7 +272,7 @@ def setup_experiment_inputs(
   # -----------------------
 
   environment_factory = functools.partial(
-    make_environment,
+    make_environment_fn,
     **env_kwargs)
 
   # -----------------------
@@ -278,7 +282,7 @@ def setup_experiment_inputs(
   observers = [
       utils.LevelAvgReturnObserver(
         reset=50 if not debug else 5,
-        get_task_name=lambda e: key_room.TaskOptions(e.task_option).name
+        get_task_name=env_get_task_name,
         ),
       ]
 
@@ -304,6 +308,8 @@ def train_single(
   debug = FLAGS.debug
 
   experiment_config_inputs = setup_experiment_inputs(
+    make_environment_fn=make_keyroom_object_test_env,
+    env_get_task_name= lambda env: env.unwrapped.task.goal(),
     agent_config_kwargs=agent_config_kwargs,
     env_kwargs=env_kwargs,
     debug=debug)
