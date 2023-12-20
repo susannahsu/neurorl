@@ -14,6 +14,8 @@ Change "search" to what you want to search over.
 """
 import functools 
 
+from enum import Enum
+
 from absl import flags
 from absl import app
 from absl import logging
@@ -29,12 +31,18 @@ import dm_env
 import minigrid
 
 from lib.dm_env_wrappers import GymWrapper
-import envs.key_room as key_room
 import lib.env_wrappers as env_wrappers
 import lib.experiment_builder as experiment_builder
 import lib.experiment_logger as experiment_logger
 import lib.parallel as parallel
 import lib.utils as utils
+
+import envs.key_room as key_room
+from envs.key_room_objects_test import (
+  ObjectTestTask,
+  KeyRoomObjectTest,
+)
+
 
 flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')
@@ -48,11 +56,18 @@ flags.DEFINE_bool(
     'auto_name_wandb', True, 'automatically name wandb.')
 FLAGS = flags.FLAGS
 
+
+class TestOptions(Enum):
+  shape = 0
+  color = 1
+  ambigious = 2
+
+
 def make_environment(seed: int,
-                     object_options: bool = True,
-                     train_task_option: key_room.TaskOptions = 1,
-                     transfer_task_option: key_room.TaskOptions = 3,
+                     room_size: int = 6,
+                     setting: TestOptions = 0,
                      evaluation: bool = False,
+                     object_options: bool = True,
                      **kwargs) -> dm_env.Environment:
   """Loads environments.
   
@@ -64,18 +79,72 @@ def make_environment(seed: int,
   """
   del seed
 
+  if setting == TestOptions.shape.value:
+    # in this setting, the initial shape indicates the task color
+    train_tasks = []
+    test_tasks = []
+    for c in ['blue', 'yellow']:
+        train_tasks.append(
+          ObjectTestTask(
+            source='shape', init='ball', floor=c, w='box'))
+        test_tasks.append(
+          ObjectTestTask(
+            source='shape', init='ball', floor=c, w='ball'))
 
-  fixed_door_locs = False if evaluation else True
+        train_tasks.append(
+          ObjectTestTask(
+            source='shape', init='box', floor=c, w='ball'))
+        test_tasks.append(
+          ObjectTestTask(
+            source='shape', init='box', floor=c, w='box'))
+
+  elif setting == TestOptions.color.value:
+    # in this setting, the floor color indicates the task color
+    train_tasks = [
+      ObjectTestTask(floor='blue', init='ball', w='box'),
+      ObjectTestTask(floor='blue', init='box', w='box'),
+      ObjectTestTask(floor='yellow', init='ball', w='ball'),
+      ObjectTestTask(floor='yellow', init='box', w='ball'),
+    ]
+
+    test_tasks = [
+      ObjectTestTask(floor='blue', init='ball', w='ball'),
+      ObjectTestTask(floor='blue', init='box', w='ball'),
+      ObjectTestTask(floor='yellow', init='ball', w='box'),
+      ObjectTestTask(floor='yellow', init='box', w='box'),
+    ]
+
+  elif setting == TestOptions.ambigious.value:
+    # in this setting, it's not clear whether floor color or initial shape indicates the task color
+    floor2task_color = {
+        'red': 'blue',
+        'green': 'yellow',
+    }
+
+    train_tasks = [
+        ObjectTestTask(floor='red', init='ball', w='box', floor2task_color=floor2task_color),
+        ObjectTestTask(floor='green', init='box', w='ball', floor2task_color=floor2task_color),
+    ]
+
+    test_tasks = [
+        ObjectTestTask(floor='red', init='ball', w='ball', floor2task_color=floor2task_color),
+        ObjectTestTask(floor='red', init='box', w='ball', floor2task_color=floor2task_color),
+        ObjectTestTask(floor='green', init='box', w='box', floor2task_color=floor2task_color),
+        ObjectTestTask(floor='green', init='ball', w='box', floor2task_color=floor2task_color),
+    ]
+
+  else:
+    raise NotImplementedError(setting)
+
+  room_colors = list(set([t.goal_color() for t in train_tasks]))
 
   # create gymnasium.Gym environment
-  env = key_room.KeyRoom(
-    num_dists=0,
-    training=not evaluation,
-    train_task_option=train_task_option,
-    transfer_task_option=transfer_task_option,
-    fixed_door_locs=fixed_door_locs,
+  env = KeyRoomObjectTest(
+    room_size=room_size,
+    tasks=test_tasks if evaluation else train_tasks,
+    room_colors=room_colors,
     **kwargs)
-  
+
   ####################################
   # Gym wrappers
   ####################################

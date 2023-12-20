@@ -57,10 +57,10 @@ class GymWrapper(dm_env.Environment):
         reward,
         self.reward_spec())
 
-    if truncated:
-      return dm_env.truncation(reward, observation)
 
     if done:
+      if truncated:
+        return dm_env.truncation(reward, observation)
       return dm_env.termination(reward, observation)
     return dm_env.transition(reward, observation)
 
