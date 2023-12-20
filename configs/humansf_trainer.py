@@ -64,7 +64,7 @@ class TestOptions(Enum):
 
 
 def make_environment(seed: int,
-                     room_size: int = 6,
+                     room_size: int = 5,
                      setting: TestOptions = 0,
                      evaluation: bool = False,
                      object_options: bool = True,
