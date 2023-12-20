@@ -12,6 +12,7 @@ import numpy as np
 import operator
 import tree
 
+import matplotlib.pyplot as plt
 from acme.utils.observers import EnvLoopObserver
 
 Number = Union[int, float, np.float32, jnp.float32]
@@ -63,33 +64,60 @@ def _generate_zeros_from_spec(spec: specs.Array) -> np.ndarray:
   return np.zeros(spec.shape, spec.dtype)
 
 
-class LevelAvgReturnObserver(EnvLoopObserver):
-  """Metric: Average return over many episodes"""
-  def __init__(self, reset=100, prefix :str = '0.task', get_task_name=None):
-    super(LevelAvgReturnObserver, self).__init__()
-    self.returns = collections.defaultdict(list)
-    self.level = None
+class LevelAvgObserver(EnvLoopObserver):
+  """
+  Compute some metric over many episodes. Has some helper variables to make tracking easier.
+
+  Args:
+      reset (int): Number of episodes before resetting the metric computation.
+      prefix (str): Prefix to be added to the logged metrics.
+      get_task_name (function): A function to get the task name. If None, a default function is used.
+  
+  Attributes:
+      results (dict): A dictionary to store computed metrics for different tasks.
+      task_name (str): The name of the current task.
+      reset (int): Number of episodes before resetting the metric computation.
+      prefix (str): Prefix to be added to the logged metrics.
+      idx (int): Counter to keep track of the number of episodes.
+      logging (bool): Flag to enable or disable logging.
+  """
+  def __init__(self, reset=100, prefix: str = '0.task', get_task_name=None):
+    super(LevelAvgObserver, self).__init__()
+    self.results = collections.defaultdict(list)
+    self.task_name = None
     self.reset = reset
     self.prefix = prefix
     self.idx = 0
+    self.logging = True
     if get_task_name is None:
-      get_task_name = lambda env: "Episode"
-      logging.info("WARNING: if multi-task, suggest setting `get_task_name` in `LevelAvgReturnObserver`. This will log separate statistics for each task.")
+      def get_task_name(env): return "Episode"
+      logging.info(
+          "WARNING: if multi-task, suggest setting `get_task_name` in `LevelAvgReturnObserver`. This will log separate statistics for each task.")
     self._get_task_name = get_task_name
+
+  def current_task(self, env):
+    """
+    Get the name of the current task.
+
+    Args:
+        env: The environment.
+
+    Returns:
+        str: The name of the current task.
+    """
+    return self._get_task_name(env)
+
+class LevelAvgReturnObserver(LevelAvgObserver):
+  """Metric: Average return over many episodes"""
 
   def observe_first(self, env: dm_env.Environment, timestep: dm_env.TimeStep
                     ) -> None:
     """Observes the initial state __after__ reset."""
     self.idx += 1
-    if self.level is not None:
-      self.returns[self.level].append(self._episode_return)
-      self.returns['0.overall'].append(self._episode_return)
-
+    self.task_name = self.current_task(env)
     self._episode_return = tree.map_structure(
       _generate_zeros_from_spec,
       env.reward_spec())
-    self.level = self._get_task_name(env)
-
 
   def observe(self, env: dm_env.Environment, timestep: dm_env.TimeStep,
               action: np.ndarray) -> None:
@@ -99,19 +127,20 @@ class LevelAvgReturnObserver(EnvLoopObserver):
       self._episode_return,
       timestep.reward)
 
+    if timestep.last():
+      self.results[self.task_name].append(self._episode_return)
+      self.results['0.overall'].append(self._episode_return)
+
   def get_metrics(self) -> Dict[str, Number]:
     """Returns metrics collected for the current episode."""
     result = {}
 
     if self.idx % self.reset == 0:
-      # add latest (otherwise deleted)
-      self.returns[self.level].append(self._episode_return)
-
-      for key, returns in self.returns.items():
+      for key, returns in self.results.items():
         if not returns: continue
         avg = np.array(returns).mean()
         result[f'{self.prefix}/{key}/avg_return'] = float(avg)
-        self.returns[key] = []
+        self.results[key] = []
 
       result['log_data'] = True
 
@@ -163,3 +192,12 @@ def expand_tile_dim(x, size, axis=-1):
   x = jnp.expand_dims(x, _axis)
   tiling = [1]*_axis + [size] + [1]*(ndims-_axis)
   return jnp.tile(x, tiling)
+
+
+def array_from_fig(fig):
+  # Save the figure to a numpy array
+  fig.canvas.draw()
+  image_from_plot = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+  img = image_from_plot.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+  plt.close(fig)
+  return img

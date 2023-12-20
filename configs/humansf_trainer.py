@@ -43,6 +43,7 @@ import envs.key_room as key_room
 from envs.key_room_objects_test import (
   ObjectTestTask,
   KeyRoomObjectTest,
+  ObjectCountObserver,
 )
 
 
@@ -277,14 +278,18 @@ def setup_experiment_inputs(
 
   # -----------------------
   # setup observer factory for environment
-  # this logs the average every reset=50 episodes (instead of every episode)
   # -----------------------
   observers = [
-      utils.LevelAvgReturnObserver(
-        reset=50 if not debug else 5,
-        get_task_name=env_get_task_name,
-        ),
-      ]
+    # this logs the average every reset=50 episodes (instead of every episode)
+    utils.LevelAvgReturnObserver(
+      reset=50 if not debug else 5,
+      get_task_name=env_get_task_name,
+      ),
+    ObjectCountObserver(
+      reset=100 if not debug else 5,
+      prefix='Images',
+      get_task_name=env_get_task_name),
+  ]
 
   return experiment_builder.OnlineExperimentConfigInputs(
     agent=agent,
@@ -309,7 +314,7 @@ def train_single(
 
   experiment_config_inputs = setup_experiment_inputs(
     make_environment_fn=make_keyroom_object_test_env,
-    env_get_task_name= lambda env: env.unwrapped.task.goal(),
+    env_get_task_name= lambda env: env.unwrapped.task.goal_name(),
     agent_config_kwargs=agent_config_kwargs,
     env_kwargs=env_kwargs,
     debug=debug)
@@ -469,30 +474,13 @@ def run_many():
 def sweep(search: str = 'default'):
   if search == 'flat':
     space = [
-        # {
-        #     "agent": tune.grid_search(['flat_usfa']),
-        #     "seed": tune.grid_search([1,2]),
-        #     "env.train_task_option": tune.grid_search([0, 1, 4]),
-        #     "env.transfer_task_option": tune.grid_search([0, 3]),
-        #     "eval_task_support": tune.grid_search(['eval']),
-        #     "group": tune.grid_search(['flat-3']),
-        # },
-        # {
-        #     "agent": tune.grid_search(['flat_usfa']),
-        #     "seed": tune.grid_search([1]),
-        #     "group": tune.grid_search(['sanity-1']),
-        #     "env.train_task_option": tune.grid_search([0]),
-        #     "env.transfer_task_option": tune.grid_search([0]),
-        #     "env.respawn": tune.grid_search([False]),
-        #     "eval_task_support": tune.grid_search(['eval']),
-        # },
         {
-            "agent": tune.grid_search(['flat_q']),
+            "agent": tune.grid_search(['flat_q', 'flat_usfa']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['sanity-1-task']),
-            "env.train_task_option": tune.grid_search([0]),
-            "env.transfer_task_option": tune.grid_search([0]),
-            "env.respawn": tune.grid_search([False]),
+            "group": tune.grid_search(['object-test-1']),
+            "env.setting": tune.grid_search([0, 1, 2]),
+            # "env.transfer_task_option": tune.grid_search([0]),
+            # "env.respawn": tune.grid_search([False]),
         },
     ]
   elif search == 'objects':

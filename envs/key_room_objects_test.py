@@ -1,24 +1,25 @@
 from __future__ import annotations
 from enum import Enum
+from absl import logging
 
 import copy
 from gymnasium import spaces
-from typing import Optional, Union, List
-import itertools
+from typing import Optional, Union, List, Dict
+
+import wandb
+import dm_env
+import matplotlib.pyplot as plt
 import numpy as np
 
-from minigrid.envs.babyai import goto
 from minigrid.envs.babyai.core.levelgen import LevelGen
-
-import numpy as np
-
-from minigrid.core.constants import COLOR_NAMES, OBJECT_TO_IDX
-from minigrid.core.grid import Grid
-from minigrid.core.world_object import Ball, Box, Door, Key, WorldObj, Floor
-from minigrid.minigrid_env import MiniGridEnv
+from minigrid.core.world_object import Ball, Box, Key, Floor
 
 from minigrid.envs.babyai.core.roomgrid_level import RoomGridLevel, RejectSampling
-from minigrid.envs.babyai.core.verifier import PickupInstr, ObjDesc, Instr
+from minigrid.envs.babyai.core.verifier import Instr
+
+from lib.utils import LevelAvgObserver, array_from_fig
+
+Number = Union[int, float, np.float32]
 
 class DummyInstr(Instr):
     """
@@ -42,8 +43,8 @@ def construct(shape: str, color: str):
   else:
     raise NotImplementedError(f"shape {shape} not supported")
 
-
-
+def name(o):
+   return f"{o.color} {o.type}"
 
 class ObjectTestTask:
     def __init__(self,
@@ -111,6 +112,10 @@ class ObjectTestTask:
        else:
          raise NotImplementedError(f"source {self.source} not supported")
 
+    def goal_name(self):
+      color, type = self.goal()
+      return f"{color} {type}"
+
     def goal_color(self):
        return self.goal()[0]
 
@@ -177,9 +182,29 @@ class ObjectTestTask:
 
 class KeyRoomObjectTest(LevelGen):
     """
+    KeyRoomObjectTest is a class for generating grid-based environments with tasks involving keys, doors, and objects
+    of different colors.
 
+    Args:
+        tasks (List[ObjectTestTask]): A list of tasks to be performed in the environment.
+        room_size (int, optional): The size of each room in the grid. Defaults to 7.
+        num_rows (int, optional): The number of rows of rooms in the grid. Defaults to 3.
+        num_cols (int, optional): The number of columns of rooms in the grid. Defaults to 3.
+        num_dists (int, optional): The number of distractor objects. Defaults to 0.
+        locations (bool, optional): Whether to randomize object locations. Defaults to False.
+        unblocking (bool, optional): Whether unblocking is required. Defaults to False.
+        rooms_locked (bool, optional): Whether rooms are initially locked. Defaults to True.
+        include_task_signals (bool, optional): Whether to include task-specific signals. Defaults to True.
+        max_steps_per_room (int, optional): The maximum number of steps per room. Defaults to 100.
+        implicit_unlock (bool, optional): Whether implicit unlocking is allowed. Defaults to True.
+        room_colors (List[str], optional): The colors of the rooms in the grid. Defaults to ['blue', 'yellow', 'red', 'green'].
+
+    Attributes:
+        tasks (List[ObjectTestTask]): A list of tasks to be performed in the environment.
+        rooms_locked (bool): Whether rooms are initially locked.
+        room_colors (List[str]): The colors of the rooms in the grid.
+        include_task_signals (bool): Whether to include task-specific signals.
     """
-
     def __init__(self,
       tasks: List[ObjectTestTask],
       room_size=7,
@@ -194,18 +219,33 @@ class KeyRoomObjectTest(LevelGen):
       implicit_unlock=True,
       room_colors: List[str] = ['blue', 'yellow', 'red', 'green'],
       **kwargs):
-      """Keyroom.
+      """
+      Initialize a KeyRoomObjectTest environment with customizable parameters.
+
+      NOTE: this environment assumes that the objects present in a task are present across ALL tasks. This is used for keeping maintaining track of which objects are picked up.
 
       Args:
-          room_size (int, optional): _description_. Defaults to 7.
-          num_rows (int, optional): _description_. Defaults to 3.
-          num_cols (int, optional): _description_. Defaults to 3.
-          num_dists (int, optional): _description_. Defaults to 10.
-          locations (bool, optional): _description_. Defaults to False.
-          unblocking (bool, optional): _description_. Defaults to False.
-          implicit_unlock (bool, optional): _description_. Defaults to False.
-          fixed_door_locs (bool, optional): _description_. Defaults to True.
+          tasks (List[ObjectTestTask]): A list of tasks to be performed in the environment.
+          room_size (int, optional): The size of each room in the grid. Defaults to 7.
+          num_rows (int, optional): The number of rows of rooms in the grid. Defaults to 3.
+          num_cols (int, optional): The number of columns of rooms in the grid. Defaults to 3.
+          num_dists (int, optional): The number of distractor objects. Defaults to 0.
+          locations (bool, optional): Whether to randomize object locations. Defaults to False.
+          unblocking (bool, optional): Whether unblocking is required. Defaults to False.
+          rooms_locked (bool, optional): Whether rooms are initially locked. Defaults to True.
+          include_task_signals (bool, optional): Whether to include task-specific signals. Defaults to True.
+          max_steps_per_room (int, optional): The maximum number of steps per room. Defaults to 100.
+          implicit_unlock (bool, optional): Whether implicit unlocking is allowed. Defaults to True.
+          room_colors (List[str], optional): The colors of the rooms in the grid. Defaults to ['blue', 'yellow', 'red', 'green'].
+          **kwargs: Additional keyword arguments for customization.
+
+      Attributes:
+          tasks (List[ObjectTestTask]): A list of tasks to be performed in the environment.
+          rooms_locked (bool): Whether rooms are initially locked.
+          room_colors (List[str]): The colors of the rooms in the grid.
+          include_task_signals (bool): Whether to include task-specific signals (i.e. room color, indicator object).
       """
+
       self.tasks = tasks
       self.rooms_locked = rooms_locked
       self.room_colors = room_colors
@@ -239,7 +279,7 @@ class KeyRoomObjectTest(LevelGen):
       )
       self.observation_space = spaces.Dict(
           {**self.observation_space.spaces,
-           #  "state_features": cumulants_space,
+           "state_features": cumulants_space,
            "task": copy.deepcopy(cumulants_space),  # equivalent specs
            "train_tasks": train_task_vectors,
            }
@@ -263,6 +303,7 @@ class KeyRoomObjectTest(LevelGen):
       ###########################
       # Place keys, door, and ball of same color
       ###########################
+      self.all_objects = []
       # colors = ['red', 'green', 'yellow', 'grey']
       colors = self.room_colors
       # starts to the right for some reason
@@ -274,6 +315,7 @@ class KeyRoomObjectTest(LevelGen):
       for room_idx, color in enumerate(colors):
         room = goal_room_coords[room_idx]
         key, ball, box = generate_room_objects(color)
+        self.all_objects.extend([key, ball, box])
         self.place_in_room(*center_room, key)
         self.place_in_room(*room, ball)
         self.place_in_room(*room, box)
@@ -293,6 +335,7 @@ class KeyRoomObjectTest(LevelGen):
       if self.include_task_signals:
         init_object = self.task.initial_object()
         self.place_in_room(*center_room, init_object)
+        self.all_objects.extend([init_object])
 
         init_floor = self.task.initial_floor()
         self.place_in_room(*center_room, init_floor)
@@ -301,9 +344,6 @@ class KeyRoomObjectTest(LevelGen):
 
       self.instrs = DummyInstr()
       self.task_vector = self.task_type_vector = self.task.task_type_vector()
-      # self.task_matrix = np.array(
-      #    [self.task_vector,
-      #     self.task.task_color_vector()])
 
     def update_obs(self, obs, state_features):
       obs['task'] = self.task_vector
@@ -314,6 +354,10 @@ class KeyRoomObjectTest(LevelGen):
     def reset(self, *args, **kwargs):
         obs, info = super().reset(*args, **kwargs)
         self.update_obs(obs, np.zeros_like(self.task_vector))
+
+        # reset object counts
+        self.object_counts = {name(o):0 for o in self.all_objects}
+        self.carrying_prior = None
         return obs, info
 
     def step(self, action, **kwargs):
@@ -327,6 +371,13 @@ class KeyRoomObjectTest(LevelGen):
       if self.step_count >= self._max_steps:
           truncated = True
           terminated = True
+
+      # was not carrying an object before but am now
+      if self.carrying_prior is None and self.carrying:
+         self.object_counts[name(self.carrying)] += 1
+
+      # update object counts
+      self.carrying_prior = self.carrying
 
       return obs, reward, terminated, truncated, info
 
@@ -360,3 +411,80 @@ class KeyRoomObjectTest(LevelGen):
     def num_navs_needed(self, instr: str = None) -> int:
         return 2
 
+
+def dict_mean(dict_list):
+    mean_dict = {}
+    for key in dict_list[0].keys():
+        mean_dict[key] = sum(d[key] for d in dict_list) / len(dict_list)
+    return mean_dict
+
+class ObjectCountObserver(LevelAvgObserver):
+  """Log object counts over episodes and create barplot."""
+
+  def observe_first(self, env: dm_env.Environment, timestep: dm_env.TimeStep
+                    ) -> None:
+    """Observes the initial state __after__ reset. Increments by 1, logs task_name."""
+    self.idx += 1
+    self.task_name = self.current_task(env)
+
+  def observe(self,
+              env: dm_env.Environment,
+              timestep: dm_env.TimeStep,
+              action: np.ndarray) -> None:
+    """At last time-step, record object counts."""
+    if timestep.last():
+       self.results[self.task_name].append(env.unwrapped.object_counts)
+
+  def get_metrics(self) -> Dict[str, Number]:
+    """Every K episodes, create and log a barplot to wandb with object counts."""
+    if not self.logging: return
+
+    if self.idx % self.reset == 0 and self.logging:
+
+      for key, counts in self.results.items():
+        # {name: counts}
+        data = dict_mean(counts)
+
+        # Mapping of color names to colors
+        color_mapping = {
+            'red': 'r',
+            'green': 'g',
+            'blue': 'b',
+            'purple': '#701FC3',  # Use hex color code for custom colors
+            'yellow': 'y',
+            'grey': '#646464',    # Use hex color code for custom colors
+        }
+
+        # Mapping of shape names to Unicode characters
+        shape_mapping = {
+            'box': '\u25A1',    # Unicode for a square shape
+            'ball': '\u25CF',   # Unicode for a circle shape
+            'key': '\u272A'     # Unicode for a star shape
+        }
+
+        # Create subplots with fig and ax
+        fig, ax = plt.subplots()
+        values = data.values()
+        ax.bar(np.arange(len(values)), values)
+
+        # Customize key labels with colors and shapes
+        for i, (obj, _) in enumerate(data.items()):
+            color_name, shape_name = obj.split()
+            color = color_mapping.get(color_name, 'black')  # Default to black if color not found
+            shape = shape_mapping.get(shape_name, '')  # Empty string if shape not found
+            ax.text(i, -0.1, shape, rotation=0,
+                    ha='center', va='top', color=color)
+
+        ax.set_xticks([])
+        ax.set_ylabel("Counts", fontsize=12)
+        ax.set_title(str(key), fontsize=14)
+
+        try:
+          wandb.log({f"{self.prefix}/counts_{key}": wandb.Image(fig)})
+          plt.close(fig)
+        except wandb.errors.Error as e:
+          self.logging = False
+          logging.warning(f"{self.prefix}: turning off logging.")
+
+
+    return {}
