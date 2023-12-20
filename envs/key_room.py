@@ -57,7 +57,6 @@ def reject_next_to(env, pos):
     return d < 2
 
 
-
 class TaskOptions(Enum):
     keys = 0
     keys_balls = 1
@@ -295,52 +294,17 @@ class KeyRoom(LevelGen):
         self.update_obs(obs)
         return obs, info
 
-    def check_object_picked_up(self, action):
-      terminate = False
-      if not self.carrying:
-          return 0.0, terminate
-
-      # get reward
-      object = self.carrying
-      object_name = make_name(object.color, object.type)
-      obj_idx = self.name_2_idx[object_name]
-
-      reward = float(self.task_vector[obj_idx])
-      if reward != 0.0:
-        # reward = float(self.object2reward[obj_type])
-        self.carrying = None
-
-        if self.respawn:
-          # move object
-          room = self.room_from_pos(*self.agent_pos)
-
-          pos = self.place_obj(
-              object,
-              room.top,
-              room.size,
-              reject_fn=reject_next_to,
-              max_tries=1000
-          )
-          # self.object_occurrences[obj_idx] += 1
-        else:
-          terminate = True
-        return reward, terminate
-
-      return reward, terminate
-
     def step(self, action, **kwargs):
-        obs, reward, terminated, truncated, info = super().step(action, **kwargs)
-        reward, terminated = self.check_object_picked_up(action)
-        self.update_obs(obs)
+      obs, reward, terminated, truncated, info = super().step(action, **kwargs)
+      self.update_obs(obs)
 
-        # if self.instruction.verify(action) == "success":
-        #    terminated = True
+      reward = (obs['state_features']*obs['task']).sum(-1)
 
-        if self.step_count >= self._max_steps:
-            truncated = True
-            terminated = True
+      if self.step_count >= self._max_steps:
+          truncated = True
+          terminated = True
 
-        return obs, reward, terminated, truncated, info
+      return obs, reward, terminated, truncated, info
 
     def all_types(self):
         return set(self._train_objects+self._transfer_objects)
