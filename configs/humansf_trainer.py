@@ -123,6 +123,7 @@ def setup_experiment_inputs(
   if agent == 'flat_q':
     from td_agents import basics
     from td_agents import q_learning
+    import haiku as hk
     config = q_learning.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
@@ -138,7 +139,10 @@ def setup_experiment_inputs(
       ))
     # NOTE: main differences below
     network_factory = functools.partial(
-            q_learning.make_minigrid_networks, config=config)
+            q_learning.make_minigrid_networks,
+            config=config,
+            task_encoder=lambda obs: hk.Linear(128)(obs['task']))
+
     env_kwargs['object_options'] = False  # has no mechanism to select from object options since dependent on what agent sees
 
   elif agent == 'flat_usfa':
@@ -398,19 +402,19 @@ def sweep(search: str = 'default'):
         #     "eval_task_support": tune.grid_search(['eval']),
         #     "group": tune.grid_search(['flat-3']),
         # },
+        # {
+        #     "agent": tune.grid_search(['flat_usfa']),
+        #     "seed": tune.grid_search([1]),
+        #     "group": tune.grid_search(['sanity-1']),
+        #     "env.train_task_option": tune.grid_search([0]),
+        #     "env.transfer_task_option": tune.grid_search([0]),
+        #     "env.respawn": tune.grid_search([False]),
+        #     "eval_task_support": tune.grid_search(['eval']),
+        # },
         {
-            "agent": tune.grid_search(['flat_usfa']),
+            "agent": tune.grid_search(['flat_q']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['sanity-1']),
-            "env.train_task_option": tune.grid_search([0]),
-            "env.transfer_task_option": tune.grid_search([0]),
-            "env.respawn": tune.grid_search([False]),
-            "eval_task_support": tune.grid_search(['eval']),
-        },
-        {
-            "agent": tune.grid_search(['flat_q', 'flat_q_acme']),
-            "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['sanity-1']),
+            "group": tune.grid_search(['sanity-1-task']),
             "env.train_task_option": tune.grid_search([0]),
             "env.transfer_task_option": tune.grid_search([0]),
             "env.respawn": tune.grid_search([False]),

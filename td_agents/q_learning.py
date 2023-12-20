@@ -1,24 +1,18 @@
 
-from typing import Optional, Tuple, Iterator, Optional, NamedTuple
+from typing import Optional, Tuple, Iterator, Optional, NamedTuple, Callable
 
 import functools
 
-from acme import core
 from acme import specs
 from acme.agents.jax import r2d2
-from acme.agents.jax.r2d2 import learning as r2d2_learning
-from acme.agents.jax.r2d2 import networks as r2d2_networks
 from acme.jax.networks import base
 from acme.jax import networks as networks_lib
-from acme.utils import counting
-from acme.utils import loggers
 from acme.wrappers import observation_action_reward
 from acme.jax.networks import duelling
+from acme import types as acme_types
 
 import dataclasses
 import haiku as hk
-import optax
-import reverb
 import jax
 import jax.numpy as jnp
 import rlax
@@ -28,6 +22,7 @@ import lib.networks as networks
 from lib import utils 
 from td_agents import basics
 
+Array = acme_types.NestedArray
 
 @dataclasses.dataclass
 class Config(basics.Config):
@@ -136,7 +131,7 @@ class R2D2Arch(hk.RNNCore):
 def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,
         config: Config,
-        use_language: bool = False,
+        task_encoder: Callable[[Array], Array] = lambda obs: None
         ) -> r2d2.R2D2Networks:
   """Builds default R2D2 networks for Atari games."""
 
@@ -145,12 +140,6 @@ def make_minigrid_networks(
   def make_core_module() -> R2D2Arch:
     vision_torso = networks.AtariVisionTorso(
       out_dim=config.state_dim)
-
-    if use_language:
-      task_encoder = networks.LanguageEncoder(
-          vocab_size=1000, word_dim=128)
-    else:
-      task_encoder = lambda obs: None
 
     observation_fn = networks.OarTorso(
       num_actions=num_actions,

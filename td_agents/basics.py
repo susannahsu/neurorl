@@ -8,12 +8,9 @@ from absl import logging
 import dataclasses
 import haiku as hk
 import collections
-import acme
 from acme import adders
 from acme import core
 from acme import specs
-from acme.adders import reverb as adders_reverb
-from acme.agents.jax import actors
 from acme import types as acme_types
 
 import acme
@@ -24,20 +21,16 @@ from acme.jax import utils
 from acme.utils import async_utils
 from acme.utils import counting
 from acme.utils import loggers
-from acme.agents.jax import builders
 from acme.agents.jax import r2d2
 from acme.jax import utils
-from acme.agents.jax import actors
 from acme.agents.jax import actor_core as actor_core_lib
 from acme.agents.jax.r2d2 import actor as r2d2_actor
 from acme.agents.jax.r2d2 import actor as r2d2_actor
 from acme.agents.jax.r2d2 import config as r2d2_config
 from acme.agents.jax.r2d2 import learning as r2d2_learning
 from acme.agents.jax.r2d2 import networks as r2d2_networks
-from acme.datasets import reverb as datasets
 from acme.jax import networks as networks_lib
 from acme.jax import utils
-from acme.jax import variable_utils
 from acme.utils import counting
 from acme.utils import loggers
 
@@ -57,9 +50,7 @@ import optax
 import reverb
 import rlax
 import tree
-import typing_extensions
 
-import lib.utils as data_utils
 
 _PMAP_AXIS_NAME = 'data'
 LossFn = learning_lib.LossFn
@@ -559,7 +550,6 @@ class SGDLearner(learning_lib.SGDLearner):
       else:
         metrics['learner'] = learner_metrics
 
-      # result = data_utils.flatten_dict(result, sep="_")
       self._logger.write(metrics)
 
 class Builder(r2d2.R2D2Builder):

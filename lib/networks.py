@@ -166,7 +166,7 @@ class OarTorso(hk.Module):
     """_no_ batch [B] dimension."""
     # compute task encoding
 
-    task = self._task_encoder(inputs.observation['mission'])
+    task = self._task_encoder(inputs.observation)
 
     # get action one-hot
     action = jax.nn.one_hot(
