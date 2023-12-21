@@ -169,7 +169,8 @@ class WandbLogger(base.Logger):
         new_dict = data_utils.flatten_dict(
           value, parent_key=key, sep="/")
         for k2, v2 in new_dict.items():
-          name = self._name_fn(self.label, k2)
+          # bit of a hack
+          name = self.label + "/" +  k2
           to_log[name] = v2
       else:
         name = self._name_fn(self.label, key)

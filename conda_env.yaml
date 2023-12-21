@@ -13,6 +13,7 @@ dependencies:
     - chex==0.1.6
     - ray[tune]
     - ipdb
+    - minigrid
 
 
 

@@ -67,8 +67,8 @@ class TestOptions(Enum):
 
 
 def make_keyroom_object_test_env(seed: int,
-                     room_size: int = 5,
-                     setting: TestOptions = 0,
+                     setting: TestOptions,
+                     room_size: int = 6,
                      evaluation: bool = False,
                      object_options: bool = True,
                      **kwargs) -> dm_env.Environment:
@@ -201,7 +201,10 @@ def setup_experiment_inputs(
     config = q_learning.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      get_actor_core_fn=basics.get_actor_core,
+      get_actor_core_fn=functools.partial(
+        basics.get_actor_core,
+        linear_schedule=config.linear_schedule,
+      ),
       LossFn=q_learning.R2D2LossFn(
         discount=config.discount,
         
@@ -228,6 +231,7 @@ def setup_experiment_inputs(
       get_actor_core_fn=functools.partial(
         basics.get_actor_core,
         extract_q_values=lambda preds: preds.q_values,
+        linear_schedule=config.linear_schedule,
         ),
       LossFn=sf_agents.UsfaLossFn(
         discount=config.discount,
@@ -251,6 +255,7 @@ def setup_experiment_inputs(
       get_actor_core_fn=functools.partial(
         basics.get_actor_core,
         extract_q_values=lambda preds: preds.q_values,
+        linear_schedule=config.linear_schedule,
         ),
       LossFn=sf_agents.UsfaLossFn(
         discount=config.discount,
@@ -279,6 +284,7 @@ def setup_experiment_inputs(
   # -----------------------
   # setup observer factory for environment
   # -----------------------
+  test_setting = TestOptions(env_kwargs['setting']).name
   observers = [
     # this logs the average every reset=50 episodes (instead of every episode)
     utils.LevelAvgReturnObserver(
@@ -286,8 +292,9 @@ def setup_experiment_inputs(
       get_task_name=env_get_task_name,
       ),
     ObjectCountObserver(
-      reset=100 if not debug else 5,
-      prefix='Images',
+      reset=1000 if not debug else 5,
+      prefix=f'Images-{test_setting}',
+      agent_name=agent,
       get_task_name=env_get_task_name),
   ]
 
@@ -428,6 +435,9 @@ def run_single():
       agent_config_kwargs.update(first_agent_config)
       env_kwargs.update(first_env_config)
 
+  if not run_distributed:
+    agent_config_kwargs['samples_per_insert'] = 1
+
   train_single(
     wandb_init_kwargs=wandb_init_kwargs,
     env_kwargs=env_kwargs,
@@ -475,12 +485,22 @@ def sweep(search: str = 'default'):
   if search == 'flat':
     space = [
         {
-            "agent": tune.grid_search(['flat_q', 'flat_usfa']),
+            "agent": tune.grid_search(['flat_usfa', 'flat_q']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['object-test-1']),
-            "env.setting": tune.grid_search([0, 1, 2]),
+            "group": tune.grid_search(['object-test-2']),
+            "env.setting": tune.grid_search([0]),
             # "env.transfer_task_option": tune.grid_search([0]),
-            # "env.respawn": tune.grid_search([False]),
+            "linear_schedule": tune.grid_search([True, False]),
+        },
+    ]
+  elif search == 'speed':
+    space = [
+        {
+            "agent": tune.grid_search(['flat_q']),
+            "seed": tune.grid_search([1]),
+            "samples_per_insert": tune.grid_search([0]),
+            "group": tune.grid_search(['speed-test-6-indexing']),
+            "env.setting": tune.grid_search([0, 1]),
         },
     ]
   elif search == 'objects':

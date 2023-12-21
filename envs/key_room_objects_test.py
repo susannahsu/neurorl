@@ -5,6 +5,7 @@ from absl import logging
 import copy
 from gymnasium import spaces
 from typing import Optional, Union, List, Dict
+import itertools
 
 import wandb
 import dm_env
@@ -46,6 +47,28 @@ def construct(shape: str, color: str):
 def name(o):
    return f"{o.color} {o.type}"
 
+class ObjectTestTaskFeatures:
+   def __init__(self, colors, types):
+      self.thing2indx = {}
+      for idx, (color, shape) in enumerate(itertools.product(colors, types)):
+          self.thing2indx[(color, shape)] = idx
+
+   def task(self, obj2reward: dict):
+      vector = np.zeros(len(self.thing2indx))
+      for obj, reward in obj2reward.items():
+        vector[self.thing2indx[obj]] = reward
+
+      return vector
+
+   def empty_state_features(self):
+      vector = np.zeros(len(self.thing2indx))
+      return vector
+
+   def state_features(self, color: str, type: str):
+      vector = np.zeros(len(self.thing2indx))
+      vector[self.thing2indx[(color, type)]] = 1.0
+      return vector
+
 class ObjectTestTask:
     def __init__(self,
                  floor,
@@ -71,11 +94,16 @@ class ObjectTestTask:
            'ball': 2,
            'box': 3,
         }
-        self.type2indx = type2indx
         floor2task_color = floor2task_color or {
             'blue': 'red',
             'yellow': 'green',
         }
+
+        colors = floor2task_color.values()
+
+        self.task_features_cnstr = ObjectTestTaskFeatures(colors, self.types)
+
+        self.type2indx = type2indx
         self.task_colors = list(floor2task_color.values())
         self.floor2task_color = floor2task_color
         self.shape2task_color = {
@@ -83,14 +111,13 @@ class ObjectTestTask:
             'box': 'green',
         }
 
-    def task_type_vector(self):
-       vector = [.1, .5, 0., 0]
-       vector[self.type2indx[self.goal_object()]] = self.task_reward
-       return np.array(vector)
-
-    def task_color_vector(self):
-       vector = [float(t == self.goal_color()) for t in self.task_colors]
-       return np.array(vector)
+    def task_vector(self):
+       vector = self.task_features_cnstr.task(obj2reward={
+        (self.goal_color(), 'key'): .1,
+        (self.goal_color(), 'task_room'): .5,
+        self.goal(): self.task_reward
+       })
+       return vector
 
     def initial_object(self):
       return construct(shape=self.init, color='grey')
@@ -158,14 +185,16 @@ class ObjectTestTask:
           env.carrying.type == type and 
           env.carrying.color == color):
          terminal = True
-         state_features = onehot(type)
+         state_features = self.task_features_cnstr.state_features(
+            color=color, type=type)
          return state_features, terminal
 
       # check # 2: have you entered the task room for 1st time
       if (not self.entered_task_room and 
             self.agent_in_task_room(env)):
          self.entered_task_room = True
-         state_features = onehot('task_room')
+         state_features = self.task_features_cnstr.state_features(
+            color=color, type='task_room')
          return state_features, terminal
 
       # check # 3: have you picked up the task key
@@ -174,10 +203,11 @@ class ObjectTestTask:
             env.carrying.type == 'key' and
             env.carrying.color == color):
          self.picked_up_key = True
-         state_features = onehot('key')
+         state_features = self.task_features_cnstr.state_features(
+            color=color, type='key')
          return state_features, terminal
 
-      state_features = np.zeros(len(self.types))
+      state_features = self.task_features_cnstr.empty_state_features()
       return state_features, terminal
 
 class KeyRoomObjectTest(LevelGen):
@@ -251,8 +281,8 @@ class KeyRoomObjectTest(LevelGen):
       self.room_colors = room_colors
       self.include_task_signals = include_task_signals
       
-      dummy_task_vector = self.tasks[0].task_type_vector()
-      self.train_task_vectors = np.array([t.task_type_vector() for t in tasks])
+      dummy_task_vector = self.tasks[0].task_vector()
+      self.train_task_vectors = np.array([t.task_vector() for t in tasks])
 
       super().__init__(
           room_size=room_size,
@@ -268,7 +298,7 @@ class KeyRoomObjectTest(LevelGen):
       cumulants_space = spaces.Box(
           low=0,
           high=100.0,
-          shape=(len(dummy_task_vector),),  # number of cells
+          shape=dummy_task_vector.shape,  # number of cells
           dtype="float32",
       )
       train_task_vectors = spaces.Box(
@@ -343,7 +373,7 @@ class KeyRoomObjectTest(LevelGen):
         self.place_in_room(*center_room, init_floor)
 
       self.instrs = DummyInstr()
-      self.task_vector = self.task_type_vector = self.task.task_type_vector()
+      self.task_vector = self.task.task_vector()
 
     def update_obs(self, obs, state_features):
       obs['task'] = self.task_vector
@@ -421,6 +451,10 @@ def dict_mean(dict_list):
 class ObjectCountObserver(LevelAvgObserver):
   """Log object counts over episodes and create barplot."""
 
+  def __init__(self, *args, agent_name: str = '', **kwargs):
+    super(ObjectCountObserver, self).__init__(*args, **kwargs)
+    self.agent_name = agent_name
+
   def observe_first(self, env: dm_env.Environment, timestep: dm_env.TimeStep
                     ) -> None:
     """Observes the initial state __after__ reset. Increments by 1, logs task_name."""
@@ -437,7 +471,7 @@ class ObjectCountObserver(LevelAvgObserver):
 
   def get_metrics(self) -> Dict[str, Number]:
     """Every K episodes, create and log a barplot to wandb with object counts."""
-    if not self.logging: return
+    if not self.logging: return {}
 
     if self.idx % self.reset == 0 and self.logging:
 
@@ -463,12 +497,14 @@ class ObjectCountObserver(LevelAvgObserver):
         }
 
         # Create subplots with fig and ax
-        fig, ax = plt.subplots()
+        width, height = 8, 8
+        fig, ax = plt.subplots(figsize=(width, height))
         values = data.values()
         ax.bar(np.arange(len(values)), values)
 
+        objs = sorted(list(data.keys()))
         # Customize key labels with colors and shapes
-        for i, (obj, _) in enumerate(data.items()):
+        for i, obj in enumerate(objs):
             color_name, shape_name = obj.split()
             color = color_mapping.get(color_name, 'black')  # Default to black if color not found
             shape = shape_mapping.get(shape_name, '')  # Empty string if shape not found
@@ -477,7 +513,8 @@ class ObjectCountObserver(LevelAvgObserver):
 
         ax.set_xticks([])
         ax.set_ylabel("Counts", fontsize=12)
-        ax.set_title(str(key), fontsize=14)
+        ax.set_title(f"{self.agent_name}: {str(key)}", fontsize=14)
+        fig.tight_layout()
 
         try:
           wandb.log({f"{self.prefix}/counts_{key}": wandb.Image(fig)})

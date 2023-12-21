@@ -22,8 +22,10 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.
 ```
 
 # Install
-Change `LD_LIBRARY_PATH` in `install-fas.sh` as needed based on above
+
+Add the cudnn path to `LD_LIBRARY_PATH` and run `install-fas.sh`. Example:
 ```
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/
 chmod u+x install-fas.sh
 ./install-fas.sh
 ```

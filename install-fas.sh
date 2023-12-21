@@ -6,24 +6,11 @@ module load cuda/11.3.1-fasrc01
 module load cudnn/8.9.2.26_cuda11-fasrc01
 module load gcc/9.5.0-fasrc01
 
-mamba create --name neurorl python=3.9 pip wheel -y
+conda create --name neurorl python=3.9 pip wheel -y
 
 source activate neurorl
 
 conda env update --name neurorl --file conda_env.yaml
-
-#############################################
-# Minigrid
-# at the time, needed this version because the babyai bot was not available via pip
-#############################################
-
-git clone https://github.com/Farama-Foundation/Minigrid _minigrid
-echo "Installing minigrid manually. At the time, need this version because the babyai bot was not available via pip"
-cd _minigrid
-git checkout e726259e86d555c7055fb48bd5842cf37af78bfd
-pip install --editable .
-cd ..
-
 
 #############################################
 # ACME
@@ -40,7 +27,6 @@ cd ..
 #############################################
 # inspired from: https://github.com/wcarvalho/oo-model/blob/fixing/install.sh
 # need to pin this value for ACME
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/
 pip install --upgrade "jax[cuda11_pip]==0.4.3" "jaxlib==0.4.3" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 pip install chex==0.1.6
 pip install gym[accept-rom-license]

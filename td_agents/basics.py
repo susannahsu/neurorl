@@ -1,10 +1,11 @@
 
 import functools
 import time
-from typing import Callable, Iterator, List, Optional, Union, Sequence
+from typing import Callable, Iterator, List, Optional, Union, Sequence, Generic
 from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
 from absl import logging
 
+import chex
 import dataclasses
 import haiku as hk
 import collections
@@ -70,6 +71,13 @@ RecurrentStateFn = Callable[[networks_lib.Params], hk.LSTMState]
 ValueFn = Callable[[networks_lib.Params, Observation, hk.LSTMState],
                          networks_lib.Value]
 
+@chex.dataclass(frozen=True, mappable_dataclass=False)
+class ActorState(Generic[actor_core_lib.RecurrentState]):
+  rng: networks_lib.PRNGKey
+  epsilon: jnp.ndarray
+  step: jnp.ndarray
+  recurrent_state: actor_core_lib.RecurrentState
+  prev_recurrent_state: actor_core_lib.RecurrentState
 
 
 def isbad(x):
@@ -107,11 +115,16 @@ class Config(r2d2.R2D2Config):
   # Architecture
   state_dim: int = 512
 
-  # value-based action-selection options
-  num_epsilons: int = 256
-  evaluation_epsilon: float = 0.00
-  epsilon_min: float = 1
-  epsilon_max: float = 3
+  linear_schedule: bool = True
+  epsilon_begin: float = 1.
+  epsilon_end: float = 0.01
+  epsilon_steps: Optional[int] = None
+
+  # value-based action-selection options (distributed)
+  evaluation_epsilon: float = 0.01
+  num_epsilons: int = 10
+  epsilon_min: float = .01
+  epsilon_max: float = .9
   epsilon_base: float = .1
 
   # # Learner options
@@ -120,14 +133,14 @@ class Config(r2d2.R2D2Config):
   num_sgd_steps_per_step: int = 1
   seed: int = 1
   discount: float = 0.99
-  num_steps: int = 3e6
+  num_steps: int = 6e6
   max_grad_norm: float = 80.0
   adam_eps: float = 1e-3
 
   # Replay options
   samples_per_insert_tolerance_rate: float = 0.1
-  samples_per_insert: float = 6.0
-  min_replay_size: int = 1_000
+  samples_per_insert: float = 0.0
+  min_replay_size: int = 10_000
   max_replay_size: int = 100_000
   batch_size: Optional[int] = 32  # number of batch_elements
   burn_in_length: int = 0  # burn in during learning
@@ -187,12 +200,12 @@ class RecurrentLossFn(learning_lib.LossFn):
   aux_tasks: Union[Callable, Sequence[Callable]]=None
 
   def error(self,
-      data,
-      online_preds : acme_types.NestedArray,
-      online_state: acme_types.NestedArray,
-      target_preds : acme_types.NestedArray,
-      target_state :  acme_types.NestedArray,
-      **kwargs):
+            data: reverb.ReplaySample,
+            online_preds : acme_types.NestedArray,
+            online_state: acme_types.NestedArray,
+            target_preds : acme_types.NestedArray,
+            target_state :  acme_types.NestedArray,
+            **kwargs):
     """Summary
     
     Args:
@@ -391,7 +404,7 @@ class SGDLearner(learning_lib.SGDLearner):
       logging.warning(f'Logging gradients every {self._grad_period} steps')
 
     # Internalize the loss_fn with network.
-    loss_fn = functools.partial(loss_fn, network)
+    loss_fn = jax.jit(functools.partial(loss_fn, network))
 
     # SGD performs the loss, optimizer update and periodic target net update.
     def sgd_step(state: TrainingState,
@@ -541,16 +554,12 @@ class SGDLearner(learning_lib.SGDLearner):
         metrics.pop('mean_grad', None)
 
       # Update our counts and record it.
-      learner_metrics = self._counter.increment(
+      results = self._counter.increment(
           steps=self._num_sgd_steps_per_step, walltime=elapsed)
-      learner_metrics['steps_per_second'] = steps_per_sec
+      results['steps_per_second'] = steps_per_sec
+      results.update(metrics)
 
-      if 'learner' in metrics:
-        metrics['learner'].update(learner_metrics)
-      else:
-        metrics['learner'] = learner_metrics
-
-      self._logger.write(metrics)
+      self._logger.write(results)
 
 class Builder(r2d2.R2D2Builder):
   """TD agent Builder. Agent is derivative of R2D2 but may use different network/loss function
@@ -619,49 +628,63 @@ def get_actor_core(
     networks: r2d2_networks.R2D2Networks,
     config: Config,
     evaluation: bool = False,
+    linear_epsilon: bool = True,
     extract_q_values = lambda preds: preds
 ) -> r2d2_actor.R2D2Policy:
   """Returns ActorCore for R2D2."""
 
+  epsilon_schedule = optax.linear_schedule(
+          init_value=config.epsilon_begin,
+          end_value=config.epsilon_end,
+          transition_steps=config.epsilon_steps or config.num_steps,
+      )
   def select_action(params: networks_lib.Params,
                     observation: networks_lib.Observation,
-                    state: r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]):
+                    state: ActorState[actor_core_lib.RecurrentState]):
     rng, policy_rng = jax.random.split(state.rng)
 
     preds, recurrent_state = networks.apply(params, policy_rng, observation, state.recurrent_state)
 
     q_values = extract_q_values(preds)
+    if linear_epsilon:
+      epsilon = epsilon_schedule(state.step)
+    else:
+      epsilon = state.epsilon
 
-    action = rlax.epsilon_greedy(state.epsilon).sample(policy_rng, q_values)
-
-    return action, r2d2_actor.R2D2ActorState(
+    action = rlax.epsilon_greedy(epsilon).sample(policy_rng, q_values)
+    return action, ActorState(
         rng=rng,
         epsilon=state.epsilon,
+        step=state.step + 1,
         recurrent_state=recurrent_state,
         prev_recurrent_state=state.recurrent_state)
 
   def init(
       rng: networks_lib.PRNGKey
-  ) -> r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]:
+  ) -> ActorState[actor_core_lib.RecurrentState]:
     rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
     if not evaluation:
-      epsilon = jax.random.choice(epsilon_rng,
-                                  np.logspace(
-                                    start=config.epsilon_min,
-                                    stop=config.epsilon_max,
-                                    num=config.num_epsilons,
-                                    base=config.epsilon_base))
+      if linear_epsilon:
+        epsilon = config.epsilon_begin
+      else:
+        epsilon = jax.random.choice(epsilon_rng,
+                                    np.logspace(
+                                      start=config.epsilon_min,
+                                      stop=config.epsilon_max,
+                                      num=config.num_epsilons,
+                                      base=config.epsilon_base))
     else:
       epsilon = config.evaluation_epsilon
     initial_core_state = networks.init_recurrent_state(state_rng, None)
-    return r2d2_actor.R2D2ActorState(
+    return ActorState(
         rng=rng,
         epsilon=epsilon,
+        step=0,
         recurrent_state=initial_core_state,
         prev_recurrent_state=initial_core_state)
 
   def get_extras(
-      state: r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]
+      state: ActorState[actor_core_lib.RecurrentState]
   ) -> r2d2_actor.R2D2Extras:
     return {'core_state': state.prev_recurrent_state}
 
