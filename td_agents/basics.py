@@ -115,8 +115,8 @@ class Config(r2d2.R2D2Config):
   # Architecture
   state_dim: int = 512
 
-  linear_epsilon: bool = True  # whether to use linear or sample from log space for all actors
-  epsilon_begin: float = 1.
+  linear_epsilon: bool = False  # whether to use linear or sample from log space for all actors
+  epsilon_begin: float = .9
   epsilon_end: float = 0.01
   epsilon_steps: Optional[int] = None
 
@@ -446,12 +446,12 @@ class SGDLearner(learning_lib.SGDLearner):
           steps=steps,
           rng_key=next_rng_key)
 
-      extra.metrics.update(dict(learner={
+      extra.metrics.update({
         '0.total_loss': loss,
         '0.grad_norm': optax.global_norm(grads),
         '0.update_norm': optax.global_norm(updates),
         '0.param_norm': optax.global_norm(new_params),
-      }))
+      })
 
       return new_training_state, extra
 

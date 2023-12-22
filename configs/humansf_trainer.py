@@ -1,13 +1,48 @@
 """
 Running experiments:
-- multiple distributed experiments in parallel:
-    python trainer.py --search='default'
 
-  - single asynchronous experiment with actor/learner/evaluator:
-    python trainer.py --search='default' --run_distributed=True --debug=True
+# DEBUGGING, single stream
+python -m ipdb -c continue configs/humansf_trainer.py \
+  --parallel='none' \
+  --run_distributed=False \
+  --debug=True \
+  --use_wandb=False \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=human_objects_sf_debug \
+  --search='flat'
 
-  - single synchronous experiment (most useful for debugging):
-    python trainer.py --search='default' --run_distributed=False --debug=True
+# DEBUGGING, without jit
+JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/humansf_trainer.py \
+  --parallel='none' \
+  --run_distributed=False \
+  --debug=True \
+  --use_wandb=False \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=human_objects_sf_debug \
+  --search='flat'
+
+
+# DEBUGGING, parallel
+python -m ipdb -c continue configs/humansf_trainer.py \
+  --parallel='sbatch' \
+  --debug_parallel=True \
+  --run_distributed=False \
+  --use_wandb=True \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=human_objects_sf_debug \
+  --search='default'
+
+
+# running, parallel
+python configs/humansf_trainer.py \
+  --parallel='sbatch' \
+  --run_distributed=True \
+  --use_wandb=True \
+  --partition=kempner \
+  --account=kempner_fellows \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=human_objects_sf \
+  --search='sf'
 
 Change "search" to what you want to search over.
 
@@ -485,13 +520,29 @@ def sweep(search: str = 'default'):
   if search == 'flat':
     space = [
         {
+            "num_steps": tune.grid_search([20e6]),
             "agent": tune.grid_search(['flat_q', 'flat_usfa']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['obj-test-5']),
+            "group": tune.grid_search(['obj-test-6']),
             "env.setting": tune.grid_search([0]),
             "samples_per_insert": tune.grid_search([10]),
+            "epsilon_steps": tune.grid_search([6e6]),
             # "env.transfer_task_option": tune.grid_search([0]),
-            "linear_epsilon": tune.grid_search([False, True]),
+            "linear_epsilon": tune.grid_search([True, False]),
+        },
+    ]
+  elif search == 'sf':
+    space = [
+        {
+            "num_steps": tune.grid_search([20e6]),
+            "agent": tune.grid_search(['flat_usfa']),
+            "seed": tune.grid_search([1]),
+            "group": tune.grid_search(['sf-test-6']),
+            "env.setting": tune.grid_search([0]),
+            "samples_per_insert": tune.grid_search([0]),
+            "sf_layers": tune.grid_search([[128, 128], [512]]),
+            "policy_layers": tune.grid_search([[], [32], [128]]),
+            "linear_epsilon": tune.grid_search([False]),
         },
     ]
   elif search == 'speed':
