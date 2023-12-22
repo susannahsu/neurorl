@@ -1,18 +1,57 @@
 """
 Running experiments:
-- multiple distributed experiments in parallel:
-    python trainer.py --search='default'
 
-  - single asynchronous experiment with actor/learner/evaluator:
-    python trainer.py --search='default' --run_distributed=True --debug=True
+# DEBUGGING, single stream
+python -m ipdb -c continue configs/humansf_trainer.py \
+  --parallel='none' \
+  --run_distributed=False \
+  --debug=True \
+  --use_wandb=False \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=human_objects_sf_debug \
+  --search='flat'
 
-  - single synchronous experiment (most useful for debugging):
-    python trainer.py --search='default' --run_distributed=False --debug=True
+# DEBUGGING, without jit
+JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/humansf_trainer.py \
+  --parallel='none' \
+  --run_distributed=False \
+  --debug=True \
+  --use_wandb=False \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=human_objects_sf_debug \
+  --search='flat'
+
+
+# DEBUGGING, parallel
+python -m ipdb -c continue configs/humansf_trainer.py \
+  --parallel='sbatch' \
+  --debug_parallel=True \
+  --run_distributed=False \
+  --use_wandb=True \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=human_objects_sf_debug \
+  --search='default'
+
+
+# running, parallel
+python configs/humansf_trainer.py \
+  --parallel='sbatch' \
+  --run_distributed=True \
+  --use_wandb=True \
+  --partition=kempner \
+  --account=kempner_fellows \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=human_objects_sf \
+  --search='sf'
 
 Change "search" to what you want to search over.
 
 """
 import functools 
+
+from typing import Callable, Optional
+
+from enum import Enum
 
 from absl import flags
 from absl import app
@@ -24,17 +63,24 @@ import launchpad as lp
 
 from acme import wrappers as acme_wrappers
 from acme.jax import experiments
-import gymnasium
 import dm_env
+
 import minigrid
 
-from dm_env_wrappers import GymWrapper
-import envs
-import env_wrappers
-import experiment_builder
-import experiment_logger
-import parallel
-import utils
+from lib.dm_env_wrappers import GymWrapper
+import lib.env_wrappers as env_wrappers
+import lib.experiment_builder as experiment_builder
+import lib.experiment_logger as experiment_logger
+import lib.parallel as parallel
+import lib.utils as utils
+
+import envs.key_room as key_room
+from envs.key_room_objects_test import (
+  ObjectTestTask,
+  KeyRoomObjectTest,
+  ObjectCountObserver,
+)
+
 
 flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')
@@ -48,11 +94,18 @@ flags.DEFINE_bool(
     'auto_name_wandb', True, 'automatically name wandb.')
 FLAGS = flags.FLAGS
 
-def make_environment(seed: int,
-                     object_options: bool = True,
-                     train_task_option: envs.TaskOptions = 1,
-                     transfer_task_option: envs.TaskOptions = 3,
+
+class TestOptions(Enum):
+  shape = 0
+  color = 1
+  ambigious = 2
+
+
+def make_keyroom_object_test_env(seed: int,
+                     setting: TestOptions,
+                     room_size: int = 6,
                      evaluation: bool = False,
+                     object_options: bool = True,
                      **kwargs) -> dm_env.Environment:
   """Loads environments.
   
@@ -64,18 +117,72 @@ def make_environment(seed: int,
   """
   del seed
 
+  if setting == TestOptions.shape.value:
+    # in this setting, the initial shape indicates the task color
+    train_tasks = []
+    test_tasks = []
+    for c in ['blue', 'yellow']:
+        train_tasks.append(
+          ObjectTestTask(
+            source='shape', init='ball', floor=c, w='box'))
+        test_tasks.append(
+          ObjectTestTask(
+            source='shape', init='ball', floor=c, w='ball'))
 
-  fixed_door_locs = False if evaluation else True
+        train_tasks.append(
+          ObjectTestTask(
+            source='shape', init='box', floor=c, w='ball'))
+        test_tasks.append(
+          ObjectTestTask(
+            source='shape', init='box', floor=c, w='box'))
+
+  elif setting == TestOptions.color.value:
+    # in this setting, the floor color indicates the task color
+    train_tasks = [
+      ObjectTestTask(floor='blue', init='ball', w='box'),
+      ObjectTestTask(floor='blue', init='box', w='box'),
+      ObjectTestTask(floor='yellow', init='ball', w='ball'),
+      ObjectTestTask(floor='yellow', init='box', w='ball'),
+    ]
+
+    test_tasks = [
+      ObjectTestTask(floor='blue', init='ball', w='ball'),
+      ObjectTestTask(floor='blue', init='box', w='ball'),
+      ObjectTestTask(floor='yellow', init='ball', w='box'),
+      ObjectTestTask(floor='yellow', init='box', w='box'),
+    ]
+
+  elif setting == TestOptions.ambigious.value:
+    # in this setting, it's not clear whether floor color or initial shape indicates the task color
+    floor2task_color = {
+        'red': 'blue',
+        'green': 'yellow',
+    }
+
+    train_tasks = [
+        ObjectTestTask(floor='red', init='ball', w='box', floor2task_color=floor2task_color),
+        ObjectTestTask(floor='green', init='box', w='ball', floor2task_color=floor2task_color),
+    ]
+
+    test_tasks = [
+        ObjectTestTask(floor='red', init='ball', w='ball', floor2task_color=floor2task_color),
+        ObjectTestTask(floor='red', init='box', w='ball', floor2task_color=floor2task_color),
+        ObjectTestTask(floor='green', init='box', w='box', floor2task_color=floor2task_color),
+        ObjectTestTask(floor='green', init='ball', w='box', floor2task_color=floor2task_color),
+    ]
+
+  else:
+    raise NotImplementedError(setting)
+
+  room_colors = list(set([t.goal_color() for t in train_tasks]))
 
   # create gymnasium.Gym environment
-  env = envs.KeyRoom(
-    num_dists=0,
-    training=not evaluation,
-    train_task_option=train_task_option,
-    transfer_task_option=transfer_task_option,
-    fixed_door_locs=fixed_door_locs,
+  env = KeyRoomObjectTest(
+    room_size=room_size,
+    tasks=test_tasks if evaluation else train_tasks,
+    room_colors=room_colors,
     **kwargs)
-  
+
   ####################################
   # Gym wrappers
   ####################################
@@ -106,6 +213,8 @@ def make_environment(seed: int,
   return acme_wrappers.wrap_all(env, wrapper_list)
 
 def setup_experiment_inputs(
+    make_environment_fn: Callable,
+    env_get_task_name: Optional[Callable[[dm_env.Environment], str]] = None,
     agent_config_kwargs: dict=None,
     env_kwargs: dict=None,
     debug: bool = False,
@@ -119,16 +228,21 @@ def setup_experiment_inputs(
   # -----------------------
   agent = agent_config_kwargs.get('agent', '')
   assert agent != '', 'please set agent'
-
-  if agent == 'flat_usfa':
+  
+  if agent == 'flat_q':
     from td_agents import basics
-    from td_agents import sf_agents
-    config = sf_agents.Config(**config_kwargs)
+    from td_agents import q_learning
+    import haiku as hk
+    config = q_learning.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      get_actor_core_fn=sf_agents.get_actor_core,
-      LossFn=sf_agents.UsfaLossFn(
+      get_actor_core_fn=functools.partial(
+        basics.get_actor_core,
+        linear_epsilon=config.linear_epsilon,
+      ),
+      LossFn=q_learning.R2D2LossFn(
         discount=config.discount,
+        
         importance_sampling_exponent=config.importance_sampling_exponent,
         burn_in_length=config.burn_in_length,
         max_replay_size=config.max_replay_size,
@@ -137,17 +251,50 @@ def setup_experiment_inputs(
       ))
     # NOTE: main differences below
     network_factory = functools.partial(
-            sf_agents.make_minigrid_networks, config=config)
+            q_learning.make_minigrid_networks,
+            config=config,
+            task_encoder=lambda obs: hk.Linear(128)(obs['task']))
+
+    env_kwargs['object_options'] = False  # has no mechanism to select from object options since dependent on what agent sees
+
+  elif agent == 'flat_usfa':
+    from td_agents import basics
+    from td_agents import usfa
+    config = usfa.Config(**config_kwargs)
+    builder = basics.Builder(
+      config=config,
+      get_actor_core_fn=functools.partial(
+        basics.get_actor_core,
+        extract_q_values=lambda preds: preds.q_values,
+        linear_epsilon=config.linear_epsilon,
+        ),
+      LossFn=usfa.UsfaLossFn(
+        discount=config.discount,
+
+        importance_sampling_exponent=config.importance_sampling_exponent,
+        burn_in_length=config.burn_in_length,
+        max_replay_size=config.max_replay_size,
+        max_priority_weight=config.max_priority_weight,
+        bootstrap_n=config.bootstrap_n,
+      ))
+    # NOTE: main differences below
+    network_factory = functools.partial(
+            usfa.make_minigrid_networks, config=config)
     env_kwargs['object_options'] = False  # has no mechanism to select from object options since dependent on what agent sees
   elif agent == 'object_usfa':
     from td_agents import basics
-    from td_agents import sf_agents
-    config = sf_agents.Config(**config_kwargs)
+    from td_agents import usfa
+    config = usfa.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      get_actor_core_fn=sf_agents.get_actor_core,
-      LossFn=sf_agents.UsfaLossFn(
+      get_actor_core_fn=functools.partial(
+        basics.get_actor_core,
+        extract_q_values=lambda preds: preds.q_values,
+        linear_epsilon=config.linear_epsilon,
+        ),
+      LossFn=usfa.UsfaLossFn(
         discount=config.discount,
+
         importance_sampling_exponent=config.importance_sampling_exponent,
         burn_in_length=config.burn_in_length,
         max_replay_size=config.max_replay_size,
@@ -156,7 +303,7 @@ def setup_experiment_inputs(
       ))
     # NOTE: main differences below
     network_factory = functools.partial(
-            sf_agents.make_object_oriented_minigrid_networks, config=config)
+            usfa.make_object_oriented_minigrid_networks, config=config)
     env_kwargs['object_options'] = True  # has no mechanism to select from object options since dependent on what agent sees
   else:
     raise NotImplementedError(agent)
@@ -166,19 +313,25 @@ def setup_experiment_inputs(
   # -----------------------
 
   environment_factory = functools.partial(
-    make_environment,
+    make_environment_fn,
     **env_kwargs)
 
   # -----------------------
   # setup observer factory for environment
-  # this logs the average every reset=50 episodes (instead of every episode)
   # -----------------------
+  test_setting = TestOptions(env_kwargs['setting']).name
   observers = [
-      utils.LevelAvgReturnObserver(
-        reset=50 if not debug else 5,
-        get_task_name=lambda e: envs.TaskOptions(e.task_option).name
-        ),
-      ]
+    # this logs the average every reset=50 episodes (instead of every episode)
+    utils.LevelAvgReturnObserver(
+      reset=50 if not debug else 5,
+      get_task_name=env_get_task_name,
+      ),
+    ObjectCountObserver(
+      reset=1000 if not debug else 5,
+      prefix=f'Images-{test_setting}',
+      agent_name=agent,
+      get_task_name=env_get_task_name),
+  ]
 
   return experiment_builder.OnlineExperimentConfigInputs(
     agent=agent,
@@ -202,6 +355,8 @@ def train_single(
   debug = FLAGS.debug
 
   experiment_config_inputs = setup_experiment_inputs(
+    make_environment_fn=make_keyroom_object_test_env,
+    env_get_task_name= lambda env: env.unwrapped.task.goal_name(),
     agent_config_kwargs=agent_config_kwargs,
     env_kwargs=env_kwargs,
     debug=debug)
@@ -315,6 +470,9 @@ def run_single():
       agent_config_kwargs.update(first_agent_config)
       env_kwargs.update(first_env_config)
 
+  if not run_distributed:
+    agent_config_kwargs['samples_per_insert'] = 1
+
   train_single(
     wandb_init_kwargs=wandb_init_kwargs,
     env_kwargs=env_kwargs,
@@ -361,26 +519,41 @@ def run_many():
 def sweep(search: str = 'default'):
   if search == 'flat':
     space = [
-        # {
-        #     "agent": tune.grid_search(['flat_usfa']),
-        #     "seed": tune.grid_search([1,2]),
-        #     "env.train_task_option": tune.grid_search([0, 1, 4]),
-        #     "env.transfer_task_option": tune.grid_search([0, 3]),
-        #     "eval_task_support": tune.grid_search(['eval']),
-        #     "group": tune.grid_search(['flat-3']),
-        # },
         {
+            "num_steps": tune.grid_search([20e6]),
+            "agent": tune.grid_search(['flat_q', 'flat_usfa']),
+            "seed": tune.grid_search([1]),
+            "group": tune.grid_search(['obj-test-6']),
+            "env.setting": tune.grid_search([0]),
+            "samples_per_insert": tune.grid_search([10]),
+            "epsilon_steps": tune.grid_search([6e6]),
+            # "env.transfer_task_option": tune.grid_search([0]),
+            "linear_epsilon": tune.grid_search([True, False]),
+        },
+    ]
+  elif search == 'sf':
+    space = [
+        {
+            "num_steps": tune.grid_search([20e6]),
             "agent": tune.grid_search(['flat_usfa']),
             "seed": tune.grid_search([1]),
-            "env.train_task_option": tune.grid_search([0]),
-            "env.transfer_task_option": tune.grid_search([0]),
-            "env.respawn": tune.grid_search([True, False]),
-            "eval_task_support": tune.grid_search(['eval']),
-            "importance_sampling_exponent": tune.grid_search([0]),
-            "batch_size": tune.grid_search([32, 16]),
-            "trace_length": tune.grid_search([20, 40]),
-            "group": tune.grid_search(['flat-4-speed']),
-        }
+            "group": tune.grid_search(['sf-test-6']),
+            "env.setting": tune.grid_search([0]),
+            "samples_per_insert": tune.grid_search([0]),
+            "sf_layers": tune.grid_search([[128, 128], [512]]),
+            "policy_layers": tune.grid_search([[], [32], [128]]),
+            "linear_epsilon": tune.grid_search([False]),
+        },
+    ]
+  elif search == 'speed':
+    space = [
+        {
+            "agent": tune.grid_search(['flat_q', 'flat_usfa']),
+            "seed": tune.grid_search([1]),
+            "group": tune.grid_search(['speed-test-8']),
+            "samples_per_insert": tune.grid_search([10]),
+            "env.setting": tune.grid_search([0]),
+        },
     ]
   elif search == 'objects':
     space = [

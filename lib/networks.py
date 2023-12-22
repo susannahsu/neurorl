@@ -10,12 +10,11 @@ import jax.numpy as jnp
 from acme import types
 from acme.wrappers import observation_action_reward
 
-Array = types.NestedArray
-Image = types.NestedArray
-Action = types.NestedArray
-Reward = types.NestedArray
-Task = types.NestedArray
-
+Array = jax.Array
+Image = jax.Array
+Action = jax.Array
+Reward = jax.Array
+Task = jax.Array
 
 @chex.dataclass(frozen=True)
 class TorsoOutput:
@@ -84,13 +83,13 @@ class LanguageEncoder(hk.Module):
   def __init__(self,
                vocab_size: int,
                word_dim: int,
-               sentence_dim: int,
-               mask_words: bool = True,
+               sentence_dim: Optional[int] = None,
+               mask_words: bool = False,
                compress: str = 'last'):
     super(LanguageEncoder, self).__init__()
     self.vocab_size = vocab_size
     self.word_dim = word_dim
-    self.sentence_dim = sentence_dim
+    self.sentence_dim = sentence_dim or word_dim
     self.compress = compress
     self.mask_words = mask_words
     self.embedder = hk.Embed(
@@ -166,7 +165,7 @@ class OarTorso(hk.Module):
     """_no_ batch [B] dimension."""
     # compute task encoding
 
-    task = self._task_encoder(inputs.observation['mission'])
+    task = self._task_encoder(inputs.observation)
 
     # get action one-hot
     action = jax.nn.one_hot(
@@ -188,3 +187,10 @@ class OarTorso(hk.Module):
       action=action,
       reward=reward)
 
+class DummyRNN(hk.RNNCore):
+  def __call__(self, inputs: jax.Array, prev_state: hk.LSTMState
+               ) -> Tuple[jax.Array, hk.LSTMState]:
+    return inputs, prev_state
+
+  def initial_state(self, batch_size: Optional[int]) -> hk.LSTMState:
+    return jnp.zeros((batch_size, 1)) if batch_size else jnp.zeros((1))

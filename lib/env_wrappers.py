@@ -368,7 +368,7 @@ class DictObservationSpaceWrapper(minigrid.wrappers.DictObservationSpaceWrapper)
     return obs
 
 def main():
-  from envs import KeyRoom
+  from envs.key_room import KeyRoom
   import minigrid
   import random
   from pprint import pprint

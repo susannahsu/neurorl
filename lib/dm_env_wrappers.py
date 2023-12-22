@@ -44,7 +44,7 @@ class GymWrapper(dm_env.Environment):
       return self.reset()
 
     observation, reward, done, truncated, info = self._environment.step(action)
-    self._reset_next_step = done
+    self._reset_next_step = done or truncated
     self._last_truncated = truncated
     self._last_info = info
 
@@ -56,6 +56,7 @@ class GymWrapper(dm_env.Environment):
             if np.isscalar(x) else np.asarray(x, dtype=t.dtype)),
         reward,
         self.reward_spec())
+
 
     if done:
       if truncated:
