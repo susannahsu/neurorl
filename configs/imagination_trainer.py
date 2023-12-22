@@ -380,7 +380,6 @@ def train_single(
     num_actors: int = 1,
     run_distributed: bool = False,
 ):
-  del num_actors
   debug = FLAGS.debug
 
   experiment_config_inputs = setup_experiment_inputs(
@@ -549,7 +548,7 @@ def sweep(search: str = 'default'):
   if search == 'initial':
     space = [
         {
-            "group": tune.grid_search(['run-1']),
+            "group": tune.grid_search(['run-2']),
             "agent": tune.grid_search(['qlearning', 'muzero']),
             "seed": tune.grid_search([1]),
             "env.difficulty": tune.grid_search([7]),
