@@ -3,26 +3,46 @@ Running experiments:
 --------------------
 
 # DEBUGGING, single stream
-python -m ipdb -c continue configs/biorl_trainer.py \
-  --search='qlearning' \
+python -m ipdb -c continue configs/imagination_trainer.py \
+  --search='initial' \
   --parallel='none' \
   --run_distributed=False \
   --debug=True \
   --use_wandb=False \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=neurorl_debug
+  --wandb_project=imagination_debug
 
-# running a search, single-stream
-python configs/biorl_trainer.py \
-  --search='qlearning' \
-  --parallel='sbatch' \
+JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/imagination_trainer.py \
+  --search='initial' \
+  --parallel='none' \
   --run_distributed=False \
+  --debug=True \
+  --use_wandb=False \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=imagination_debug
+
+
+# DEBUGGING, parallel
+python -m ipdb -c continue configs/imagination_trainer.py \
+  --search='initial' \
+  --parallel='sbatch' \
+  --debug_parallel=True \
+  --run_distributed=False \
+  --use_wandb=True \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=imagination_debug \
+
+
+# running, parallel
+python configs/imagination_trainer.py \
+  --search='initial' \
+  --parallel='sbatch' \
+  --run_distributed=True \
   --use_wandb=True \
   --partition=kempner \
   --account=kempner_fellows \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=neurorl
-
+  --wandb_project=imagination
 
 """
 import functools 
@@ -360,7 +380,6 @@ def train_single(
     num_actors: int = 1,
     run_distributed: bool = False,
 ):
-  del num_actors
   debug = FLAGS.debug
 
   experiment_config_inputs = setup_experiment_inputs(
@@ -529,7 +548,7 @@ def sweep(search: str = 'default'):
   if search == 'initial':
     space = [
         {
-            "group": tune.grid_search(['run-1']),
+            "group": tune.grid_search(['run-2']),
             "agent": tune.grid_search(['qlearning', 'muzero']),
             "seed": tune.grid_search([1]),
             "env.difficulty": tune.grid_search([7]),
