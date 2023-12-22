@@ -30,6 +30,8 @@ from acme import wrappers as acme_wrappers
 from acme.jax import experiments
 import dm_env
 
+import minigrid
+
 from lib.dm_env_wrappers import GymWrapper
 import lib.env_wrappers as env_wrappers
 import lib.experiment_builder as experiment_builder
@@ -483,12 +485,13 @@ def sweep(search: str = 'default'):
   if search == 'flat':
     space = [
         {
-            "agent": tune.grid_search(['flat_usfa']),
+            "agent": tune.grid_search(['flat_q', 'flat_usfa']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['sf-test-4']),
+            "group": tune.grid_search(['obj-test-5']),
             "env.setting": tune.grid_search([0]),
+            "samples_per_insert": tune.grid_search([10]),
             # "env.transfer_task_option": tune.grid_search([0]),
-            "linear_epsilon": tune.grid_search([True, False]),
+            "linear_epsilon": tune.grid_search([False, True]),
         },
     ]
   elif search == 'speed':
@@ -496,7 +499,7 @@ def sweep(search: str = 'default'):
         {
             "agent": tune.grid_search(['flat_q', 'flat_usfa']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['speed-test-7']),
+            "group": tune.grid_search(['speed-test-8']),
             "samples_per_insert": tune.grid_search([10]),
             "env.setting": tune.grid_search([0]),
         },
