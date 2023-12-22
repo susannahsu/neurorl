@@ -446,12 +446,12 @@ class SGDLearner(learning_lib.SGDLearner):
           steps=steps,
           rng_key=next_rng_key)
 
-      extra.metrics.update(dict(learner={
+      extra.metrics.update({
         '0.total_loss': loss,
         '0.grad_norm': optax.global_norm(grads),
         '0.update_norm': optax.global_norm(updates),
         '0.param_norm': optax.global_norm(new_params),
-      }))
+      })
 
       return new_training_state, extra
 
