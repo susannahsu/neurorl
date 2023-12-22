@@ -115,8 +115,8 @@ class Config(r2d2.R2D2Config):
   # Architecture
   state_dim: int = 512
 
-  linear_epsilon: bool = True  # whether to use linear or sample from log space for all actors
-  epsilon_begin: float = 1.
+  linear_epsilon: bool = False  # whether to use linear or sample from log space for all actors
+  epsilon_begin: float = .9
   epsilon_end: float = 0.01
   epsilon_steps: Optional[int] = None
 
