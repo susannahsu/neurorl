@@ -89,7 +89,7 @@ class Config(basics.Config):
   staircase_decay: bool = True
 
   ema_update: float = 0.0
-  tx_pair: rlax.TxPair = rlax.SIGNED_HYPERBOLIC_PAIR
+  tx_pair: rlax.TxPair = rlax.IDENTITY_PAIR
 
   # Replay options
   samples_per_insert: float = 50.0
@@ -130,7 +130,7 @@ class Config(basics.Config):
   scale_grad: float = 0.5
 
   # actor hps
-  action_source: str = 'policy'  # 'policy', 'value', 'mcts'
+  action_source: str = 'policy'  # 'policy', 'mcts'
 
   root_policy_coef: float = 1.0
   root_value_coef: float = 0.25

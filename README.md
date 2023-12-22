@@ -30,7 +30,7 @@ chmod u+x install-fas.sh
 ./install-fas.sh
 ```
 
-if you want to avoid having to load modules and set environment variables each time you load this environment, you can add this to the activation file.
+**ONE TIME CHANGE TO MAKE YOUR LIFE EASIER**. if you want to avoid having to load modules and set environment variables each time you load this environment, you can add this to the activation file.
 The bottom essentiallly makes sure that modules are loaded
 ```
 #############################################
