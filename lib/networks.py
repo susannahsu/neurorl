@@ -10,12 +10,11 @@ import jax.numpy as jnp
 from acme import types
 from acme.wrappers import observation_action_reward
 
-Array = types.NestedArray
-Image = types.NestedArray
-Action = types.NestedArray
-Reward = types.NestedArray
-Task = types.NestedArray
-
+Array = jax.Array
+Image = jax.Array
+Action = jax.Array
+Reward = jax.Array
+Task = jax.Array
 
 @chex.dataclass(frozen=True)
 class TorsoOutput:
@@ -188,3 +187,10 @@ class OarTorso(hk.Module):
       action=action,
       reward=reward)
 
+class DummyRNN(hk.RNNCore):
+  def __call__(self, inputs: jax.Array, prev_state: hk.LSTMState
+               ) -> Tuple[jax.Array, hk.LSTMState]:
+    return inputs, prev_state
+
+  def initial_state(self, batch_size: Optional[int]) -> hk.LSTMState:
+    return jnp.zeros((batch_size, 1)) if batch_size else jnp.zeros((1))

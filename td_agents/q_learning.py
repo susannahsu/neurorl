@@ -1,5 +1,5 @@
 
-from typing import Optional, Tuple, Iterator, Optional, NamedTuple, Callable
+from typing import Optional, Tuple, Optional, Callable
 
 import functools
 
@@ -31,7 +31,8 @@ class Config(basics.Config):
 @dataclasses.dataclass
 class R2D2LossFn(basics.RecurrentLossFn):
 
-  loss: str = 'n_step_q_learning'
+  tx_pair: rlax.TxPair = rlax.IDENTITY_PAIR
+  extract_q: Callable[[Array], Array] = lambda preds: preds
 
   def error(self, data, online_preds, online_state, target_preds, target_state, **kwargs):
     """R2D2 learning
@@ -44,18 +45,11 @@ class R2D2LossFn(basics.RecurrentLossFn):
     rewards = rewards.astype(self.extract_q(online_preds).dtype)
 
     # Get N-step transformed TD error and loss.
-    if self.loss == "transformed_n_step_q_learning":
-      tx_pair = rlax.SIGNED_HYPERBOLIC_PAIR
-    elif self.loss == "n_step_q_learning":
-      tx_pair = rlax.IDENTITY_PAIR
-    else:
-      raise NotImplementedError(self.loss)
-
     batch_td_error_fn = jax.vmap(
         functools.partial(
             rlax.transformed_n_step_q_learning,
             n=self.bootstrap_n,
-            tx_pair=tx_pair),
+            tx_pair=self.tx_pair),
         in_axes=1,
         out_axes=1)
 

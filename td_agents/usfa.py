@@ -66,7 +66,6 @@ def sample_gauss(mean, var, key, nsamples, axis):
 @dataclasses.dataclass
 class UsfaLossFn(basics.RecurrentLossFn):
 
-  extract_q: Callable = lambda preds: preds.q_values
   extract_cumulants: Callable = cumulants_from_env
   extract_task: Callable = lambda data: data.observation.observation['task']
   index_cumulants: Callable[
@@ -153,7 +152,7 @@ class SfGpiHead(hk.Module):
   def __init__(self,
     num_actions: int,
     state_features_dim: int,
-    hidden_sizes : Tuple[int]=(512,),
+    hidden_sizes : Tuple[int]=(128, 128),
     nsamples: int=10,
     variance: Optional[float]=0.5,
     eval_task_support: str = 'train', 
@@ -178,7 +177,8 @@ class SfGpiHead(hk.Module):
     self.nsamples = nsamples
     self.eval_task_support = eval_task_support
 
-    self.policy_net = hk.Linear(32)
+    # self.policy_net = hk.Linear(32)
+    self.policy_net = lambda x:x
 
     self.sf_net = hk.nets.MLP(
       tuple(hidden_sizes)+(num_actions * state_features_dim,))
@@ -503,8 +503,7 @@ def make_object_oriented_minigrid_networks(
   state_features_dim = env_spec.observations.observation['state_features'].shape[0]
 
   def make_core_module() -> ObjectOrientedUsfaArch:
-    vision_torso = networks.AtariVisionTorso(
-      out_dim=config.state_dim)
+    vision_torso = networks.AtariVisionTorso()
 
     observation_fn = networks.OarTorso(
       num_actions=num_actions,

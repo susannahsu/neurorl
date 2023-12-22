@@ -28,9 +28,7 @@ import launchpad as lp
 
 from acme import wrappers as acme_wrappers
 from acme.jax import experiments
-import gymnasium
 import dm_env
-import minigrid
 
 from lib.dm_env_wrappers import GymWrapper
 import lib.env_wrappers as env_wrappers
@@ -203,7 +201,7 @@ def setup_experiment_inputs(
       config=config,
       get_actor_core_fn=functools.partial(
         basics.get_actor_core,
-        linear_schedule=config.linear_schedule,
+        linear_epsilon=config.linear_epsilon,
       ),
       LossFn=q_learning.R2D2LossFn(
         discount=config.discount,
@@ -224,16 +222,16 @@ def setup_experiment_inputs(
 
   elif agent == 'flat_usfa':
     from td_agents import basics
-    from td_agents import sf_agents
-    config = sf_agents.Config(**config_kwargs)
+    from td_agents import usfa
+    config = usfa.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=functools.partial(
         basics.get_actor_core,
         extract_q_values=lambda preds: preds.q_values,
-        linear_schedule=config.linear_schedule,
+        linear_epsilon=config.linear_epsilon,
         ),
-      LossFn=sf_agents.UsfaLossFn(
+      LossFn=usfa.UsfaLossFn(
         discount=config.discount,
 
         importance_sampling_exponent=config.importance_sampling_exponent,
@@ -244,20 +242,20 @@ def setup_experiment_inputs(
       ))
     # NOTE: main differences below
     network_factory = functools.partial(
-            sf_agents.make_minigrid_networks, config=config)
+            usfa.make_minigrid_networks, config=config)
     env_kwargs['object_options'] = False  # has no mechanism to select from object options since dependent on what agent sees
   elif agent == 'object_usfa':
     from td_agents import basics
-    from td_agents import sf_agents
-    config = sf_agents.Config(**config_kwargs)
+    from td_agents import usfa
+    config = usfa.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=functools.partial(
         basics.get_actor_core,
         extract_q_values=lambda preds: preds.q_values,
-        linear_schedule=config.linear_schedule,
+        linear_epsilon=config.linear_epsilon,
         ),
-      LossFn=sf_agents.UsfaLossFn(
+      LossFn=usfa.UsfaLossFn(
         discount=config.discount,
 
         importance_sampling_exponent=config.importance_sampling_exponent,
@@ -268,7 +266,7 @@ def setup_experiment_inputs(
       ))
     # NOTE: main differences below
     network_factory = functools.partial(
-            sf_agents.make_object_oriented_minigrid_networks, config=config)
+            usfa.make_object_oriented_minigrid_networks, config=config)
     env_kwargs['object_options'] = True  # has no mechanism to select from object options since dependent on what agent sees
   else:
     raise NotImplementedError(agent)
@@ -485,22 +483,22 @@ def sweep(search: str = 'default'):
   if search == 'flat':
     space = [
         {
-            "agent": tune.grid_search(['flat_usfa', 'flat_q']),
+            "agent": tune.grid_search(['flat_usfa']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['object-test-2']),
+            "group": tune.grid_search(['sf-test-4']),
             "env.setting": tune.grid_search([0]),
             # "env.transfer_task_option": tune.grid_search([0]),
-            "linear_schedule": tune.grid_search([True, False]),
+            "linear_epsilon": tune.grid_search([True, False]),
         },
     ]
   elif search == 'speed':
     space = [
         {
-            "agent": tune.grid_search(['flat_q']),
+            "agent": tune.grid_search(['flat_q', 'flat_usfa']),
             "seed": tune.grid_search([1]),
-            "samples_per_insert": tune.grid_search([0]),
-            "group": tune.grid_search(['speed-test-6-indexing']),
-            "env.setting": tune.grid_search([0, 1]),
+            "group": tune.grid_search(['speed-test-7']),
+            "samples_per_insert": tune.grid_search([10]),
+            "env.setting": tune.grid_search([0]),
         },
     ]
   elif search == 'objects':

@@ -60,7 +60,7 @@ ReverbUpdate = learning_lib.ReverbUpdate
 LossExtra = learning_lib.LossExtra
 
 # Only simple observations & discrete action spaces for now.
-Observation = jnp.ndarray
+Observation = jax.Array
 
 # initializations
 ValueInitFn = Callable[[networks_lib.PRNGKey, Observation, hk.LSTMState],
@@ -74,10 +74,10 @@ ValueFn = Callable[[networks_lib.Params, Observation, hk.LSTMState],
 @chex.dataclass(frozen=True, mappable_dataclass=False)
 class ActorState(Generic[actor_core_lib.RecurrentState]):
   rng: networks_lib.PRNGKey
-  epsilon: jnp.ndarray
-  step: jnp.ndarray
   recurrent_state: actor_core_lib.RecurrentState
   prev_recurrent_state: actor_core_lib.RecurrentState
+  epsilon: Optional[jax.Array] = None
+  step: Optional[jax.Array] = None
 
 
 def isbad(x):
@@ -115,7 +115,7 @@ class Config(r2d2.R2D2Config):
   # Architecture
   state_dim: int = 512
 
-  linear_schedule: bool = True
+  linear_epsilon: bool = True  # whether to use linear or sample from log space for all actors
   epsilon_begin: float = 1.
   epsilon_end: float = 0.01
   epsilon_steps: Optional[int] = None
@@ -192,9 +192,6 @@ class RecurrentLossFn(learning_lib.LossFn):
   max_abs_reward: float = 1.
   loss_coeff: float = 1.
   mask_loss: bool = True
-
-  # how to get q-values from predictions
-  extract_q: Callable = lambda preds: preds
 
   # auxilliary tasks
   aux_tasks: Union[Callable, Sequence[Callable]]=None
@@ -273,13 +270,6 @@ class RecurrentLossFn(learning_lib.LossFn):
     # ======================================================
     # losses
     # ======================================================
-
-    # Importance weighting.
-    probs = batch.info.probability
-    # [B]
-    importance_weights = (1. / (probs + 1e-6)).astype(self.extract_q(online_preds).dtype)
-    importance_weights **= self.importance_sampling_exponent
-    importance_weights /= jnp.max(importance_weights)
     # -----------------------
     # main loss
     # -----------------------
@@ -290,9 +280,21 @@ class RecurrentLossFn(learning_lib.LossFn):
       online_state=online_state,
       target_preds=target_preds,
       target_state=target_state,
-      steps=steps)
+      networks=network,
+      params=params,
+      target_params=target_params,
+      steps=steps,
+      key_grad=key_grad)
     batch_loss = self.loss_coeff*batch_loss
     elemwise_error = self.loss_coeff*elemwise_error
+
+    # Importance weighting.
+    probs = batch.info.probability
+    # [B]
+    importance_weights = (1. / (probs + 1e-6)).astype(batch_loss.dtype)
+    importance_weights **= self.importance_sampling_exponent
+    importance_weights /= jnp.max(importance_weights)
+
 
     Cls = lambda x: x.__class__.__name__
     metrics={
@@ -368,11 +370,12 @@ class RecurrentLossFn(learning_lib.LossFn):
     else:
       total_elemwise_error = elemwise_error
 
-    abs_td_error = jnp.abs(total_elemwise_error).astype(self.extract_q(online_preds).dtype)
+    abs_td_error = jnp.abs(total_elemwise_error).astype(batch_loss.dtype)
     max_priority = self.max_priority_weight * jnp.max(abs_td_error, axis=0)
     mean_priority = (1 - self.max_priority_weight) * jnp.mean(total_elemwise_error, axis=0)
     priorities = (max_priority + mean_priority)
 
+    metrics = jax.tree_map(lambda x: x.mean(), metrics)
     extra = learning_lib.LossExtra(metrics=metrics, reverb_priorities=priorities)
 
     return mean_loss, extra
@@ -387,7 +390,8 @@ class SGDLearner(learning_lib.SGDLearner):
   def __init__(self,
                network: r2d2_networks.R2D2Networks,
                loss_fn: LossFn,
-               optimizer: optax.GradientTransformation,
+               optimizer_cnstr: Callable[
+                 [Config, networks_lib.Params], optax.GradientTransformation],
                data_iterator: Iterator[reverb.ReplaySample],
                target_update_period: int,
                random_key: networks_lib.PRNGKey,
@@ -418,7 +422,7 @@ class SGDLearner(learning_lib.SGDLearner):
       grads = jax.lax.pmean(grads, axis_name=_PMAP_AXIS_NAME)
 
       # Apply the optimizer updates
-      updates, new_opt_state = optimizer.update(grads, state.opt_state)
+      updates, new_opt_state = optimizer.update(grads, state.opt_state, state.params)
       new_params = optax.apply_updates(state.params, updates)
 
       # Periodically update target networks.
@@ -503,6 +507,8 @@ class SGDLearner(learning_lib.SGDLearner):
     # Initialize the network parameters
     key_params, key_state = jax.random.split(random_key, 2)
     initial_params = network.init(key_params)
+    optimizer = optimizer_cnstr(initial_params=initial_params)
+
     state = TrainingState(
         params=initial_params,
         target_params=initial_params,
@@ -561,6 +567,13 @@ class SGDLearner(learning_lib.SGDLearner):
 
       self._logger.write(results)
 
+def default_adam_constr(config, **kwargs):
+  optimizer_chain = [
+      optax.clip_by_global_norm(config.max_grad_norm),
+      optax.adam(config.learning_rate, eps=config.adam_eps),
+    ]
+  return optax.chain(*optimizer_chain)
+
 class Builder(r2d2.R2D2Builder):
   """TD agent Builder. Agent is derivative of R2D2 but may use different network/loss function
   """
@@ -568,12 +581,16 @@ class Builder(r2d2.R2D2Builder):
               #  networks: r2d2_networks.R2D2Networks,
                config: r2d2_config.R2D2Config,
                LossFn: learning_lib.LossFn=RecurrentLossFn,
+               optimizer_cnstr = None,
                get_actor_core_fn = None,
                learner_kwargs=None):
     if config.sequence_period is None:
       config.sequence_period = config.trace_length
 
     super().__init__(config=config)
+    if optimizer_cnstr is None:
+      optimizer_cnstr = default_adam_constr
+    self.optimizer_cnstr = optimizer_cnstr
 
     if get_actor_core_fn is None:
       get_actor_core_fn = get_actor_core
@@ -595,15 +612,12 @@ class Builder(r2d2.R2D2Builder):
     del environment_spec
     # The learner updates the parameters (and initializes them).
     logger = logger_fn('learner')
-    optimizer_chain = [
-      optax.clip_by_global_norm(self._config.max_grad_norm),
-      optax.adam(self._config.learning_rate, eps=self._config.adam_eps),
-    ]
 
     return SGDLearner(
         network=networks,
         random_key=random_key,
-        optimizer=optax.chain(*optimizer_chain),
+        optimizer_cnstr=functools.partial(self.optimizer_cnstr,
+          config=self._config),
         target_update_period=self._config.target_update_period,
         data_iterator=dataset,
         loss_fn=self._loss_fn,
@@ -636,7 +650,7 @@ def get_actor_core(
   epsilon_schedule = optax.linear_schedule(
           init_value=config.epsilon_begin,
           end_value=config.epsilon_end,
-          transition_steps=config.epsilon_steps or config.num_steps,
+          transition_steps=config.epsilon_steps or config.num_steps//2,
       )
   def select_action(params: networks_lib.Params,
                     observation: networks_lib.Observation,
