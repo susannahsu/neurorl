@@ -81,5 +81,5 @@ Agents are defined with 3 things (e.g. [biorl_trainer.py](configs/biorl_trainer.
 # Available (Recurrent) Agents
 
 1. [Q-learning](td_agents/q_learning.py)
-2. [Successor Features](td_agents/sf_agents.py)
+2. [Successor Features](td_agents/usfa.py)
 <!-- 2. Object-oriented Successor Features -->
