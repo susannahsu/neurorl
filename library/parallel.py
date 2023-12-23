@@ -361,12 +361,15 @@ def run_sbatch(
       use_wandb=use_wandb,
       wandb_group=group,
       wandb_name=exp_name,
-      wandb_project=wandb_init_kwargs['project'],
-      wandb_entity=wandb_init_kwargs['entity'],
       folder=log_dir,
       num_actors=num_actors,
       run_distributed=run_distributed,
     )
+    if wandb_init_kwargs:
+      save_config.update(
+        wandb_project=wandb_init_kwargs['project'],
+        wandb_entity=wandb_init_kwargs['entity'],
+      )
     save_configs.append(save_config)
 
   #################################
