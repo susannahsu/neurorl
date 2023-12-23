@@ -122,9 +122,13 @@ class Config(r2d2.R2D2Config):
 
   # value-based action-selection options (distributed)
   evaluation_epsilon: float = 0.01
-  num_epsilons: int = 10
-  epsilon_min: float = .01
-  epsilon_max: float = .9
+  # num_epsilons: int = 10
+  # epsilon_min: float = .01
+  # epsilon_max: float = .9
+  # epsilon_base: float = .1
+  num_epsilons: int = 256
+  epsilon_min: float = 1
+  epsilon_max: float = 3
   epsilon_base: float = .1
 
   # # Learner options

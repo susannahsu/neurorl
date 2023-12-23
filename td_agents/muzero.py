@@ -122,7 +122,7 @@ class Config(basics.Config):
   gumbel_scale: float = 1.0
 
   # Architecture
-  model_dim: int = 512
+  state_dim: int = 256
 
   transition_blocks: int = 6  # number of resnet blocks
   prediction_blocks: int = 2  # number of resnet blocks
@@ -148,7 +148,7 @@ def muzero_optimizer_constr(config, initial_params=None):
   - max grad norm
   """
 
-  if config.warmup_steps > 0 or config.lr_transition_steps > 0:
+  if config.warmup_steps > 0:
     warmup_steps = config.warmup_steps
     if config.warmup_steps == 0:
       warmup_steps = 1
@@ -966,7 +966,7 @@ def make_minigrid_networks(
     # Setup observation and state functions
     ###########################
     vision_torso = neural_networks.AtariVisionTorso(
-        out_dim=config.state_dim)
+      conv_dim=0)
     observation_fn = neural_networks.OarTorso(
         num_actions=num_actions,
         vision_torso=vision_torso,
@@ -987,7 +987,7 @@ def make_minigrid_networks(
         # action: [A]
         # state: [D]
         out = muzero_mlps.Transition(
-            channels=config.model_dim,
+            channels=config.state_dim,
             num_blocks=config.transition_blocks)(
             action_onehot, state)
         out = scale_gradient(out, config.scale_grad)
@@ -1067,7 +1067,6 @@ def make_minigrid_networks(
         root_pred_fn=root_predictor,
         model_pred_fn=model_predictor)
 
-  return make_network(config=config,
-                      environment_spec=env_spec,
+  return make_network(environment_spec=env_spec,
                       make_core_module=make_core_module,
                       **kwargs)

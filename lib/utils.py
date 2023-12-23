@@ -128,7 +128,7 @@ class LevelAvgReturnObserver(LevelAvgObserver):
     self._episode_return = tree.map_structure(
       operator.iadd,
       self._episode_return,
-      timestep.reward)
+      timestep.reward if timestep.reward else 0.0)
 
     if timestep.last():
       self.results[self.task_name].append(self._episode_return)
