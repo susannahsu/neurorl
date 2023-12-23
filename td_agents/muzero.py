@@ -88,7 +88,6 @@ class Config(basics.Config):
   lr_end_value: Optional[float] = 1e-5
   staircase_decay: bool = True
 
-  ema_update: float = 0.0
   tx_pair: rlax.TxPair = rlax.IDENTITY_PAIR
 
   # Replay options
@@ -97,8 +96,9 @@ class Config(basics.Config):
   max_replay_size: int = 100_000
 
   #Loss hps
-  num_bins: Optional[int] = 101  # number of bins for two-hot rep
-  max_scalar_value: float = 10.0  # number of bins for two-hot rep
+  num_bins: Optional[int] = None  # number of bins for two-hot rep
+  scalar_step_size: Optional[float] = .25  # step size between bins
+  max_scalar_value: float = 10.0  # number of bins for two-hot rep  max_scalar_value: float = 10.0  # number of bins for two-hot rep
   v_target_source: str = 'reanalyze' # this interpolates between mcts output vs. observed return
   reanalyze_ratio: float = 0.5 # percent of time to use mcts vs. observed return
   mask_model: bool = True
@@ -148,14 +148,14 @@ def muzero_optimizer_constr(config, initial_params=None):
   - max grad norm
   """
 
+  ##########################
+  # learning rate schedule
+  ##########################
   if config.warmup_steps > 0:
-    warmup_steps = config.warmup_steps
-    if config.warmup_steps == 0:
-      warmup_steps = 1
     learning_rate = optax.warmup_exponential_decay_schedule(
         init_value=0.0,
         peak_value=config.learning_rate,
-        warmup_steps=warmup_steps,
+        warmup_steps=config.warmup_steps,
         end_value=config.lr_end_value,
         transition_steps=config.lr_transition_steps,
         decay_rate=config.learning_rate_decay,
@@ -163,6 +163,10 @@ def muzero_optimizer_constr(config, initial_params=None):
     )
   else:
     learning_rate = config.learning_rate
+
+  ##########################
+  # weight decay on parameters
+  ##########################
   if config.weight_decay > 0.0:
     def decay_fn(module_name, name,
                   value): return True if name == "w" else False
@@ -177,6 +181,10 @@ def muzero_optimizer_constr(config, initial_params=None):
   else:
     optimizer = optax.adam(
         learning_rate=learning_rate, eps=config.adam_eps)
+
+  ##########################
+  # max grad norm
+  ##########################
   if config.max_grad_norm:
     optimizer = optax.chain(optax.clip_by_global_norm(
         config.max_grad_norm), optimizer)
@@ -1008,7 +1016,7 @@ def make_minigrid_networks(
     root_policy_fn = muzero_mlps.PredictionMlp(
         (128, 32), num_actions, name='pred_root_policy')
     model_reward_fn = muzero_mlps.PredictionMlp(
-        (32, 32), config.num_bins, name='pred_model_reward')
+        (32,), config.num_bins, name='pred_model_reward')
 
     if config.seperate_model_nets:
       # what is typically done

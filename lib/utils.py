@@ -233,6 +233,10 @@ class Discretizer:
     self._num_bins = num_bins
     self._tx_pair = tx_pair
 
+  @property
+  def num_bins(self):
+    return self._num_bins
+
   def logits_to_scalar(self, logits):
      return self.probs_to_scalar(jax.nn.softmax(logits))
 
