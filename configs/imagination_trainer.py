@@ -119,7 +119,7 @@ def make_qlearning_networks(
         ):
   """Builds default R2D2 networks for Atari games."""
 
-  num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum)
+  num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum) + 1
 
   def make_core_module() -> q_learning.R2D2Arch:
 

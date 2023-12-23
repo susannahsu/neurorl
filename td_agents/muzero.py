@@ -300,7 +300,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
 
       # [B, T], [B], [B]
       td_error, total_loss, metrics = loss_fn(
-          data,  # [T, B]
+        data,  # [T, B]
         online_preds,  #[T, B]
         online_state,  # [B]
         target_preds,  # [T, B]
@@ -324,48 +324,35 @@ class MuZeroLossFn(basics.RecurrentLossFn):
             target_params,
             key_grad, **kwargs):
 
-    # applying this ensures no gradients are computed
-    def stop_grad_pytree(pytree):
-      return jax.tree_map(lambda x: jax.lax.stop_gradient(x), pytree)
-
     in_episode = utils.make_episode_mask(data, include_final=True)
-    is_terminal_mask = utils.make_episode_mask(data, include_final=False).astype(jnp.int32)
+    is_terminal_mask = utils.make_episode_mask(data, include_final=False) == 0.0
 
     # [T], [T/T-1], [T]
     key_grad, key = jax.random.split(key_grad)
     policy_probs_target, value_probs_target, reward_probs_target, returns, mcts_values = self.compute_target(
-        data=stop_grad_pytree(data),
+        data=data,
         networks=networks,
-        is_terminal_mask=stop_grad_pytree(is_terminal_mask),
+        is_terminal_mask=is_terminal_mask,
         target_params=target_params,
-        target_preds=stop_grad_pytree(target_preds),
+        target_preds=target_preds,
         rng_key=key,
     )
 
     key_grad, key = jax.random.split(key_grad)
     return self.learn(
       data=data,
-      in_episode=in_episode,
-      is_terminal_mask=is_terminal_mask,
       networks=networks,
       params=params,
-      rng_key=key,
+      in_episode=in_episode,
+      is_terminal_mask=is_terminal_mask,
       online_preds=online_preds,
+      rng_key=key,
       policy_probs_target=policy_probs_target,
       value_probs_target=value_probs_target,
       reward_probs_target=reward_probs_target,
       returns=returns,
       **kwargs,
   )
-
-  def get_invalid_actions(self, batch_size):
-    """This computes invalid actions that match the batch_size."""
-    if self.invalid_actions is None:
-      return None
-    if self.invalid_actions.ndim < 2:
-      self.invalid_actions = jax.numpy.tile(
-          self.invalid_actions, (batch_size, 1))
-    return self.invalid_actions
 
   def compute_target(self,
                      data: jax.Array,
@@ -410,7 +397,6 @@ class MuZeroLossFn(basics.RecurrentLossFn):
             discretizer=self.discretizer,
         ))
 
-    # policy_target = action_probs(mcts_outputs.search_tree.summary().visit_counts)
     num_actions = target_preds.policy_logits.shape[-1]
     policy_target = mcts_outputs.action_weights
 
@@ -464,10 +450,10 @@ class MuZeroLossFn(basics.RecurrentLossFn):
   def learn(self,
             data: reverb.ReplaySample,
             networks: basics.NetworkFn,
+            params: networks_lib.Params,
             in_episode: jax.Array,
             is_terminal_mask: jax.Array,
             online_preds: RootOutput,
-            params: networks_lib.Params,
             rng_key: networks_lib.PRNGKey,
             policy_probs_target: jax.Array,
             value_probs_target: jax.Array,
@@ -566,6 +552,8 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     # ------------
     # get masks for losses
     # ------------
+    # NOTE: npreds = nsteps + self.simulation_steps, number of predictions that will be made overall
+    # NOTE: dim_return is the number of value predictions
     # if dim_return is LESS than number of predictions, then have extra target, so mask it
     extra_v = self.simulation_steps + int(dim_return < npreds)
     policy_mask = jnp.concatenate(
@@ -600,7 +588,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         simulation_actions, self.simulation_steps)
 
     # ------------
-    # model outputs
+    # unrolls the model from each time-step in parallel
     # ------------
     def model_unroll(key, state, actions):
       key, model_key = jax.random.split(key)
@@ -617,39 +605,44 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     )
 
     # ------------
-    # compute loss
+    # compute losses
     # ------------
+
     def compute_losses(
             model_outputs_,
             reward_target_, value_target_, policy_target_,
             reward_mask_, value_mask_, policy_mask_):
-      _batch_categorical_cross_entropy = jax.vmap(
-          rlax.categorical_cross_entropy)
-      reward_ce = _batch_categorical_cross_entropy(
+      reward_ce = rlax.categorical_cross_entropy(
           reward_target_, model_outputs_.reward_logits)
       reward_loss = utils.episode_mean(reward_ce, reward_mask_)
 
-      value_ce = _batch_categorical_cross_entropy(
+      value_ce = rlax.categorical_cross_entropy(
           value_target_, model_outputs_.value_logits)
       value_loss = utils.episode_mean(value_ce, value_mask_)
 
-      policy_ce = policy_loss_fn(
+      policy_ce = rlax.categorical_cross_entropy(
           policy_target_, model_outputs_.policy_logits)
       policy_loss = utils.episode_mean(policy_ce, policy_mask_)
 
       return reward_ce, value_ce, policy_ce, reward_loss, value_loss, policy_loss
 
+    # targets are [T, S, P], where T is time, S is simulation steps,
+    #   and P is number of predictions
+    # masks are [T, S]
+    # by applying batch apply, then vmap, we merge 
+    #   1. batchapply: [T, S] --> [T*S]
+    #   2. vmap: inside acts over just raw predictions
+    # output will be [T, S]
     _ = [
         reward_model_ce,
         value_model_ce,
         policy_model_ce,
         model_reward_loss,
         model_value_loss,
-        model_policy_loss] = jax.vmap(compute_losses)(
+        model_policy_loss] = hk.BatchApply(jax.vmap(compute_losses))(
         model_outputs,
         reward_model_target, value_model_target, policy_model_target,
-        reward_model_mask, value_model_mask, policy_model_mask)
-
+        reward_model_mask[:,:,None], value_model_mask[:,:,None], policy_model_mask[:,:,None])
 
     # all are []
     raw_model_policy_loss = utils.episode_mean(
@@ -669,8 +662,13 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         root_value_loss + model_value_loss +
         root_policy_loss + model_policy_loss)
 
+    value_root_prediction = self.discretizer.logits_to_scalar(
+        online_preds.value_logits[:dim_return])
+    td_error = value_root_prediction - returns
+
     metrics = {
         "0.0.total_loss": total_loss,
+        "0.0.td-error": td_error,
         '0.1.policy_root_loss': raw_root_policy_loss,
         '0.1.policy_model_loss': raw_model_policy_loss,
         '0.2.model_reward_loss': raw_model_reward_loss,  # T
@@ -678,10 +676,17 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         '0.3.value_model_loss': raw_model_value_loss,  # T
     }
 
-    value_root_prediction = self.discretizer.logits_to_scalar(
-        online_preds.value_logits[:dim_return])
-    td_error = value_root_prediction - returns
     return td_error, total_loss, metrics
+
+
+  def get_invalid_actions(self, batch_size):
+    """This computes invalid actions that match the batch_size."""
+    if self.invalid_actions is None:
+      return None
+    if self.invalid_actions.ndim < 2:
+      self.invalid_actions = jax.numpy.tile(
+          self.invalid_actions, (batch_size, 1))
+    return self.invalid_actions
 
 
 def make_network(

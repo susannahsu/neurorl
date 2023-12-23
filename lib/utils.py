@@ -156,10 +156,10 @@ def episode_mean(x, mask):
     nd = len(mask.shape)
     extra = nx - nd
     dims = list(range(nd, nd+extra))
-    batch_loss = jnp.multiply(x, jnp.expand_dims(mask, dims))
+    z = jnp.multiply(x, jnp.expand_dims(mask, dims))
   else:
-    batch_loss = jnp.multiply(x, mask)
-  return (batch_loss.sum(0))/(mask.sum(0)+1e-5)
+    z = jnp.multiply(x, mask)
+  return (z.sum(0))/(mask.sum(0)+1e-5)
 
 
 def make_episode_mask(data= None, include_final=False, **kwargs):

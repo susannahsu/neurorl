@@ -100,7 +100,8 @@ def observation_encoder(
       x.observation.reshape(-1),  #[N*D]
       jnp.expand_dims(jnp.tanh(x.reward), 0),   # [1]
       jax.nn.one_hot(x.action, num_actions)))  # [A]
-    return hk.Linear(512)(x)
+    z = hk.nets.MLP((50, 50))(x)
+    return jax.nn.relu(x)
 
   has_batch_dim = inputs.reward.ndim > 0
   if has_batch_dim:
@@ -137,7 +138,7 @@ def make_muzero_networks(
     **kwargs) -> muzero.MuZeroNetworks:
   """Builds default MuZero networks for BabyAI tasks."""
 
-  num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum)
+  num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum) + 1
 
   def make_core_module() -> muzero.MuZeroNetworks:
 
@@ -162,7 +163,7 @@ def make_muzero_networks(
         # action: [A]
         # state: [D]
         out = muzero_mlps.SimpleTransition(
-            num_blocks=config.transition_blocks)(
+            num_blocks=2)(
             action_onehot, state)
         out = muzero.scale_gradient(out, config.scale_grad)
         return out, out
@@ -540,11 +541,11 @@ def sweep(search: str = 'default'):
   if search == 'baselines':
     space = [
         {
-            "group": tune.grid_search(['catch-run-1']),
-            "num_steps": tune.grid_search([5e6]),
+            "group": tune.grid_search(['catch-run-2']),
+            "num_steps": tune.grid_search([1e6]),
             "agent": tune.grid_search(['muzero']),
             "seed": tune.grid_search([1]),
-            "env.rows": tune.grid_search([5, 10]),
+            "env.rows": tune.grid_search([5]),
         }
     ]
 

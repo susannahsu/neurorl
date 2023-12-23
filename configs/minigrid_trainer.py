@@ -173,9 +173,11 @@ def setup_experiment_inputs(
 
     discretizer = utils.Discretizer(
                   num_bins=config.num_bins,
+                  step_size=config.scalar_step_size,
                   max_value=config.max_scalar_value,
                   tx_pair=config.tx_pair,
               )
+    config.num_bins = discretizer.num_bins
 
     builder = basics.Builder(
       config=config,
@@ -420,12 +422,22 @@ def sweep(search: str = 'default'):
     ]
   elif search == 'muzero':
     space = [
+        # {
+        #     "group": tune.grid_search(['muzero-run-2']),
+        #     "agent": tune.grid_search(['muzero']),
+        #     "seed": tune.grid_search([1]),
+        #     "warmup_steps": tune.grid_search([1_000]),
+        #     "lr_transition_steps": tune.grid_search([1_000, 100_000]),
+        #     "env.level": tune.grid_search([
+        #         "BabyAI-GoToRedBallNoDists-v0",
+        #     ]),
+        # },
         {
-            "group": tune.grid_search(['muzero-run-2']),
+            "group": tune.grid_search(['muzero-run-4']),
             "agent": tune.grid_search(['muzero']),
             "seed": tune.grid_search([1]),
-            "warmup_steps": tune.grid_search([0, 1_000]),
-            "lr_transition_steps": tune.grid_search([1_000, 100_000]),
+            # "samples_per_insert_tolerance_rate": tune.grid_search([.5, 1., 10.]),
+            "samples_per_insert": tune.grid_search([50., 25.]),
             "env.level": tune.grid_search([
                 "BabyAI-GoToRedBallNoDists-v0",
             ]),
