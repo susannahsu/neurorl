@@ -128,7 +128,7 @@ class LevelAvgReturnObserver(LevelAvgObserver):
     self._episode_return = tree.map_structure(
       operator.iadd,
       self._episode_return,
-      timestep.reward)
+      timestep.reward if timestep.reward else 0.0)
 
     if timestep.last():
       self.results[self.task_name].append(self._episode_return)
@@ -156,10 +156,10 @@ def episode_mean(x, mask):
     nd = len(mask.shape)
     extra = nx - nd
     dims = list(range(nd, nd+extra))
-    batch_loss = jnp.multiply(x, jnp.expand_dims(mask, dims))
+    z = jnp.multiply(x, jnp.expand_dims(mask, dims))
   else:
-    batch_loss = jnp.multiply(x, mask)
-  return (batch_loss.sum(0))/(mask.sum(0)+1e-5)
+    z = jnp.multiply(x, mask)
+  return (z.sum(0))/(mask.sum(0)+1e-5)
 
 
 def make_episode_mask(data= None, include_final=False, **kwargs):
@@ -216,7 +216,7 @@ def array_from_fig(fig):
 
 class Discretizer:
   def __init__(self,
-               max_value,
+               max_value: Union[float, int],
                num_bins: Optional[int] = None,
                step_size: Optional[int] = None,
                min_value: Optional[int] = None,
@@ -230,8 +230,12 @@ class Discretizer:
     else:
       num_bins = math.ceil((self._max_value-self._min_value)/step_size)+1
 
-    self._num_bins = num_bins
+    self._num_bins = int(num_bins)
     self._tx_pair = tx_pair
+
+  @property
+  def num_bins(self):
+    return self._num_bins
 
   def logits_to_scalar(self, logits):
      return self.probs_to_scalar(jax.nn.softmax(logits))

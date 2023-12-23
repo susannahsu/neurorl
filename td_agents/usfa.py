@@ -14,13 +14,13 @@ from acme.agents.jax.r2d2 import actor as r2d2_actor
 from acme.jax import networks as networks_lib
 from acme.agents.jax import actor_core as actor_core_lib
 from acme.wrappers import observation_action_reward
-from lib.utils import episode_mean
-from lib.utils import make_episode_mask
-from lib.utils import expand_tile_dim
+from library.utils import episode_mean
+from library.utils import make_episode_mask
+from library.utils import expand_tile_dim
 
 from td_agents import basics
 
-import lib.networks as networks
+import library.networks as networks
 
 @dataclasses.dataclass
 class Config(basics.Config):
