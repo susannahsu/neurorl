@@ -978,8 +978,8 @@ def make_minigrid_networks(
     ###########################
     # Setup observation and state functions
     ###########################
-    vision_torso = neural_networks.AtariVisionTorso(
-      conv_dim=0)
+    vision_torso = neural_networks.BabyAIVisionTorso(
+      conv_dim=0, out_dim=config.state_dim)
     observation_fn = neural_networks.OarTorso(
         num_actions=num_actions,
         vision_torso=vision_torso,
