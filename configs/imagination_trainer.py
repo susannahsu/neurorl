@@ -69,14 +69,14 @@ import jax
 import jax.numpy as jnp
 
 from td_agents import q_learning, basics, muzero
-from lib import muzero_mlps
+from library import muzero_mlps
 
-from lib.dm_env_wrappers import GymWrapper
-import lib.env_wrappers as env_wrappers
-import lib.experiment_builder as experiment_builder
-import lib.parallel as parallel
-import lib.utils as utils
-import lib.networks as networks
+from library.dm_env_wrappers import GymWrapper
+import library.env_wrappers as env_wrappers
+import library.experiment_builder as experiment_builder
+import library.parallel as parallel
+import library.utils as utils
+import library.networks as networks
 
 from envs import mental_blocks
 

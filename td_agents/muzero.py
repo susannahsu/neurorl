@@ -22,11 +22,11 @@ import jax.numpy as jnp
 from jax import jit
 
 import rlax
-import lib.networks as neural_networks
+import library.networks as neural_networks
 
-from lib import utils 
+from library import utils 
 from td_agents import basics
-from lib import muzero_mlps
+from library import muzero_mlps
 
 BatchSize = int
 PRNGKey = networks_lib.PRNGKey

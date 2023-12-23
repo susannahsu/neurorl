@@ -43,7 +43,7 @@ python configs/minigrid_trainer.py \
   --account=kempner_fellows \
   --wandb_entity=wcarvalho92 \
   --wandb_project=minigrid \
-  --search='baselines'
+  --search='muzero'
 
 """
 import functools 
@@ -65,11 +65,11 @@ import minigrid
 
 from td_agents import basics
 
-from lib.dm_env_wrappers import GymWrapper
-import lib.env_wrappers as env_wrappers
-import lib.experiment_builder as experiment_builder
-import lib.parallel as parallel
-import lib.utils as utils
+from library.dm_env_wrappers import GymWrapper
+import library.env_wrappers as env_wrappers
+import library.experiment_builder as experiment_builder
+import library.parallel as parallel
+import library.utils as utils
 
 flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')
@@ -411,7 +411,7 @@ def sweep(search: str = 'default'):
   if search == 'baselines':
     space = [
         {
-            "group": tune.grid_search(['run-2']),
+            "group": tune.grid_search(['run-3-babyai-torso']),
             "agent": tune.grid_search(['muzero']),
             "seed": tune.grid_search([1]),
             "env.level": tune.grid_search([
@@ -433,7 +433,7 @@ def sweep(search: str = 'default'):
         #     ]),
         # },
         {
-            "group": tune.grid_search(['muzero-run-4']),
+            "group": tune.grid_search(['muzero-run-6']),
             "agent": tune.grid_search(['muzero']),
             "seed": tune.grid_search([1]),
             # "samples_per_insert_tolerance_rate": tune.grid_search([.5, 1., 10.]),

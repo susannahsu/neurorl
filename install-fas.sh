@@ -1,15 +1,20 @@
-# salloc -p gpu -t 0-06:00 --mem=8000 --gres=gpu:1
 
 # NOTES: cuda/11.3.1 seems needed for jax==0.4.3
 # NOTES: jax==0.4.3 seems needed for acme
-module load cuda/11.3.1-fasrc01  
+
+# turn on interactive session
+salloc -p gpu -t 0-06:00 --mem=8000 --gres=gpu:1
+
+# load relevant modules
+module load cuda/11.3.1-fasrc01
 module load cudnn/8.9.2.26_cuda11-fasrc01
 module load gcc/9.5.0-fasrc01
 
+# create and activate conda env
 conda create --name neurorl python=3.9 pip wheel -y
-
 source activate neurorl
 
+# update with 
 conda env update --name neurorl --file conda_env.yaml
 
 #############################################

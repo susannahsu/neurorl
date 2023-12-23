@@ -44,12 +44,12 @@ import minigrid
 
 from td_agents import q_learning
 
-from lib.dm_env_wrappers import GymWrapper
-import lib.env_wrappers as env_wrappers
-import lib.experiment_builder as experiment_builder
-import lib.parallel as parallel
-import lib.utils as utils
-from lib.single_thread_experiment import run_experiment
+from library.dm_env_wrappers import GymWrapper
+import library.env_wrappers as env_wrappers
+import library.experiment_builder as experiment_builder
+import library.parallel as parallel
+import library.utils as utils
+from library.single_thread_experiment import run_experiment
 
 flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')

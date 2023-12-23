@@ -69,12 +69,12 @@ import jax.numpy as jnp
 
 from envs import catch
 from td_agents import q_learning, basics, muzero
-from lib import muzero_mlps
+from library import muzero_mlps
 
-import lib.experiment_builder as experiment_builder
-import lib.parallel as parallel
-import lib.utils as utils
-import lib.networks as networks
+import library.experiment_builder as experiment_builder
+import library.parallel as parallel
+import library.utils as utils
+import library.networks as networks
 
 flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')
@@ -541,7 +541,7 @@ def sweep(search: str = 'default'):
   if search == 'baselines':
     space = [
         {
-            "group": tune.grid_search(['catch-run-2']),
+            "group": tune.grid_search(['catch-run-3']),
             "num_steps": tune.grid_search([1e6]),
             "agent": tune.grid_search(['muzero']),
             "seed": tune.grid_search([1]),

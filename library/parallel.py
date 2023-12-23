@@ -15,7 +15,7 @@ import subprocess
 
 from acme.utils import paths
 
-import lib.utils as utils
+import library.utils as utils
 
 flags.DEFINE_integer('num_actors', 6, 'number of actors.')
 flags.DEFINE_integer('config_idx', 1, 'number of actors.')

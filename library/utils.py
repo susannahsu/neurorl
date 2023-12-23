@@ -216,7 +216,7 @@ def array_from_fig(fig):
 
 class Discretizer:
   def __init__(self,
-               max_value,
+               max_value: Union[float, int],
                num_bins: Optional[int] = None,
                step_size: Optional[int] = None,
                min_value: Optional[int] = None,
@@ -230,7 +230,7 @@ class Discretizer:
     else:
       num_bins = math.ceil((self._max_value-self._min_value)/step_size)+1
 
-    self._num_bins = num_bins
+    self._num_bins = int(num_bins)
     self._tx_pair = tx_pair
 
   @property
