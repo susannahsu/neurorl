@@ -93,7 +93,7 @@ class BabyAIVisionTorso(hk.Module):
       layers.append(hk.Conv2D(conv_dim, [1, 1], stride=1))
     self._network = hk.Sequential(layers)
 
-    self.flatten = flatten
+    self.flatten = flatten or out_dim > 0
     if out_dim:
       self.out_net = hk.Linear(out_dim)
     else:
