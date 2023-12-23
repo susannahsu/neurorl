@@ -612,37 +612,30 @@ class MuZeroLossFn(basics.RecurrentLossFn):
             model_outputs_,
             reward_target_, value_target_, policy_target_,
             reward_mask_, value_mask_, policy_mask_):
-      reward_ce = rlax.categorical_cross_entropy(
+      reward_ce = jax.vmap(rlax.categorical_cross_entropy)(
           reward_target_, model_outputs_.reward_logits)
       reward_loss = utils.episode_mean(reward_ce, reward_mask_)
 
-      value_ce = rlax.categorical_cross_entropy(
+      value_ce = jax.vmap(rlax.categorical_cross_entropy)(
           value_target_, model_outputs_.value_logits)
       value_loss = utils.episode_mean(value_ce, value_mask_)
 
-      policy_ce = rlax.categorical_cross_entropy(
+      policy_ce = jax.vmap(rlax.categorical_cross_entropy)(
           policy_target_, model_outputs_.policy_logits)
       policy_loss = utils.episode_mean(policy_ce, policy_mask_)
 
       return reward_ce, value_ce, policy_ce, reward_loss, value_loss, policy_loss
 
-    # targets are [T, S, P], where T is time, S is simulation steps,
-    #   and P is number of predictions
-    # masks are [T, S]
-    # by applying batch apply, then vmap, we merge 
-    #   1. batchapply: [T, S] --> [T*S]
-    #   2. vmap: inside acts over just raw predictions
-    # output will be [T, S]
     _ = [
         reward_model_ce,
         value_model_ce,
         policy_model_ce,
         model_reward_loss,
         model_value_loss,
-        model_policy_loss] = hk.BatchApply(jax.vmap(compute_losses))(
+        model_policy_loss] = jax.vmap(compute_losses)(
         model_outputs,
         reward_model_target, value_model_target, policy_model_target,
-        reward_model_mask[:,:,None], value_model_mask[:,:,None], policy_model_mask[:,:,None])
+        reward_model_mask, value_model_mask, policy_model_mask)
 
     # all are []
     raw_model_policy_loss = utils.episode_mean(
