@@ -190,27 +190,6 @@ class SfGpiHead(hk.Module):
     self.sf_net = hk.nets.MLP(
       tuple(sf_layers)+(num_actions * state_features_dim,))
 
-  def compute_sf_q(self, inputs: jnp.ndarray, task: jnp.ndarray) -> jnp.ndarray:
-    """Forward pass
-    
-    Args:
-        inputs (jnp.ndarray): policy
-        task (jnp.ndarray): A x C
-    
-    Returns:
-        jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
-    """
-    # [A * C]
-    sf = self.sf_net(inputs)
-    # [A, C]
-    sf = jnp.reshape(sf, (self.num_actions, self.state_features_dim))
-
-    # dot-product
-    q_values = jnp.sum(sf * task, axis=-1) # [A]
-    assert q_values.shape[0] == self.num_actions, 'wrong shape'
-
-    return sf, q_values
-
   def __call__(self,
     usfa_input: jnp.ndarray,  # memory output (e.g. LSTM)
     task: jnp.ndarray,  # task vector
