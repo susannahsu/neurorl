@@ -671,7 +671,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         "0.0.td-error": td_error,
         '0.1.policy_root_loss': raw_root_policy_loss,
         '0.1.policy_model_loss': raw_model_policy_loss,
-        '0.2.model_reward_loss': raw_model_reward_loss,  # T
+        '0.2.reward_model_loss': raw_model_reward_loss,  # T
         '0.3.value_root_loss': raw_root_value_loss,
         '0.3.value_model_loss': raw_model_value_loss,  # T
     }
