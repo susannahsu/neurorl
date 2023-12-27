@@ -60,6 +60,7 @@ LossFn = learning_lib.LossFn
 TrainingState = learning_lib.TrainingState
 ReverbUpdate = learning_lib.ReverbUpdate
 LossExtra = learning_lib.LossExtra
+Policy = r2d2_actor.R2D2Policy
 
 # Only simple observations & discrete action spaces for now.
 Observation = jax.Array

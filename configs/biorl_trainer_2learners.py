@@ -8,7 +8,7 @@ python -m ipdb -c continue configs/biorl_trainer_2learners.py \
   --debug=True \
   --use_wandb=False \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=imagination_debug \
+  --wandb_project=forage_debug \
   --search='qlearning'
 
 # JAX does Just In Time (JIT) compilation. remove this.
@@ -18,30 +18,17 @@ JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/biorl_trainer_2learners.py 
   --debug=True \
   --use_wandb=False \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=imagination_debug \
+  --wandb_project=forage_debug \
   --search='initial' \
-
-
-# DEBUGGING, parallel
-python -m ipdb -c continue configs/biorl_trainer_2learners.py \
-  --parallel='sbatch' \
-  --debug_parallel=True \
-  --run_distributed=False \
-  --use_wandb=True \
-  --wandb_entity=wcarvalho92 \
-  --wandb_project=imagination_debug \
-  --search='initial'
-
 
 # launch jobs on slurm
 python configs/biorl_trainer_2learners.py \
   --parallel='sbatch' \
-  --run_distributed=True \
   --use_wandb=True \
   --partition=kempner \
   --account=kempner_fellows \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=imagination \
+  --wandb_project=forage \
   --search='initial'
 
 """
@@ -190,7 +177,7 @@ def run_experiment(
     online_learner_cls: basics.SGDLearner,
     offline_learner_cls: basics.SGDLearner,
     get_actor_core: Callable[
-      [basics.NetworkFn, basics.Config, Evaluation]],
+      [basics.NetworkFn, basics.Config, Evaluation], basics.Policy],
     environment_factory: types.EnvironmentFactory,
     network_factory: experiments.config.NetworkFactory,
     logger_factory: Optional[loggers.LoggerFactory] = None,
@@ -388,7 +375,7 @@ def run_experiment(
   #-------------------
   learner_key, key = jax.random.split(key)
 
-  online_learner = basics.SGDLearner(
+  online_learner = online_learner_cls(
     network=networks,
     data_iterator=online_dataset,
     random_key=learner_key,
@@ -587,14 +574,14 @@ def train_single(
   assert agent != '', 'please set agent'
 
   if agent == 'qlearning':
-    from td_agents import qlearning
     config = QlearningConfig(**config_kwargs)
 
     network_factory = functools.partial(
-        qlearning.make_minigrid_networks, config=config)
+        q_learning.make_minigrid_networks, config=config)
 
     get_actor_core = basics.get_actor_core
 
+    import ipdb; ipdb.set_trace()
     online_learner_cls = functools.partial(
       basics.SGDLearner,
       loss_fn=q_learning.R2D2LossFn(
