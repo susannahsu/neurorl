@@ -24,12 +24,12 @@ from acme.utils.loggers import csv
 from acme.utils.loggers import filters
 from acme.utils.loggers import terminal
 
-import collections
 import jax
 import numpy as np
 import time
 
 from pathlib import Path
+import library.utils as data_utils
 
 try:
   import wandb
@@ -38,23 +38,8 @@ except ImportError:
   WANDB_AVAILABLE=False
 
 
-
-
-def flatten_dict(d, parent_key='', sep='_'):
-  """Take a infinitely nested dict of dict and make it {key: value}."""
-  items = []
-  for k, v in d.items():
-      new_key = parent_key + sep + k if parent_key else k
-      if isinstance(v, collections.MutableMapping):
-          items.extend(flatten_dict(v, new_key, sep=sep).items())
-      else:
-          items.append((new_key, v))
-  return dict(items)
-
-
 def copy_numpy(values):
   return jax.tree_map(np.array, values)
-
 
 
 def make_logger(
@@ -180,8 +165,16 @@ class WandbLogger(base.Logger):
     to_log={}
     for key in values.keys() - [self._steps_key]:
       value = values[key]
-      name = self._name_fn(self.label, key)
-      to_log[name] = value
+      if isinstance(value, dict):
+        new_dict = data_utils.flatten_dict(
+          value, parent_key=key, sep="/")
+        for k2, v2 in new_dict.items():
+          # bit of a hack
+          name = self.label + "/" +  k2
+          to_log[name] = v2
+      else:
+        name = self._name_fn(self.label, key)
+        to_log[name] = value
 
     to_log[f'{self.label}/step']  = step
 

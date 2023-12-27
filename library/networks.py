@@ -10,12 +10,11 @@ import jax.numpy as jnp
 from acme import types
 from acme.wrappers import observation_action_reward
 
-Array = types.NestedArray
-Image = types.NestedArray
-Action = types.NestedArray
-Reward = types.NestedArray
-Task = types.NestedArray
-
+Array = jax.Array
+Image = jax.Array
+Action = jax.Array
+Reward = jax.Array
+Task = jax.Array
 
 @chex.dataclass(frozen=True)
 class TorsoOutput:
@@ -77,6 +76,46 @@ class AtariVisionTorso(hk.Module):
       flat = jnp.reshape(outputs, [-1])  # [D]
 
     return self.out_net(flat)
+
+class BabyAIVisionTorso(hk.Module):
+  """Convolutional stack used in BabyAI codebase."""
+
+  def __init__(self, flatten=False, conv_dim=16, out_dim=0):
+    super().__init__(name='babyai_torso')
+    layers = [
+        hk.Conv2D(128, [8, 8], stride=8),
+        hk.Conv2D(128, [3, 3], stride=1),
+        jax.nn.relu,
+        hk.Conv2D(128, [3, 3], stride=1),
+        jax.nn.relu,
+    ]
+    if conv_dim > 0:
+      layers.append(hk.Conv2D(conv_dim, [1, 1], stride=1))
+    self._network = hk.Sequential(layers)
+
+    self.flatten = flatten or out_dim > 0
+    if out_dim:
+      self.out_net = hk.Linear(out_dim)
+    else:
+      self.out_net = lambda x: x
+
+  def __call__(self, inputs: Image) -> jnp.ndarray:
+    inputs_rank = jnp.ndim(inputs)
+    batched_inputs = inputs_rank == 4
+    if inputs_rank < 3 or inputs_rank > 4:
+      raise ValueError('Expected input BHWC or HWC. Got rank %d' % inputs_rank)
+
+    outputs = self._network(inputs)
+    if not self.flatten:
+      return outputs
+
+    if batched_inputs:
+      flat = jnp.reshape(outputs, [outputs.shape[0], -1])  # [B, D]
+    else:
+      flat = jnp.reshape(outputs, [-1])  # [D]
+
+    return self.out_net(flat)
+
 
 class LanguageEncoder(hk.Module):
   """Module that embed words and then runs them through GRU. The Token`0` is treated as padding and masked out."""
@@ -166,7 +205,7 @@ class OarTorso(hk.Module):
     """_no_ batch [B] dimension."""
     # compute task encoding
 
-    task = self._task_encoder(inputs.observation['mission'])
+    task = self._task_encoder(inputs.observation)
 
     # get action one-hot
     action = jax.nn.one_hot(
@@ -188,3 +227,10 @@ class OarTorso(hk.Module):
       action=action,
       reward=reward)
 
+class DummyRNN(hk.RNNCore):
+  def __call__(self, inputs: jax.Array, prev_state: hk.LSTMState
+               ) -> Tuple[jax.Array, hk.LSTMState]:
+    return inputs, prev_state
+
+  def initial_state(self, batch_size: Optional[int]) -> hk.LSTMState:
+    return jnp.zeros((batch_size, 1)) if batch_size else jnp.zeros((1))

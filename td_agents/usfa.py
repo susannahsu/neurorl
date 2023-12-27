@@ -14,62 +14,27 @@ from acme.agents.jax.r2d2 import actor as r2d2_actor
 from acme.jax import networks as networks_lib
 from acme.agents.jax import actor_core as actor_core_lib
 from acme.wrappers import observation_action_reward
+from library.utils import episode_mean
+from library.utils import make_episode_mask
+from library.utils import expand_tile_dim
 
 from td_agents import basics
 
-import lib.networks as networks
+import library.networks as networks
 
 @dataclasses.dataclass
 class Config(basics.Config):
   eval_task_support: str = "train"  # options:
   nsamples: int = 0  # no samples outside of train vector
+  importance_sampling_exponent: float = 0.0
 
-def expand_tile_dim(x, size, axis=-1):
-  """E.g. shape=[1,128] --> [1,10,128] if dim=1, size=10
-  """
-  ndims = len(x.shape)
-  _axis = axis
-  if axis < 0: # go AFTER -axis dims, e.g. x=[1,128], axis=-2 --> [1,10,128]
-    axis += 1
-    _axis = axis % ndims # to account for negative
+  sf_layers : Tuple[int]=(128, 128)
+  policy_layers : Tuple[int]=(32)
 
-  x = jnp.expand_dims(x, _axis)
-  tiling = [1]*_axis + [size] + [1]*(ndims-_axis)
-  return jnp.tile(x, tiling)
-
-def make_episode_mask(data, include_final=False, **kwargs):
-  """Look at where have valid task data. Everything until 1 before final valid data counts towards task. Data.discount always ends two before final data. 
-  e.g. if valid data is [x1, x2, x3, 0, 0], data.discount is [1,0,0,0,0]. So can use that to obtain masks.
-  
-  Args:
-      data (TYPE): Description
-      include_final (bool, optional): if True, include all data. if False, include until 1 time-step before final data
-  
-  Returns:
-      TYPE: Description
-  """
-  T, B = data.discount.shape
-  # for data [x1, x2, x3, 0, 0]
-  if include_final:
-    # return [1,1,1,0,0]
-    return jnp.concatenate((jnp.ones((2, B)), data.discount[:-2]), axis=0)
-  else:
-    # return [1,1,0,0,0]
-    return jnp.concatenate((jnp.ones((1, B)), data.discount[:-1]), axis=0)
-
-def episode_mean(x, mask):
-  if len(mask.shape) < len(x.shape):
-    nx = len(x.shape)
-    nd = len(mask.shape)
-    extra = nx - nd
-    dims = list(range(nd, nd+extra))
-    batch_loss = jnp.multiply(x, jnp.expand_dims(mask, dims))
-  else:
-    batch_loss = jnp.multiply(x, mask)
-  return (batch_loss.sum(0))/(mask.sum(0)+1e-5)
+  importance_sampling_exponent: float = 0.0
 
 def cumulants_from_env(data, online_preds, online_state, target_preds, target_state):
-  return data.observation.observation['state_features'] # [T, B, C]
+  return data.observation.observation['state_features']  # [T, B, C]
 
 def cumulants_from_preds(
   data,
@@ -107,6 +72,8 @@ class UsfaLossFn(basics.RecurrentLossFn):
 
   extract_cumulants: Callable = cumulants_from_env
   extract_task: Callable = lambda data: data.observation.observation['task']
+  index_cumulants: Callable[
+    [jnp.ndarray], jnp.ndarray] = lambda x : x[:-1]
 
   def error(self, data, online_preds, online_state, target_preds, target_state, **kwargs):
     # ======================================================
@@ -117,7 +84,6 @@ class UsfaLossFn(basics.RecurrentLossFn):
     online_sf = online_preds.sf
     online_z = online_preds.policy
     target_sf = target_preds.sf
-
     # pseudo rewards, [T/T+1, B, C]
     cumulants = self.extract_cumulants(
       data=data, online_preds=online_preds, online_state=online_state,
@@ -132,149 +98,52 @@ class UsfaLossFn(basics.RecurrentLossFn):
     # Preprocess discounts & rewards.
     discounts = (data.discount * self.discount).astype(online_q.dtype) # [T, B]
 
-    cumulants_T = cumulants.shape[0]
-    data_T = online_sf.shape[0]
-
-    if cumulants_T == data_T:
-      # shorten cumulants
-      cum_idx = data_T - 1
-    elif cumulants_T == data_T - 1:
-      # no need to shorten cumulants
-      cum_idx = cumulants_T
-    elif cumulants_T > data_T:
-      raise RuntimeError("This should never happen?")
-    else:
-      raise NotImplementedError
-
-
-    # ======================================================
-    # Loss for SF
-    # ======================================================
-    def sf_loss(online_sf, online_actions, target_sf, selector_actions, cumulants, discounts):
-      """Vmap over cumulant dimension.
-      
-      Args:
-          online_sf (TYPE): [T, A, C]
-          online_actions (TYPE): [T]
-          target_sf (TYPE): [T, A, C]
-          selector_actions (TYPE): [T]
-          cumulants (TYPE): [T, C]
-          discounts (TYPE): [T]
-
-      Returns:
-          TYPE: Description
-      """
-      # copies selector_actions, online_actions, vmaps over cumulant dim
-      td_error_fn = jax.vmap(
-        functools.partial(
-            rlax.transformed_n_step_q_learning,
-            n=self.bootstrap_n),
-        in_axes=(2, None, 2, None, 1, None), out_axes=1)
-
-      return td_error_fn(
-        online_sf[:-1],       # [T, A, C] (vmap 2) 
-        online_actions[:-1],  # [T]       (vmap None) 
-        target_sf[1:],        # [T, A, C] (vmap 2) 
-        selector_actions[1:], # [T]       (vmap None) 
-        cumulants[:cum_idx],       # [T, C]    (vmap 1) 
-        discounts[:-1])       # [T]       (vmap None)
-
-
     # ======================================================
     # Prepare loss (via vmaps)
     # ======================================================
-    # vmap over batch dimension (B)
-    sf_loss = jax.vmap(sf_loss, in_axes=1, out_axes=1)
-    # vmap over policy dimension (N)
-    sf_loss = jax.vmap(sf_loss, in_axes=(2, None, 2, 2, None, None), out_axes=2)
-    # output = [0=T, 1=B, 2=N, 3=C]
-    batch_td_error = sf_loss(
-      online_sf,        # [T, B, N, A, C] (vmap 2,1)
-      online_actions,   # [T, B]          (vmap None,1)
-      target_sf,        # [T, B, N, A, C] (vmap 2,1)
-      selector_actions, # [T, B, N]       (vmap 2,1)
-      cumulants,        # [T, B, C]       (vmap None,1)
-      discounts)        # [T, B]          (vmap None,1)
+    td_error_fn = functools.partial(
+            rlax.transformed_n_step_q_learning,
+            n=self.bootstrap_n)
 
+    # vmap over batch dimension (B), return B in dim=1
+    td_error_fn = jax.vmap(td_error_fn, in_axes=1, out_axes=1)
+
+    # vmap over policy dimension (N), return N in dim=2
+    td_error_fn = jax.vmap(td_error_fn, in_axes=(2, None, 2, 2, None, None), out_axes=2)
+
+    # vmap over cumulant dimension (C), return in dim=3
+    td_error_fn = jax.vmap(td_error_fn, in_axes=(4, None, 4, None, 2, None), out_axes=3)
+
+    # output = [0=T, 1=B, 2=N, 3=C]
+    batch_td_error = td_error_fn(
+      online_sf[:-1],  # [T, B, N, A, C] (vmap 2,1)
+      online_actions[:-1],  # [T, B]          (vmap None,1)
+      target_sf[1:],  # [T, B, N, A, C] (vmap 2,1)
+      selector_actions[1:],  # [T, B, N]       (vmap 2,1)
+      self.index_cumulants(cumulants),  # [T, B, C]       (vmap None,1)
+      discounts[:-1])  # [T, B]          (vmap None,1)
+
+    # [T, B, N, C] --> [T, B]
+    # sum over cumulants, mean over # of policies
+    batch_td_error = batch_td_error.sum(axis=3).mean(axis=2)
 
     if self.mask_loss:
       # [T, B]
       episode_mask = make_episode_mask(data, include_final=False)
       # average over {T, N, C} --> # [B]
       batch_loss = episode_mean(
-        x=(0.5 * jnp.square(batch_td_error)).mean(axis=(2,3)),
+        x=(0.5 * jnp.square(batch_td_error)),
         mask=episode_mask[:-1])
     else:
       batch_loss = (0.5 * jnp.square(batch_td_error)).mean(axis=(0,2,3))
 
-    batch_td_error = batch_td_error.mean(axis=(2, 3)) # [T, B]
-
-    cumulant_reward = (cumulants*self.extract_task(data)).sum(-1)
-    reward_error = data.reward - cumulant_reward
     metrics = {
-      f'0.loss_Sf': batch_loss.mean(),
       '2.cumulants': cumulants.mean(),
-      '2.cumulant_reward': cumulant_reward.mean(),
-      '2.reward_error': reward_error.mean(),
       '2.sf_mean': online_sf.mean(),
       '2.sf_var': online_sf.var(),
-      '2.sf_max': online_sf.max(),
-      '2.sf_min': online_sf.min()}
+      }
 
     return batch_td_error, batch_loss, metrics # [T, B], [B]
-
-def get_actor_core(
-    networks: basics.NetworkFn,
-    config: Config,
-    evaluation: bool = False,
-) -> r2d2_actor.R2D2Policy:
-  """Returns ActorCore for R2D2."""
-
-  num_epsilons = config.num_epsilons
-  evaluation_epsilon = config.evaluation_epsilon
-
-  def select_action(params: networks_lib.Params,
-                    observation: networks_lib.Observation,
-                    state: r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]):
-    rng, policy_rng = jax.random.split(state.rng)
-
-    predictions, recurrent_state = networks.apply(
-      params, policy_rng, observation, state.recurrent_state, evaluation)
-    action = rlax.epsilon_greedy(state.epsilon).sample(policy_rng, predictions.q_values)
-
-    return action, r2d2_actor.R2D2ActorState(
-        rng=rng,
-        epsilon=state.epsilon,
-        recurrent_state=recurrent_state,
-        prev_recurrent_state=state.recurrent_state)
-
-  def init(
-      rng: networks_lib.PRNGKey
-  ) -> r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]:
-    rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
-    if not evaluation:
-      epsilon = jax.random.choice(epsilon_rng,
-        np.logspace(config.epsilon_min,
-                    config.epsilon_max,
-                    config.num_epsilons,
-                    base=config.epsilon_base))
-    else:
-      epsilon = evaluation_epsilon
-    initial_core_state = networks.init_recurrent_state(state_rng, None)
-
-    return r2d2_actor.R2D2ActorState(
-        rng=rng,
-        epsilon=epsilon,
-        recurrent_state=initial_core_state,
-        prev_recurrent_state=initial_core_state)
-
-  def get_extras(
-      state: r2d2_actor.R2D2ActorState[actor_core_lib.RecurrentState]
-      ) -> r2d2_actor.R2D2Extras:
-    return {'core_state': state.prev_recurrent_state}
-
-  return actor_core_lib.ActorCore(init=init, select_action=select_action,
-                                  get_extras=get_extras)
 
 class USFAPreds(NamedTuple):
   q_values: jnp.ndarray  # q-value
@@ -287,7 +156,8 @@ class SfGpiHead(hk.Module):
   def __init__(self,
     num_actions: int,
     state_features_dim: int,
-    hidden_sizes : Tuple[int]=(128, 128),
+    sf_layers : Tuple[int]=(128, 128),
+    policy_layers : Tuple[int]=(32),
     nsamples: int=10,
     variance: Optional[float]=0.5,
     eval_task_support: str = 'train', 
@@ -312,8 +182,13 @@ class SfGpiHead(hk.Module):
     self.nsamples = nsamples
     self.eval_task_support = eval_task_support
 
-    self.mlp = hk.nets.MLP(
-      tuple(hidden_sizes)+(num_actions * state_features_dim,))
+    if policy_layers:
+      self.policy_net = hk.nets.MLP(policy_layers)
+    else:
+      self.policy_net = lambda x: x
+
+    self.sf_net = hk.nets.MLP(
+      tuple(sf_layers)+(num_actions * state_features_dim,))
 
   def compute_sf_q(self, inputs: jnp.ndarray, task: jnp.ndarray) -> jnp.ndarray:
     """Forward pass
@@ -326,12 +201,14 @@ class SfGpiHead(hk.Module):
         jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
     """
     # [A * C]
-    sf = self.mlp(inputs)
+    sf = self.sf_net(inputs)
     # [A, C]
     sf = jnp.reshape(sf, (self.num_actions, self.state_features_dim))
 
     # dot-product
-    q_values = jnp.sum(sf * task, axis=-1) # [B, A]
+    q_values = jnp.sum(sf * task, axis=-1) # [A]
+    assert q_values.shape[0] == self.num_actions, 'wrong shape'
+
     return sf, q_values
 
   def __call__(self,
@@ -390,44 +267,58 @@ class SfGpiHead(hk.Module):
       """Summary
       
       Args:
-          inputs (USFAInputs): Description
+          usfa_input (jnp.ndarray): D, typically rnn_output
           policies (jnp.ndarray): N x D
           task (jnp.ndarray): D
       Returns:
           USFAPreds: Description
       """
 
-      n_policies = policies.shape[0]
+      def compute_sf_q(sf_input: jnp.ndarray,
+                       policy: jnp.ndarray,
+                       task: jnp.ndarray) -> jnp.ndarray:
+        """Compute successor features and q-valuesu
+        
+        Args:
+            inputs (jnp.ndarray): D_1
+            policy (jnp.ndarray): D_2
+            task (jnp.ndarray): D_1
+        
+        Returns:
+            jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
+        """
+        sf_input = jnp.concatenate((sf_input, policy))  # 2D
 
-      # [N, D_s]
-      sf_input = jnp.concatenate(
-        (expand_tile_dim(usfa_input, size=n_policies, axis=-2), policies),
-        axis=-1)
-      # -----------------------
-      # prepare policies vectors
-      # -----------------------
-      # [D_z] --> [N, D_z]
-      task_expand = expand_tile_dim(task, axis=-2, size=n_policies)
+        # [A * C]
+        sf = self.sf_net(sf_input)
+        # [A, C]
+        sf = jnp.reshape(sf, (self.num_actions, self.state_features_dim))
 
-      # [N, D_w] --> [N, A, D_w]
-      policies = expand_tile_dim(policies, axis=-2, size=self.num_actions)
-      task_expand = expand_tile_dim(task_expand, axis=-2, size=self.num_actions)
+        dot = lambda a,b: jnp.sum(a*b).sum()
 
-      # -----------------------
-      # compute successor features
-      # -----------------------
-      # inputs = [N, D_s], [N, A, D_w], outputs = [N, A, D_w], [N, A]
-      # repeat once for each policies
-      sf, q_values = jax.vmap(self.compute_sf_q)(sf_input, task_expand)
+        # dot-product: A
+        q_values = jax.vmap(
+          dot, in_axes=(0, None), out_axes=0)(sf, task)
 
-      # -----------------------
+        assert q_values.shape[0] == self.num_actions, 'wrong shape'
+        return sf, q_values
+
+      policy_embeddings = self.policy_net(policies)
+      sfs, q_values = jax.vmap(
+        compute_sf_q, in_axes=(None, 0, None), out_axes=0)(
+          usfa_input,
+          policy_embeddings,
+          task)
+
       # GPI
       # -----------------------
       # [N, A] --> [A]
       q_values = jnp.max(q_values, axis=-2)
 
+      policies = expand_tile_dim(policies, axis=-2, size=self.num_actions)
+
       return USFAPreds(
-        sf=sf,       # [N, A, D_w]
+        sf=sfs,       # [N, A, D_w]
         policy=policies,         # [N, A, D_w]
         q_values=q_values,  # [N, A]
         task=task)         # [D_w]
@@ -490,7 +381,7 @@ class UsfaArch(hk.RNNCore):
       self._memory, memory_input, state)
 
     # treat T,B like this don't exist with vmap
-    predictions = jax.vmap(jax.vmap(self._head))(
+    predictions = jax.jit(hk.BatchApply(jax.vmap(self._head)))(
         task=inputs.observation['task'],  # [T, B, N]
         usfa_input=core_outputs,  # [T, B, D]
       )
@@ -505,7 +396,8 @@ def make_minigrid_networks(
   state_features_dim = env_spec.observations.observation['state_features'].shape[0]
 
   def make_core_module() -> UsfaArch:
-    vision_torso = networks.AtariVisionTorso()
+    vision_torso = networks.AtariVisionTorso(
+      out_dim=config.state_dim)
 
     observation_fn = networks.OarTorso(
       num_actions=num_actions,
@@ -517,6 +409,8 @@ def make_minigrid_networks(
       num_actions=num_actions,
       state_features_dim=state_features_dim,
       nsamples=config.nsamples,
+      sf_layers=config.sf_layers,
+      policy_layers=config.policy_layers,
       eval_task_support=config.eval_task_support)
 
     return UsfaArch(
@@ -618,8 +512,7 @@ def make_object_oriented_minigrid_networks(
   state_features_dim = env_spec.observations.observation['state_features'].shape[0]
 
   def make_core_module() -> ObjectOrientedUsfaArch:
-    vision_torso = networks.AtariVisionTorso(
-      out_dim=config.state_dim)
+    vision_torso = networks.AtariVisionTorso()
 
     observation_fn = networks.OarTorso(
       num_actions=num_actions,

@@ -15,12 +15,12 @@ import subprocess
 
 from acme.utils import paths
 
-import lib.utils as utils
+import library.utils as utils
 
-flags.DEFINE_integer('num_actors', 1, 'number of actors.')
+flags.DEFINE_integer('num_actors', 6, 'number of actors.')
 flags.DEFINE_integer('config_idx', 1, 'number of actors.')
-flags.DEFINE_integer('num_cpus', 16, 'number of cpus.')
-flags.DEFINE_integer('memory', 1000, 'memory (in mbs).')
+flags.DEFINE_integer('num_cpus', 32, 'number of cpus.')
+flags.DEFINE_integer('memory', 120_000, 'memory (in mbs).')
 flags.DEFINE_integer('max_concurrent', 12, 'number of concurrent jobs')
 flags.DEFINE_string('account', '', 'account on slurm servers to use.')
 flags.DEFINE_string('partition', 'kempner', 'account on slurm servers to use.')
@@ -361,12 +361,15 @@ def run_sbatch(
       use_wandb=use_wandb,
       wandb_group=group,
       wandb_name=exp_name,
-      wandb_project=wandb_init_kwargs['project'],
-      wandb_entity=wandb_init_kwargs['entity'],
       folder=log_dir,
       num_actors=num_actors,
       run_distributed=run_distributed,
     )
+    if wandb_init_kwargs:
+      save_config.update(
+        wandb_project=wandb_init_kwargs['project'],
+        wandb_entity=wandb_init_kwargs['entity'],
+      )
     save_configs.append(save_config)
 
   #################################
@@ -417,8 +420,8 @@ def run_sbatch(
   #################################
   sbatch_contents = f"#SBATCH --gres=gpu:{FLAGS.num_gpus}\n"
   sbatch_contents += f"#SBATCH -c {FLAGS.num_cpus}\n"
-  # sbatch_contents += f"#SBATCH --mem {FLAGS.memory}\n"
-  sbatch_contents += f"#SBATCH --mem-per-cpu={FLAGS.memory}\n"
+  sbatch_contents += f"#SBATCH --mem {FLAGS.memory}\n"
+  # sbatch_contents += f"#SBATCH --mem-per-cpu={FLAGS.memory}\n"
   sbatch_contents += f"#SBATCH -p {FLAGS.partition}\n"
   sbatch_contents += f"#SBATCH -t {FLAGS.time}"
   sbatch_contents += f"#SBATCH --account {FLAGS.account}\n"
