@@ -30,6 +30,31 @@ chmod u+x install-fas.sh
 ./install-fas.sh
 ```
 
+**ONE TIME CHANGE TO MAKE YOUR LIFE EASIER**. if you want to avoid having to load modules and set environment variables each time you load this environment, you can add this to the activation file.
+The bottom essentiallly makes sure that modules are loaded
+```
+#############################################
+# Setup activate/deactivate with correct PYTHONPATH and LD_LIBRARY_PATH
+#############################################
+activation_dir=$CONDA_PREFIX/etc/conda/activate.d
+mkdir -p $activation_dir
+mkdir -p $CONDA_PREFIX/etc/conda/deactivate.d
+echo 'module load cuda/11.3.1-fasrc01  ' > $activation_dir/env_vars.sh
+echo 'module load cudnn/8.9.2.26_cuda11-fasrc01' >> $activation_dir/env_vars.sh
+echo 'module load gcc/9.5.0-fasrc01' >> $activation_dir/env_vars.sh
+echo 'export PYTHONPATH=$PYTHONPATH:.' >> $activation_dir/env_vars.sh
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib/' >> $activation_dir/env_vars.sh
+echo 'unset LD_LIBRARY_PATH' >> $CONDA_PREFIX/etc/conda/deactivate.d/env_vars.sh
+``````
+
+For automatically setting the LD library path to point to the current cudnn directory do the following
+```
+# general
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/path/to/cudnn/lib' >> $activation_dir/env_vars.sh
+# mine
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/' >> $activation_dir/env_vars.sh
+```
+NOTE: this uses the same path as below
 **how does install work?**
 
 [TODO]

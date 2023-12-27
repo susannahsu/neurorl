@@ -12,6 +12,7 @@ python -m ipdb -c continue configs/imagination_trainer.py \
   --wandb_entity=wcarvalho92 \
   --wandb_project=imagination_debug
 
+# DEBUGGING, turn off JIT
 JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/imagination_trainer.py \
   --search='initial' \
   --parallel='none' \
@@ -33,7 +34,7 @@ python -m ipdb -c continue configs/imagination_trainer.py \
   --wandb_project=imagination_debug \
 
 
-# running, parallel
+# launching jobs on slurm
 python configs/imagination_trainer.py \
   --search='initial' \
   --parallel='sbatch' \
@@ -551,7 +552,7 @@ def sweep(search: str = 'default'):
             "group": tune.grid_search(['run-2']),
             "agent": tune.grid_search(['qlearning', 'muzero']),
             "seed": tune.grid_search([1]),
-            "env.difficulty": tune.grid_search([7]),
+            "env.difficulty": tune.grid_search([2]),
         }
     ]
   elif search == 'muzero':

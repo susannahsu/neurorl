@@ -28,6 +28,10 @@ class Config(basics.Config):
   nsamples: int = 0  # no samples outside of train vector
   importance_sampling_exponent: float = 0.0
 
+  sf_layers : Tuple[int]=(128, 128)
+  policy_layers : Tuple[int]=(32)
+
+  importance_sampling_exponent: float = 0.0
 
 def cumulants_from_env(data, online_preds, online_state, target_preds, target_state):
   return data.observation.observation['state_features']  # [T, B, C]
@@ -152,7 +156,8 @@ class SfGpiHead(hk.Module):
   def __init__(self,
     num_actions: int,
     state_features_dim: int,
-    hidden_sizes : Tuple[int]=(128, 128),
+    sf_layers : Tuple[int]=(128, 128),
+    policy_layers : Tuple[int]=(32),
     nsamples: int=10,
     variance: Optional[float]=0.5,
     eval_task_support: str = 'train', 
@@ -177,11 +182,13 @@ class SfGpiHead(hk.Module):
     self.nsamples = nsamples
     self.eval_task_support = eval_task_support
 
-    # self.policy_net = hk.Linear(32)
-    self.policy_net = lambda x:x
+    if policy_layers:
+      self.policy_net = hk.nets.MLP(policy_layers)
+    else:
+      self.policy_net = lambda x: x
 
     self.sf_net = hk.nets.MLP(
-      tuple(hidden_sizes)+(num_actions * state_features_dim,))
+      tuple(sf_layers)+(num_actions * state_features_dim,))
 
   def compute_sf_q(self, inputs: jnp.ndarray, task: jnp.ndarray) -> jnp.ndarray:
     """Forward pass
@@ -402,6 +409,8 @@ def make_minigrid_networks(
       num_actions=num_actions,
       state_features_dim=state_features_dim,
       nsamples=config.nsamples,
+      sf_layers=config.sf_layers,
+      policy_layers=config.policy_layers,
       eval_task_support=config.eval_task_support)
 
     return UsfaArch(
