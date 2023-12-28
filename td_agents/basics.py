@@ -557,16 +557,17 @@ class SGDLearner(learning_lib.SGDLearner):
 
   def set_optimizer(self, optimizer): self._optimizer = optimizer
 
-  def set_state(self, state): self._state = state
+  def set_state(self, state):
+    self._state = state
+    self._current_step = utils.get_from_first_device(self._state.steps)
 
   def step(self):
     """Takes one SGD step on the learner."""
     with jax.profiler.StepTraceAnnotation('step',
                                           step_num=self._current_step):
       data = next(self._data_iterator)
-      self._state, metrics = self.step_data(data, self._state)
-      self._current_step = utils.get_from_first_device(self._state.steps)
-      import ipdb; ipdb.set_trace()
+      state, metrics = self.step_data(data, state)
+      self.set_state(state)
 
       self._logger.write(metrics)
 

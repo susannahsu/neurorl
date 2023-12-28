@@ -553,13 +553,15 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     if (self.model_policy_coef < 1e-8 and 
         self.model_value_coef < 1e-8 and
         self.model_reward_coef < 1e-8):
+
+      total_loss = root_value_loss + root_policy_loss
+
       metrics = {
         "0.0.total_loss": total_loss,
         "0.0.td-error": td_error,
         '0.1.policy_root_loss': raw_root_policy_loss,
         '0.3.value_root_loss': raw_root_value_loss,
       }
-      total_loss = root_value_loss + root_policy_loss
       return td_error, total_loss, metrics
 
     ###############################

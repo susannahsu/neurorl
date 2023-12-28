@@ -32,6 +32,8 @@ python configs/biorl_trainer_2learners.py \
   --search='muzero'
 
 """
+
+import sys
 import functools 
 from typing import List, Sequence, Optional, Callable
 
@@ -97,12 +99,14 @@ class TwoLearnerConfig:
   num_eval_episodes: int = 10
 
   # online learner options
+  learn_online: bool = True
   online_burn_in_length: int = 0
   online_batch_size: int = 1  # number of batch elements
   online_update_period: int = 20  # time-window
   num_online_updates: int = 1
 
   # offline learner options
+  learn_offline: bool = True
   min_replay_size: int = 100  # only start sampling after this much
   offline_burn_in_length: int = 0
   offline_trace_length: int = 0 # number of learning steps
@@ -162,6 +166,10 @@ def run_experiment(
       config=config,
       evaluation=False)
 
+  dummy_actor_state = policy.init(jax.random.PRNGKey(0))
+  extras_spec = policy.get_extras(dummy_actor_state)
+
+  assert config.learn_offline or config.learn_online
   #################################################
   # ONLINE BUFFER
   # -------------
@@ -173,66 +181,68 @@ def run_experiment(
   # - predictions (e.g. value function, reward function, etc.)
   #################################################
   online_replay_table_name = 'online_table'
+  online_replay_client = None
+  online_replay_tables = []
+  if config.learn_online:
+    #--------------------------
+    # this will be used to store data
+    #--------------------------
+    # Copied from PPO: https://github.com/google-deepmind/acme/blob/master/acme/agents/jax/ppo/builder.py
+    # Create the replay server and grab its address.
+    online_replay_tables = [
+        reverb.Table.queue(
+            name=online_replay_table_name,
+            max_size=config.online_update_period,
+            signature=adders_reverb.SequenceAdder.signature(
+                environment_spec,
+                extras_spec=extras_spec,
+                sequence_length=config.online_update_period))
+    ]
+    online_replay_tables, _ = basics.disable_insert_blocking(online_replay_tables)
 
-  dummy_actor_state = policy.init(jax.random.PRNGKey(0))
-  extras_spec = policy.get_extras(dummy_actor_state)
+    online_replay_server = reverb.Server(online_replay_tables, port=None)
+    online_replay_client = reverb.Client(f'localhost:{online_replay_server.port}')
 
-  #--------------------------
-  # this will be used to store data
-  #--------------------------
-  # Copied from PPO: https://github.com/google-deepmind/acme/blob/master/acme/agents/jax/ppo/builder.py
-  # Create the replay server and grab its address.
-  online_replay_tables = [
-      reverb.Table.queue(
-          name=online_replay_table_name,
-          max_size=config.online_update_period,
-          signature=adders_reverb.SequenceAdder.signature(
-              environment_spec,
-              extras_spec=extras_spec,
-              sequence_length=config.online_update_period))
-  ]
-
-  online_replay_server = reverb.Server(online_replay_tables, port=None)
-  online_replay_client = reverb.Client(f'localhost:{online_replay_server.port}')
-
-  #--------------------------
-  # this will be used to iterate through data
-  #--------------------------
-  iterator_batch_size, ragged = divmod(config.online_batch_size,
-                                        jax.device_count())
-  if ragged:
-    raise ValueError(
-        'Learner batch size must be divisible by total number of devices!')
-
-  # We don't use datasets.make_reverb_dataset() here to avoid interleaving
-  # and prefetching, that doesn't work well with can_sample() check on update.
-  online_dataset = reverb.TrajectoryDataset.from_table_signature(
-        server_address=online_replay_client.server_address,
-        table=online_replay_table_name,
-        max_in_flight_samples_per_worker=(
-            2 * config.online_batch_size // jax.process_count()
-        ),
+    # --------------------------
+    # this will be used to add data to online buffer
+    # --------------------------
+    length_between_online_updates = config.online_update_period - config.simulation_steps - 1
+    # when we learn from the model, we're going to simulate K time-steps into the future.
+    # for the FINAL K time-steps, they will not get losses from K time-steps into the future, since this will go over the batch.
+    # this is most harmful for the LAST time-step, which will not have any learning from future time-steps. 
+    # to account for this, we have the PERIOD with which data is added be K time-steps less than the length of batches (sequence_length)
+    logging.info(f"Will update online every {length_between_online_updates} steps")
+    # TODO: this is hanging for some reason and I can't figure out why
+    online_adder = adders_reverb.SequenceAdder(
+        client=online_replay_client,
+        priority_fns={online_replay_table_name: None},
+        period=length_between_online_updates,
+        sequence_length=config.online_update_period,
     )
-  online_dataset = online_dataset.batch(iterator_batch_size, drop_remainder=True)
-  online_dataset = online_dataset.as_numpy_iterator()
-  online_dataset = jax_utils.multi_device_put(
-      iterable=online_dataset, devices=jax.local_devices())
-  online_dataset = jax_utils.prefetch(online_dataset, buffer_size=1)
 
-  # --------------------------
-  # this will be used to add data to online buffer
-  # --------------------------
-  length_between_online_updates = config.online_update_period - config.simulation_steps - 1
-  # when we learn from the model, we're going to simulate K time-steps into the future.
-  # for the FINAL K time-steps, they will not get losses from K time-steps into the future, since this will go over the batch.
-  # this is most harmful for the LAST time-step, which will not have any learning from future time-steps. 
-  # to account for this, we have the PERIOD with which data is added be K time-steps less than the length of batches (sequence_length)
-  online_adder = adders_reverb.SequenceAdder(
-      client=online_replay_client,
-      priority_fns={online_replay_table_name: None},
-      period=length_between_online_updates,
-      sequence_length=config.online_update_period,
-  )
+    #--------------------------
+    # this will be used to iterate through data
+    #--------------------------
+    iterator_batch_size, ragged = divmod(config.online_batch_size,
+                                          jax.device_count())
+    if ragged:
+      raise ValueError(
+          'Learner batch size must be divisible by total number of devices!')
+
+    # We don't use datasets.make_reverb_dataset() here to avoid interleaving
+    # and prefetching, that doesn't work well with can_sample() check on update.
+    online_dataset = reverb.TrajectoryDataset.from_table_signature(
+          server_address=online_replay_client.server_address,
+          table=online_replay_table_name,
+          max_in_flight_samples_per_worker=(
+              2 * config.online_batch_size // jax.process_count()
+          ),
+      )
+    online_dataset = online_dataset.batch(iterator_batch_size, drop_remainder=True)
+    online_dataset = online_dataset.as_numpy_iterator()
+    online_dataset = jax_utils.multi_device_put(
+        iterable=online_dataset, devices=jax.local_devices())
+    online_dataset = jax_utils.prefetch(online_dataset, buffer_size=1)
 
   #################################################
   # OFFLINE BUFFER
@@ -241,64 +251,79 @@ def run_experiment(
   # this will train
   # - policy/value function using model
   #################################################
-  # NOTE: priortiized replay table seems to require name below
   offline_replay_table_name = adders_reverb.DEFAULT_PRIORITY_TABLE
+  offline_replay_client = None
+  offline_replay_tables = []
+  if config.learn_offline:
+    # NOTE: priortiized replay table seems to require name below
 
-  # spec for every step that will be added to buffer
-  step_spec = structured.create_step_spec(
-      environment_spec=environment_spec, extras_spec=extras_spec)
+    # spec for every step that will be added to buffer
+    step_spec = structured.create_step_spec(
+        environment_spec=environment_spec, extras_spec=extras_spec)
 
-  offline_batch_length = config.offline_burn_in_length + \
-      config.offline_trace_length + 1
-  offline_sequence_period = offline_batch_length
-  #--------------------------
-  # this will be used to store data
-  #--------------------------
-  offline_replay_tables = [
-    reverb.Table(
-      name=offline_replay_table_name,
-      sampler=reverb.selectors.Prioritized(config.priority_exponent),
-      remover=reverb.selectors.Fifo(),
-      max_size=config.max_replay_size,
-      rate_limiter=reverb.rate_limiters.MinSize(config.min_replay_size),
-      signature=sw.infer_signature(
-        configs=_make_adder_config(
-            step_spec, offline_batch_length, offline_sequence_period),
-        step_spec=step_spec))
-]
-  offline_replay_server = reverb.Server(offline_replay_tables, port=None)
-  offline_replay_client = reverb.Client(f'localhost:{offline_replay_server.port}')
+    offline_batch_length = config.offline_burn_in_length + \
+        config.offline_trace_length + 1
+    offline_sequence_period = offline_batch_length
+    #--------------------------
+    # this will be used to store data
+    #--------------------------
+    samples_per_insert=1.0
+    samples_per_insert_tolerance = (
+      config.samples_per_insert_tolerance_rate *
+      samples_per_insert)
+    error_buffer = config.min_replay_size * samples_per_insert_tolerance
+    offset = samples_per_insert * config.min_replay_size
+    min_diff = offset - error_buffer
+    # max_diff = offset + error_buffer
+    offline_replay_tables = [
+      reverb.Table(
+        name=offline_replay_table_name,
+        sampler=reverb.selectors.Prioritized(config.priority_exponent),
+        remover=reverb.selectors.Fifo(),
+        max_size=config.max_replay_size,
+        rate_limiter=reverb.rate_limiters.RateLimiter(
+            samples_per_insert=samples_per_insert,
+            min_size_to_sample=config.min_replay_size,
+            min_diff=min_diff,
+            max_diff=sys.float_info.max),
+        signature=sw.infer_signature(
+          configs=_make_adder_config(
+              step_spec, offline_batch_length, offline_sequence_period),
+          step_spec=step_spec))
+  ]
+    offline_replay_server = reverb.Server(offline_replay_tables, port=None)
+    offline_replay_client = reverb.Client(f'localhost:{offline_replay_server.port}')
 
-  #--------------------------
-  # this will be used to iterate through data
-  #--------------------------
-  batch_size_per_learner = config.offline_batch_size // jax.process_count()
-  offline_dataset = datasets.make_reverb_dataset(
-      table=offline_replay_table_name,
-      server_address=offline_replay_client.server_address,
-      batch_size=config.offline_batch_size // jax.device_count(),
-      num_parallel_calls=None,
-      max_in_flight_samples_per_worker=2 * batch_size_per_learner,
-      postprocess=_zero_pad(offline_batch_length),
-  )
+    #--------------------------
+    # this will be used to iterate through data
+    #--------------------------
+    batch_size_per_learner = config.offline_batch_size // jax.process_count()
+    offline_dataset = datasets.make_reverb_dataset(
+        table=offline_replay_table_name,
+        server_address=offline_replay_client.server_address,
+        batch_size=config.offline_batch_size // jax.device_count(),
+        num_parallel_calls=None,
+        max_in_flight_samples_per_worker=2 * batch_size_per_learner,
+        postprocess=_zero_pad(offline_batch_length),
+    )
 
-  offline_dataset = jax_utils.multi_device_put(
-        offline_dataset.as_numpy_iterator(),
-        devices=jax.local_devices(),
-        split_fn=jax_utils.keep_key_on_host)
-  # We always use prefetch as it provides an iterator with an additional
-  # 'ready' method.
-  offline_dataset = jax_utils.prefetch(offline_dataset, buffer_size=1)
+    offline_dataset = jax_utils.multi_device_put(
+          offline_dataset.as_numpy_iterator(),
+          devices=jax.local_devices(),
+          split_fn=jax_utils.keep_key_on_host)
+    # We always use prefetch as it provides an iterator with an additional
+    # 'ready' method.
+    offline_dataset = jax_utils.prefetch(offline_dataset, buffer_size=1)
 
-  # --------------------------
-  # this will be used to add data
-  # --------------------------
-  offline_adder = structured.StructuredAdder(
-      client=offline_replay_client,
-      max_in_flight_items=5,
-      configs=_make_adder_config(step_spec, offline_batch_length,
-                                 offline_sequence_period),
-      step_spec=step_spec)
+    # --------------------------
+    # this will be used to add data
+    # --------------------------
+    offline_adder = structured.StructuredAdder(
+        client=offline_replay_client,
+        max_in_flight_items=5,
+        configs=_make_adder_config(step_spec, offline_batch_length,
+                                  offline_sequence_period),
+        step_spec=step_spec)
 
   #################################################
   # Make counter to track stats
@@ -329,6 +354,7 @@ def run_experiment(
   # offline learner
   # -------------------
   learner_key, key = jax.random.split(key)
+  
   offline_learner = offline_learner_cls(
     initialize=False,  # will manually init + share across learners
     network=networks,
@@ -355,9 +381,14 @@ def run_experiment(
   #-------------------
   # initialize and share optimizer + training state
   #-------------------
-  training_state, optimizer = offline_learner.initialize(
-    network=networks, 
-    random_key=learner_key)
+  if config.learn_offline:
+    training_state, optimizer = offline_learner.initialize(
+      network=networks, 
+      random_key=learner_key)
+  else:
+    training_state, optimizer = online_learner.initialize(
+      network=networks,
+      random_key=learner_key)
 
   offline_learner.set_optimizer(optimizer)
   online_learner.set_optimizer(optimizer)
@@ -397,17 +428,23 @@ def run_experiment(
   # Make train and eval environment actors
   #################################################
   variable_client = variable_utils.VariableClient(
-      offline_learner,
+      offline_learner if config.learn_offline else online_learner,
       key='actor_variables',
       # how often to update actor with parameters
-      update_period=length_between_online_updates)
+      update_period=length_between_online_updates if config.learn_online else config.offline_update_period)
+
+  actor_adders = []
+  if config.learn_offline:
+    actor_adders.append(offline_adder)
+  if config.learn_online:
+    actor_adders.append(online_adder)
 
   actor_key, key = jax.random.split(key)
   actor = basics.BasicActor(
       actor=policy,
       random_key=actor_key,
       variable_client=variable_client,
-      adders=[offline_adder, online_adder],
+      adders=actor_adders,
       backend='cpu')
   eval_actor = basics.BasicActor(
       actor=get_actor_core(networks=networks,
@@ -434,28 +471,37 @@ def run_experiment(
       learner,
       table,
       iterator,
+      logger,
+      name: str = 'online',
       ):
     """If the iterator is ready, sample and do update.
     Otherwise check if table has enough data. if not, exit.
+
+    basically copied from https://github.com/google-deepmind/acme/blob/1177501df180edadd9f125cf5ee960f74bff64af/acme/jax/experiments/run_experiment.py#L230
     """
     updating = step_count % period == 0
+    steps = 0
     updates = 0
+    trained = False
     if not updating:
-      return training_state, {}
+      return training_state, trained
     while True:
+      steps += 1
       if iterator.ready():
         data = next(iterator)
         training_state, metrics = learner.step_data(data, training_state)
         learner.set_state(training_state)
         updates += 1
+        trained = True
+        logger.write(
+            {f'{name}_{k}': v for k, v in metrics.items()})
         if updates >= num_updates:
-          return training_state, metrics
+          return training_state, trained
       else:
         if not table.can_sample(1):
-          return training_state, {}
+          return training_state, trained
         # Let iterator's prefetching thread get data from the table(s).
         time.sleep(0.001)
-
 
   episode_idx = 0
   step_count = 0
@@ -474,6 +520,8 @@ def run_experiment(
     for observer in observers:
       observer.observe_first(environment, timestep)
 
+    step_count += 1
+
     #-------------------
     # run episode
     # -------------------
@@ -488,33 +536,35 @@ def run_experiment(
       actor.observe(action, next_timestep=timestep)
       for observer in observers:
         observer.observe(environment, timestep, action)
-      training_state, metrics = maybe_update(
-          step_count=step_count,
-          num_updates=config.num_online_updates,
-          period=config.online_update_period,
-          training_state=training_state,
-          table=online_replay_tables[0],
-          learner=online_learner,
-          iterator=online_dataset,
-      )
-      if metrics:
-        # TODO: more flexible learner logging.
-        learner_logger.write(
-          {f'online_{k}': v for k,v in metrics.items()})
-      training_state, metrics = maybe_update(
-          step_count=step_count,
-          num_updates=config.num_offline_updates,
-          period=config.offline_update_period,
-          training_state=training_state,
-          table=offline_replay_tables[0],
-          learner=offline_learner,
-          iterator=offline_dataset,
-      )
-      if metrics:
-        learner_logger.write(
-          {f'offline_{k}': v for k,v in metrics.items()})
-      actor.update()
-      checkpointer.save()
+
+      trained = False
+      if config.learn_online:
+        training_state, trained = maybe_update(
+            step_count=step_count,
+            num_updates=config.num_online_updates,
+            period=config.online_update_period,
+            training_state=training_state,
+            table=online_replay_tables[0],
+            learner=online_learner,
+            iterator=online_dataset,
+            logger=learner_logger,
+            name="online",
+        )
+      if config.learn_offline:
+        training_state, trained = maybe_update(
+            step_count=step_count,
+            num_updates=config.num_offline_updates,
+            period=config.offline_update_period,
+            training_state=training_state,
+            table=offline_replay_tables[0],
+            learner=offline_learner,
+            iterator=offline_dataset,
+            logger=learner_logger,
+            name="offline",
+        )
+      if trained:
+        actor.update()
+        checkpointer.save()
 
     # -------------------
     # episode is over. collect stats
@@ -783,7 +833,7 @@ def run_single():
   wandb_init_kwargs = setup_wandb_init_kwargs()
   if FLAGS.debug:
     agent_config_kwargs.update(dict(
-      online_update_period=4,  # update every 4 steps
+      online_update_period=5,  # update every 5 steps
       simulation_steps=1,
       offline_batch_size=2,
       offline_update_period=4,  # update every 4 steps
@@ -894,6 +944,8 @@ def sweep(search: str = 'default'):
         {
             "agent": tune.grid_search(['muzero']),
             "seed": tune.grid_search([1]),
+            # "learn_online": tune.grid_search([False]),
+            # "learn_offline": tune.grid_search([False]),
             "env.level": tune.grid_search([
                 "BabyAI-GoToRedBallNoDists-v0",
                 "BabyAI-GoToObjS6-v1",
