@@ -1,5 +1,6 @@
 
 from typing import Optional, Tuple, Optional, Callable, Union, Any
+from absl import logging
 
 import functools
 from functools import partial
@@ -45,31 +46,6 @@ StateFn = Callable[[Params, PRNGKey, Observation, State],
 RootFn = Callable[[State], Tuple[PolicyLogits, ValueLogits]]
 ModelFn = Callable[[State], Tuple[RewardLogits, PolicyLogits, ValueLogits]]
 
-@dataclasses.dataclass
-class MuZeroNetworks:
-  """Network that can unroll state-fn and apply model over an input sequence."""
-  init: InitFn
-  apply: StateFn
-  unroll: StateFn
-  init_recurrent_state: Callable[[
-      PRNGKey, Optional[BatchSize]], State]
-  apply_model: ModelFn
-  unroll_model: ModelFn
-
-
-@chex.dataclass(frozen=True)
-class RootOutput:
-  state: jax.Array
-  value_logits: jax.Array
-  policy_logits: jax.Array
-
-
-@chex.dataclass(frozen=True)
-class ModelOutput:
-  new_state: jax.Array
-  reward_logits: jax.Array
-  value_logits: jax.Array
-  policy_logits: jax.Array
 
 @dataclasses.dataclass
 class Config(basics.Config):
@@ -95,12 +71,14 @@ class Config(basics.Config):
   min_replay_size: int = 1_000
   max_replay_size: int = 100_000
 
-  #Loss hps
-  num_bins: Optional[int] = None  # number of bins for two-hot rep
-  scalar_step_size: Optional[float] = .25  # step size between bins
-  max_scalar_value: float = 10.0  # number of bins for two-hot rep  max_scalar_value: float = 10.0  # number of bins for two-hot rep
-  v_target_source: str = 'reanalyze' # this interpolates between mcts output vs. observed return
-  reanalyze_ratio: float = 0.5 # percent of time to use mcts vs. observed return
+  # Loss hps
+  num_bins: Optional[int] = 81  # number of bins for two-hot rep
+  scalar_step_size: Optional[float] = None  # step size between bins
+  # number of bins for two-hot rep  max_scalar_value: float = 10.0  # number of bins for two-hot rep
+  max_scalar_value: float = 10.0
+  # this interpolates between mcts output vs. observed return
+  v_target_source: str = 'reanalyze'
+  reanalyze_ratio: float = 0.5  # percent of time to use mcts vs. observed return
   mask_model: bool = True
 
   # MCTS general hps
@@ -137,6 +115,33 @@ class Config(basics.Config):
   model_policy_coef: float = 10.0
   model_value_coef: float = 2.5
   model_reward_coef: float = 1.0
+
+@dataclasses.dataclass
+class MuZeroNetworks:
+  """Network that can unroll state-fn and apply model over an input sequence."""
+  init: InitFn
+  apply: StateFn
+  unroll: StateFn
+  init_recurrent_state: Callable[[
+      PRNGKey, Optional[BatchSize]], State]
+  apply_model: ModelFn
+  unroll_model: ModelFn
+
+
+@chex.dataclass(frozen=True)
+class RootOutput:
+  state: jax.Array
+  value_logits: jax.Array
+  policy_logits: jax.Array
+
+
+@chex.dataclass(frozen=True)
+class ModelOutput:
+  new_state: jax.Array
+  reward_logits: jax.Array
+  value_logits: jax.Array
+  policy_logits: jax.Array
+
 
 def muzero_optimizer_constr(config, initial_params=None):
   """Creates the optimizer for muzero.
@@ -265,7 +270,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
   simulation_steps : float = .5  # how many time-steps of simulation to learn model with
   reanalyze_ratio : float = .5  # how often to learn from MCTS data vs. experience
   mask_model: bool = True  # mask model outputs when out of bounds of data
-  value_target_source: str = 'reanalyze'
+  value_target_source: str = 'return'
 
   root_policy_coef: float = 1.0
   root_value_coef: float = 0.25
@@ -286,6 +291,20 @@ class MuZeroLossFn(basics.RecurrentLossFn):
       target_state,
       target_params,
       key_grad, **kwargs):
+
+      learning_model = (
+        self.model_policy_coef > 1e-8 or 
+        self.model_value_coef > 1e-8 or
+        self.model_reward_coef > 1e-8)
+
+      T, B = data.discount.shape[:2]
+      if learning_model:
+        effective_bs = B*T*self.simulation_steps
+        logging.warning(
+            f"Given S={self.simulation_steps} simultions, the effective batch size for muzero model learning when B={B}, T={T}, and S={self.simulation_steps} is {effective_bs}.")
+      else:
+        effective_bs = B*T
+        logging.warning(f"The effective batch size for muzero root learning when from MCTS when  B={B} and T={T} is {effective_bs}.")
 
       loss_fn = functools.partial(
         self.loss_fn,
@@ -384,41 +403,56 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         batch_size=target_values.shape[0])
 
     # 1 step of policy improvement
-    rng_key, improve_key = jax.random.split(rng_key)
-    mcts_outputs = self.mcts_policy(
-        params=target_params,
-        rng_key=improve_key,
-        root=roots,
-        invalid_actions=invalid_actions,
-        recurrent_fn=functools.partial(
-            model_step,
-            discount=jnp.full(target_values.shape, self.discount),
-            networks=networks,
-            discretizer=self.discretizer,
-        ))
+    policy_targets_from_mcts = self.root_policy_coef > 0 or self.model_policy_coef
+    targets_from_mcts = (self.value_target_source in ('mcts', 'reanalyze') or policy_targets_from_mcts)
+    if targets_from_mcts:
+      rng_key, improve_key = jax.random.split(rng_key)
+      mcts_outputs = self.mcts_policy(
+          params=target_params,
+          rng_key=improve_key,
+          root=roots,
+          invalid_actions=invalid_actions,
+          recurrent_fn=functools.partial(
+              model_step,
+              discount=jnp.full(target_values.shape, self.discount),
+              networks=networks,
+              discretizer=self.discretizer,
+          ))
 
     num_actions = target_preds.policy_logits.shape[-1]
-    policy_target = mcts_outputs.action_weights
+    uniform_policy = jnp.ones_like(target_preds.policy_logits) / num_actions
 
-    uniform_policy = jnp.ones_like(policy_target) / num_actions
-    if invalid_actions is not None:
-      valid_actions = 1 - invalid_actions
-      uniform_policy = valid_actions/valid_actions.sum(-1, keepdims=True)
+    #---------------------------
+    # if learning policy using MCTS, add uniform actions to end
+    # if not, just use uniform actions as targets
+    #---------------------------
+    if policy_targets_from_mcts:
+      policy_target = mcts_outputs.action_weights
 
-    random_policy_mask = jnp.broadcast_to(
-        is_terminal_mask[:, None], policy_target.shape
-    )
-    policy_probs_target = jax.lax.select(
-        random_policy_mask, uniform_policy, policy_target
-    )
-    policy_probs_target = jax.lax.stop_gradient(policy_probs_target)
+      if invalid_actions is not None:
+        valid_actions = 1 - invalid_actions
+        uniform_policy = valid_actions/valid_actions.sum(-1, keepdims=True)
+
+      random_policy_mask = jnp.broadcast_to(
+          is_terminal_mask[:, None], policy_target.shape
+      )
+      policy_probs_target = jax.lax.select(
+          random_policy_mask, uniform_policy, policy_target
+      )
+      policy_probs_target = jax.lax.stop_gradient(policy_probs_target)
+    else:
+      policy_probs_target = uniform_policy
 
     # ---------------
     # Values
     # ---------------
+    # if not using MCTS, populate with fake
     discounts = (data.discount[:-1] *
                  self.discount).astype(target_values.dtype)
-    mcts_values = mcts_outputs.search_tree.summary().value
+    if targets_from_mcts:
+      mcts_values = mcts_outputs.search_tree.summary().value
+    else:
+      mcts_values = jnp.zeros_like(discounts)
 
     if self.value_target_source == 'mcts':
       returns = mcts_values
@@ -467,7 +501,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     This function computes a loss using a combination of root losses
     and model losses. The steps are as follows:
     - compute losses for root predictions: value and policy
-    - then create targets for the model. for starting time-step t, we will get predictions for t+1, t+2, t+3, .... We repeat this for starting at t+1, t+2, etc. We try to do this as much as we can in parallel.
+    - then create targets for the model. for starting time-step t, we will get predictions for t+1, t+2, t+3, .... We repeat this for starting at t+1, t+2, etc. We try to do this as much as we can in parallel. leads to T*K number of predictions.
     - we then compute losses for model predictions: reward, value, policy.
 
     Args:
@@ -509,6 +543,24 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     # []
     raw_root_policy_loss = utils.episode_mean(root_policy_ce, in_episode)
     root_policy_loss = self.root_policy_coef*raw_root_policy_loss
+
+    # for TD-error
+    value_root_prediction = self.discretizer.logits_to_scalar(
+        online_preds.value_logits[:dim_return])
+    td_error = value_root_prediction - returns
+
+    # if not learning model
+    if (self.model_policy_coef < 1e-8 and 
+        self.model_value_coef < 1e-8 and
+        self.model_reward_coef < 1e-8):
+      metrics = {
+        "0.0.total_loss": total_loss,
+        "0.0.td-error": td_error,
+        '0.1.policy_root_loss': raw_root_policy_loss,
+        '0.3.value_root_loss': raw_root_value_loss,
+      }
+      total_loss = root_value_loss + root_policy_loss
+      return td_error, total_loss, metrics
 
     ###############################
     # Model losses
@@ -654,10 +706,6 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         reward_loss +
         root_value_loss + model_value_loss +
         root_policy_loss + model_policy_loss)
-
-    value_root_prediction = self.discretizer.logits_to_scalar(
-        online_preds.value_logits[:dim_return])
-    td_error = value_root_prediction - returns
 
     metrics = {
         "0.0.total_loss": total_loss,

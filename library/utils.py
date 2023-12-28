@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import collections
+import dataclasses
 import pickle 
 from absl import logging
 from pprint import pprint
@@ -52,16 +53,31 @@ def save_config(filename, config):
       logging.info(f'Saved: {filename}')
 
 
-def update_config(config, strict: bool = True, **kwargs):
-  for k, v in kwargs.items():
-    if not hasattr(config, k):
-      message = f"Attempting to set unknown attribute '{k}'"
-      if strict:
-        raise RuntimeError(message)
-      else:
-        logging.warning(message)
+
+def merge_configs(
+    dataclass_configs: Union[
+      List[dataclasses.dataclass], dataclasses.dataclass],
+    dict_configs: Union[
+      List[Dict], Dict]
+      ):
+
+  if not isinstance(dataclass_configs, list):
+    dataclass_configs = [dataclass_configs]
+  if not isinstance(dict_configs, list):
+    dict_configs = [dict_configs]
+
+  everything = {}
+  for tc in dataclass_configs:
+    everything.update(tc.__dict__)
+
+  for dc in dict_configs:
+    everything.update(dc)
+
+  config = dataclass_configs[0]
+  for k, v in everything.items():
     setattr(config, k, v)
 
+  return config
 
 def _generate_zeros_from_spec(spec: specs.Array) -> np.ndarray:
   return np.zeros(spec.shape, spec.dtype)
