@@ -5,20 +5,16 @@ channels:
 dependencies:
   - pip
   - pip:
-    - pip
-    - ray[tune]
-    - ipdb
-    - matplotlib
+    - ray[tune]==2.7.1
+    - matplotlib==3.8.1
     - wandb
-    - chex==0.1.6
-    - ray[tune]
     - ipdb
+    - mctx==0.0.5
     - minigrid
-    - mctx
 
 
 
 
-# mamba create --name humansf python=3.9 pip wheel -y
-# mamba env update --file humansf.yaml --prune
-# mamba remove --name omodel --all -y
+# mamba create --name neurorl python=3.9 pip wheel -y
+# mamba env update --file neurorl.yaml --prune
+# mamba remove --name neurorl --all -y
