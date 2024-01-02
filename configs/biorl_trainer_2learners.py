@@ -111,7 +111,7 @@ class TwoLearnerConfig:
   offline_burn_in_length: int = 0
   offline_trace_length: int = 0 # number of learning steps
   offline_batch_size: int = 32
-  offline_update_period: int = 2000  # how often learner updated offline
+  offline_update_period: int = 2_000  # how often learner updated offline
   num_offline_updates: int = 100
 
   sequence_period: int = 40  # how often data is added to buffer
@@ -132,21 +132,61 @@ def run_experiment(
     observers: Sequence[EnvLoopObserver] = (),
     eval_every: int = 100,
     num_eval_episodes: int = 1):
-  """Runs a simple, single-threaded training loop using the default evaluators.
+  """
+  Runs an experiment with a given configuration, learning environment, and neural network setup.
 
-  It targets simplicity of the code and so only the basic features are supported.
-
-  Important variables:
-  - online_update_period: how often data is added to online buffer and used to update.
-  - offline_sequence_period: how often data is added to offline buffer. If less than
-      offline_batch_length, overlapping sequences are added. If equal to
-      offline_batch_length, sequences are exactly non-overlapping.
-  - offline_batch_length: length of training trajector. should want {1,2} for goal of this project
   Arguments:
-    experiment: Definition and configuration of the agent to run.
-    eval_every: After how many actor steps to perform evaluation.
-    num_eval_episodes: How many evaluation episodes to execute at each
-      evaluation step.
+    config: Configuration object defining parameters for the experiment.
+    log_dir: Directory path for logging the experiment's outputs.
+    online_learner_cls: The class for the online learner, typically an instance of SGDLearner.
+    offline_learner_cls: The class for the offline learner, typically an instance of SGDLearner.
+    get_actor_core: A callable that returns a policy object, given network functions and configuration.
+    environment_factory: A factory function to create the learning environment.
+    network_factory: A factory function to create the neural network used in the experiment.
+    logger_factory: (Optional) A factory function to create a logger for the experiment.
+    environment_spec: (Optional) Specification of the environment, detailing the observation and action spaces, etc.
+    observers: (Optional) A sequence of observers that watch and record various aspects of the environment loop.
+    eval_every: (Optional) Frequency of evaluation within the training loop, in terms of actor steps.
+    num_eval_episodes: (Optional) The number of evaluation episodes to perform at each evaluation step.
+
+  The logic of this function is as follows:
+  - make environment
+  - make jax networks which define neural network operations
+  - make a policy, which determines how agent selects actions
+  - setup {offline, online} x {replay_table, iterator, adder}
+    - the replay_table is a buffer which stores data
+    - the iterator is used to sample data from this buffer
+    - the adders are given to an "actor" which interfaced with environment and adds data to this buffer
+    - setup offline and online learners
+      - learners share their optimizer and parameters
+    - create checkpointing object
+    - create actors for both training and evaluation
+    - then collect samples and learn!
+
+  pseudo-code example of learning:
+    training_state = offline_learner.initialize()
+    for t times-steps:
+      if offline_update_period:
+        data = next(offline_dataset)
+        training_state = offline_learner.step_data(data, training_state)
+        offline_learner.set_state(training_state)
+
+      if online_update_period:
+        data = next(online_dataset)
+        training_state = online_learner.step_data(data, training_state)
+        offline_learner.set_state(training_state)
+
+  Some important notes on learners:
+  - online:
+    - we assume a batch_size of 1 but this can be changed via config
+    - the buffer window size corresponds to `online_update_period` which is how 
+      often an agent is updated
+  - offline:
+    - here, we assume batches of length B but only 1 data-point corresponding to
+      the initial state
+    - this is updated every `offline_update_period`
+    - this supports prioritized replay and requiring a minimimum size before sampling
+      - both can be set via config values
 
   Copied from: https://github.com/google-deepmind/acme/blob/master/acme/jax/experiments/run_experiment.py
   """
@@ -212,7 +252,6 @@ def run_experiment(
     # this is most harmful for the LAST time-step, which will not have any learning from future time-steps. 
     # to account for this, we have the PERIOD with which data is added be K time-steps less than the length of batches (sequence_length)
     logging.info(f"Will update online every {length_between_online_updates} steps")
-    # TODO: this is hanging for some reason and I can't figure out why
     online_adder = adders_reverb.SequenceAdder(
         client=online_replay_client,
         priority_fns={online_replay_table_name: None},
@@ -336,18 +375,6 @@ def run_experiment(
   #################################################
   # Make learners
   #################################################
-  """
-    training_state = offline_learner._state
-
-    data = next(offline_dataset)
-    training_state, metrics = offline_learner.step_data(data, training_state)
-    offline_learner.set_state(training_state)
-
-    data = next(online_dataset)
-    training_state, metrics = online_learner.step_data(data, training_state)
-    offline_learner.set_state(training_state)
-
-  """
   learner_logger = logger_factory('learner')
 
   # -------------------
@@ -393,11 +420,12 @@ def run_experiment(
   offline_learner.set_optimizer(optimizer)
   online_learner.set_optimizer(optimizer)
 
-  # NOTE: variable client is linked to offline_learner.
-  # it will ask offline_learner for the state (which contains parameters) when updating the actor
-  # therefore want to give offline_learner this object.
+  # NOTE: variable client is linked to a learner.
+  # it will ask a learner for the state (which contains parameters) when updating the actor
+  # therefore want to give the learners the training state.
+  # give to both just to be safe. in reality, to whichever
+  # the actor uses to get parameters from.
   offline_learner.set_state(training_state)
-  # below is not necessary but doesn't hurt
   online_learner.set_state(training_state)
 
   #################################################
@@ -724,7 +752,7 @@ def train_single(
           bootstrap_n=config.bootstrap_n,
           discretizer=discretizer,
           simulation_steps=config.simulation_steps,
-          importance_sampling_exponent=0.0,  # online so not importance
+          importance_sampling_exponent=0.0,  # online so no importance
           value_target_source='return',  # use reward return as learning target,
           # learn value predictions (both root and model), and reward predictions (from model)
           root_policy_coef=0.0,
@@ -944,11 +972,13 @@ def sweep(search: str = 'default'):
         {
             "agent": tune.grid_search(['muzero']),
             "seed": tune.grid_search([1]),
-            # "learn_online": tune.grid_search([False]),
-            # "learn_offline": tune.grid_search([False]),
+            "group": tune.grid_search(['muzero-4']),
+            "action_source": tune.grid_search(['value']),
+            "offline_update_period": tune.grid_search([2_000]),
+            "num_offline_updates": tune.grid_search([1, 10]),
             "env.level": tune.grid_search([
                 "BabyAI-GoToRedBallNoDists-v0",
-                "BabyAI-GoToObjS6-v1",
+                # "BabyAI-GoToObjS6-v1",
             ]),
         }
     ]
