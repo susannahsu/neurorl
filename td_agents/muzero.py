@@ -9,6 +9,7 @@ import distrax
 import optax
 import mctx
 import reverb
+import numpy as np
 
 from acme import specs
 from acme.jax import networks as networks_lib
@@ -792,6 +793,68 @@ def policy_select_action(
       recurrent_state=recurrent_state,
       prev_recurrent_state=state.recurrent_state)
 
+def value_select_action(
+        params: networks_lib.Params,
+        observation: networks_lib.Observation,
+        state: basics.ActorState[actor_core_lib.RecurrentState],
+        networks: MuZeroNetworks,
+        discretizer: utils.Discretizer,
+        discount: float = .99,
+        epsilon: float = .99,
+        evaluation: bool = True):
+  rng, policy_rng = jax.random.split(state.rng)
+
+  preds, recurrent_state = networks.apply(
+      params, policy_rng, observation, state.recurrent_state)
+
+  #-----------------
+  # function for computing Q-values for 1 action
+  #-----------------
+  def compute_q(state, action):
+    """Q(s,a) = r(s,a) + \gamma* v(s')"""
+    model_preds, _ = networks.apply_model(
+        params, policy_rng, state, action)
+
+    reward = discretizer.logits_to_scalar(
+      model_preds.reward_logits)
+    value = discretizer.logits_to_scalar(
+      model_preds.value_logits)
+    q_values = reward + discount*value
+    return q_values
+
+  # jit to make faster
+  # vmap to do parallel over actions
+  compute_q = jax.jit(jax.vmap(compute_q, in_axes=(None, 0)))
+
+
+  #-----------------
+  # compute Q-values for all actions
+  #-----------------
+  # create "batch" of actions
+  nactions = preds.policy_logits.shape[-1]
+  all_actions = jnp.arange(nactions)  # [A]
+
+  # [A, 1]
+  q_values = compute_q(
+    recurrent_state.hidden, all_actions)
+  # [A]
+  q_values = jnp.squeeze(q_values, axis=-1)
+
+
+  #-----------------
+  # select action
+  #-----------------
+  if evaluation:
+    action = jnp.argmax(q_values, axis=-1)
+  else:
+    rng, policy_rng = jax.random.split(rng)
+    action = rlax.epsilon_greedy(epsilon).sample(policy_rng, q_values)
+
+  return action, basics.ActorState(
+      rng=rng,
+      recurrent_state=recurrent_state,
+      prev_recurrent_state=state.recurrent_state)
+
 def mcts_select_action(
     mcts_policy: Optional[
         Union[mctx.muzero_policy, mctx.gumbel_muzero_policy]],
@@ -848,28 +911,48 @@ def get_actor_core(
 ):
   """Returns ActorCore for MuZero."""
 
-  assert config.action_source in ['policy', 'mcts']
   if config.action_source == 'policy':
-    select_action = functools.partial(policy_select_action,
-                                      networks=networks,
-                                      evaluation=evaluation)
+    select_action = functools.partial(
+      policy_select_action,
+      networks=networks,
+      evaluation=evaluation)
+  elif config.action_source == 'value':
+    select_action = functools.partial(
+      value_select_action,
+      networks=networks,
+      evaluation=evaluation,
+      discretizer=discretizer,
+      discount=config.discount)
   elif config.action_source == 'mcts':
-    select_action = functools.partial(mcts_select_action,
-                                      networks=networks,
-                                      evaluation=evaluation,
-                                      mcts_policy=mcts_policy,
-                                      discretizer=discretizer,
-                                      discount=config.discount)
+    select_action = functools.partial(
+      mcts_select_action,
+      networks=networks,
+      evaluation=evaluation,
+      mcts_policy=mcts_policy,
+      discretizer=discretizer,
+      discount=config.discount)
+  else:
+    raise NotImplementedError(config.action_source)
 
   def init(
       rng: networks_lib.PRNGKey,
   ) -> basics.ActorState[actor_core_lib.RecurrentState]:
-    rng, state_rng = jax.random.split(rng, 2)
+    rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
     initial_core_state = networks.init_recurrent_state(
         state_rng)
-
+    if evaluation:
+      epsilon = config.evaluation_epsilon
+    else:
+      epsilon = jax.random.choice(
+        epsilon_rng,
+        np.logspace(
+          start=config.epsilon_min,
+          stop=config.epsilon_max,
+          num=config.num_epsilons,
+          base=config.epsilon_base))
     return basics.ActorState(
         rng=rng,
+        epsilon=epsilon,
         recurrent_state=initial_core_state,
         prev_recurrent_state=initial_core_state)
 
