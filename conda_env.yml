@@ -1,4 +1,4 @@
-name: biorl
+name: neurorl
 channels:
   - conda-forge
 dependencies:
