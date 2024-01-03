@@ -36,7 +36,7 @@ class GymWrapper(dm_env.Environment):
     observation, info = self._environment.reset()
     # Reset the diagnostic information.
     self._last_info = info
-    return dm_env.restart(observation)
+    return dm_env.restart(observation)._replace(reward=0.0)
 
   def step(self, action: types.NestedArray) -> dm_env.TimeStep:
     """Steps the environment."""
@@ -57,10 +57,10 @@ class GymWrapper(dm_env.Environment):
         reward,
         self.reward_spec())
 
+    if truncated:
+      return dm_env.truncation(reward, observation)
 
     if done:
-      if truncated:
-        return dm_env.truncation(reward, observation)
       return dm_env.termination(reward, observation)
     return dm_env.transition(reward, observation)
 

@@ -67,12 +67,12 @@ import dm_env
 
 import minigrid
 
-from lib.dm_env_wrappers import GymWrapper
-import lib.env_wrappers as env_wrappers
-import lib.experiment_builder as experiment_builder
-import lib.experiment_logger as experiment_logger
-import lib.parallel as parallel
-import lib.utils as utils
+from library.dm_env_wrappers import GymWrapper
+import library.env_wrappers as env_wrappers
+import library.experiment_builder as experiment_builder
+import library.experiment_logger as experiment_logger
+import library.parallel as parallel
+import library.utils as utils
 
 import envs.key_room as key_room
 from envs.key_room_objects_test import (

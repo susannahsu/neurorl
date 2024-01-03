@@ -15,7 +15,7 @@ import subprocess
 
 from acme.utils import paths
 
-import lib.utils as utils
+import library.utils as utils
 
 flags.DEFINE_integer('num_actors', 6, 'number of actors.')
 flags.DEFINE_integer('config_idx', 1, 'number of actors.')
@@ -325,7 +325,7 @@ def run_sbatch(
     run_distributed: bool = True):
   """For each possible configuration of a run, create a config entry. save a list of all config entries. When SBATCH is called, it will use the ${SLURM_ARRAY_TASK_ID} to run a particular one.
   """
-
+  wandb_init_kwargs = wandb_init_kwargs or dict()
   #################################
   # create configs for all runs
   #################################
@@ -361,11 +361,11 @@ def run_sbatch(
       use_wandb=use_wandb,
       wandb_group=group,
       wandb_name=exp_name,
-      wandb_project=wandb_init_kwargs['project'],
-      wandb_entity=wandb_init_kwargs['entity'],
       folder=log_dir,
       num_actors=num_actors,
       run_distributed=run_distributed,
+      wandb_project=wandb_init_kwargs.get('project', None),
+      wandb_entity=wandb_init_kwargs.get('entity', None),
     )
     save_configs.append(save_config)
 

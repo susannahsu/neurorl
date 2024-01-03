@@ -41,8 +41,8 @@ from acme.utils.observers import EnvLoopObserver
 
 import dm_env
 
-import lib.experiment_logger as experiment_logger
-import lib.utils as utils
+import library.experiment_logger as experiment_logger
+import library.utils as utils
 
 
 # -----------------------
@@ -259,6 +259,7 @@ def build_online_experiment_config(
           directory=log_dir,
           max_to_keep=5,
           add_uid=False,
+          time_delta_minutes=60,  # save every 60 minutes
           checkpoint_ttl_seconds=int(datetime.timedelta(days=30).total_seconds()))
       )
 
