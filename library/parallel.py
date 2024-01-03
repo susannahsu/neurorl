@@ -325,7 +325,7 @@ def run_sbatch(
     run_distributed: bool = True):
   """For each possible configuration of a run, create a config entry. save a list of all config entries. When SBATCH is called, it will use the ${SLURM_ARRAY_TASK_ID} to run a particular one.
   """
-
+  wandb_init_kwargs = wandb_init_kwargs or dict()
   #################################
   # create configs for all runs
   #################################
@@ -364,12 +364,9 @@ def run_sbatch(
       folder=log_dir,
       num_actors=num_actors,
       run_distributed=run_distributed,
+      wandb_project=wandb_init_kwargs.get('project', None),
+      wandb_entity=wandb_init_kwargs.get('entity', None),
     )
-    if wandb_init_kwargs:
-      save_config.update(
-        wandb_project=wandb_init_kwargs['project'],
-        wandb_entity=wandb_init_kwargs['entity'],
-      )
     save_configs.append(save_config)
 
   #################################

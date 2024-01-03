@@ -259,6 +259,7 @@ def build_online_experiment_config(
           directory=log_dir,
           max_to_keep=5,
           add_uid=False,
+          time_delta_minutes=60,  # save every 60 minutes
           checkpoint_ttl_seconds=int(datetime.timedelta(days=30).total_seconds()))
       )
 

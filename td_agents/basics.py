@@ -654,7 +654,7 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
     """
     self._random_key = random_key
     self._variable_client = variable_client
-    if adders and not isinstance(adders, (List, Tuple)):
+    if adders and not (isinstance(adders, List) or isinstance(adders, Tuple)):
       adders = [adders]
 
     self._adders = adders
