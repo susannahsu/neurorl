@@ -1,11 +1,3 @@
-
-Note:
-
-- you need to get into an interactive terminal
-- enterring an interactive terminal resets your LD_LIBRARY_PATH and loaded modules.
-
----
----
 # Install
 
 ## Setting up install environment
@@ -14,39 +6,46 @@ Note:
 salloc -p gpu -t 0-06:00 --mem=8000 --gres=gpu:1
 ```
 
-**NOTES**:
-
-- cuda/11.3.1 seems needed for jax==0.4.3
-- jax==0.4.3 seems needed for acme
-
+**load modules**
 ```
-module load cuda/11.3.1-fasrc01
+module load python/3.10.12-fasrc01
+module load cuda/11.8.0-fasrc01
 module load cudnn/8.9.2.26_cuda11-fasrc01
-module load gcc/9.5.0-fasrc01
 ```
 
 **Create and activate conda environment**
 ```
-mamba create --name neurorl python=3.9 pip wheel -y
+mamba env create -f conda-env.yml
 source activate neurorl
-mamba env update --name neurorl --file conda_env.yaml
 ```
+
 
 ## Installing  ACME
 Installing ACME manually. At the time, acme from pip was missing some features.
 Will install ACME in a directory specified by `$INSTALL_LOC`. Change as needed
 ```
+# store current directory
 cur_dir=`pwd`
+
+# make install directory
 export INSTALL_LOC=$HOME/installs
 mkdir -p $INSTALL_LOC
+
+# install acme
 acme_loc=$INSTALL_LOC/acme
 git clone https://github.com/google-deepmind/acme.git $acme_loc
+git checkout 1177501df180edadd9f125cf5ee960f74bff64af
 cd $acme_loc
-git checkout 4525ade7015c46f33556e18d76a8d542b916f264
-pip install --editable ".[jax,testing,tf,envs]" 
+pip install --upgrade --editable ".[jax,testing,tf,envs]"
+
+# return to original directory
 cd $cur_dir
 ```
-
+Expected errors:
+```
+ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+minigrid 2.3.1 requires pygame>=2.4.0, but you have pygame 2.1.0 which is incompatible.
+```
 ## Installing JAX
 
 **Setup `LD_LIBRARY_PATH`**. This is important for jax to properly link to cuda. Unfortunately, still relatively manual. You'll need to find where your `cudnn` lib is. Mine is at the path below. `find` might be a useful bash command for this.
@@ -54,26 +53,40 @@ cd $cur_dir
 export LD_LIBRARY_PATH=/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/:$LD_LIBRARY_PATH
 ```
 
-**NOTE:** need to pin this value for ACME
+### pip install
 
 ```
-# older versions needed for ACME/minigrid :(
-pip install distrax==0.1.4
+pip install --upgrade "jax[cuda11_local]" "jaxlib==0.4.3+cuda11.cudnn86" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+```
+Expected errors:
+```
+ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+chex 0.1.85 requires jax>=0.4.16, but you have jax 0.4.3 which is incompatible.
+flax 0.7.5 requires jax>=0.4.19, but you have jax 0.4.3 which is incompatible.
+orbax-checkpoint 0.4.1 requires jax>=0.4.9, but you have jax 0.4.3 which is incompatible.
+```
+
+### **INSTALL older packages versions** (needed for acme)
+```
 pip install chex==0.1.6
-
-pip install --upgrade "jax==0.4.3" "jaxlib==0.4.3+cuda11.cudnn86" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-
-
+pip install dm-haiku==0.0.10
 ```
 
+Expected errors:
+```
+ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+distrax 0.1.4 requires chex>=0.1.8, but you have chex 0.1.6 which is incompatible.
+```
 
 # test install
-**test jax install**
+
+### test jax install
 ```
 TF_CPP_MIN_LOG_LEVEL=0 python -c "import jax; print(f'GPUS: {jax.device_count()}'); jax.random.split(jax.random.PRNGKey(42), 2); print('hello world'); "
 ```
 
-**test this lib**. make sure conda environment is active! first setup `PYTHONPATH` to include current directory and `LD_LIBRARY_PATH` to point to CONDA environment, in addition to `cudnn` environment.
+### test this lib
+make sure conda environment is active! first setup `PYTHONPATH` to include current directory and `LD_LIBRARY_PATH` to point to CONDA environment, in addition to `cudnn` environment.
 ```
 export PYTHONPATH=$PYTHONPATH:.
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/:$LD_LIBRARY_PATH
@@ -85,7 +98,6 @@ python configs/catch_trainer.py \
   --use_wandb=False \
   --search='baselines'
 ```
-
 
 # Setup conda activate/deactivate
 
