@@ -59,11 +59,10 @@ export LD_LIBRARY_PATH=/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc
 ```
 # older versions needed for ACME/minigrid :(
 pip install distrax==0.1.4
-
-pip install --upgrade "jax[cuda11_pip]==0.4.3" "jaxlib==0.4.3" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-
-# older versions needed for ACME/minigrid :(
 pip install chex==0.1.6
+
+pip install --upgrade "jax==0.4.3" "jaxlib==0.4.3+cuda11.cudnn86" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
 
 ```
 
@@ -71,7 +70,7 @@ pip install chex==0.1.6
 # test install
 **test jax install**
 ```
-TF_CPP_MIN_LOG_LEVEL=1 python -c "import jax; print(f'GPUS: {jax.device_count()}'); jax.random.split(jax.random.PRNGKey(42), 2); print('hello world'); "
+TF_CPP_MIN_LOG_LEVEL=0 python -c "import jax; print(f'GPUS: {jax.device_count()}'); jax.random.split(jax.random.PRNGKey(42), 2); print('hello world'); "
 ```
 
 **test this lib**. make sure conda environment is active! first setup `PYTHONPATH` to include current directory and `LD_LIBRARY_PATH` to point to CONDA environment, in addition to `cudnn` environment.
@@ -88,17 +87,37 @@ python configs/catch_trainer.py \
 ```
 
 
-# Setup activate/deactivate with correct PYTHONPATH and LD_LIBRARY_PATH
+# Setup conda activate/deactivate
+
+**ONE TIME CHANGE TO MAKE YOUR LIFE EASIER**. if you want to avoid having to load modules and set environment variables each time you load this environment, you can add loading things to the activation file. Below is how.
 
 ```
+# first activate env
+source activate neurorl
+
+# make activation/deactivation directories
 activation_dir=$CONDA_PREFIX/etc/conda/activate.d
 mkdir -p $activation_dir
 mkdir -p $CONDA_PREFIX/etc/conda/deactivate.d
+
+# module loading added to activation
 echo 'module load cuda/11.3.1-fasrc01  ' > $activation_dir/env_vars.sh
 echo 'module load cudnn/8.9.2.26_cuda11-fasrc01' >> $activation_dir/env_vars.sh
-echo 'module load gcc/9.5.0-fasrc01' >> $activation_dir/env_vars.sh
+
+# setting PYTHONPATH added to activation
 echo 'export PYTHONPATH=$PYTHONPATH:.' >> $activation_dir/env_vars.sh
+
+# setting LD_LIBRARY_PATH added to activation
 echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib/' >> $activation_dir/env_vars.sh
-echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/' >> $activation_dir/env_vars.sh
+
+# undoing LD_LIBRARY_PATH added to deactivation
 echo 'unset LD_LIBRARY_PATH' >> $CONDA_PREFIX/etc/conda/deactivate.d/env_vars.sh
+``````
+
+For automatically setting the LD library path to point to the current cudnn directory do the following
+```
+# general
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/path/to/cudnn/lib' >> $activation_dir/env_vars.sh
+# mine
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/' >> $activation_dir/env_vars.sh
 ```
