@@ -11,7 +11,7 @@ python -m ipdb -c continue configs/biorl_trainer_2learners.py \
   --wandb_project=forage_debug \
   --search='muzero'
 
-# JAX does Just In Time (JIT) compilation. remove this.
+# JAX does Just In Time (JIT) compilation. remove this. useful for debugging.
 JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/biorl_trainer_2learners.py \
   --parallel='none' \
   --run_distributed=False \
