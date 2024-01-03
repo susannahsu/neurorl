@@ -56,7 +56,9 @@ export LD_LIBRARY_PATH=/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc
 ### pip install
 
 ```
-pip install --upgrade "jax[cuda11_local]==0.4.3" "jaxlib==0.4.3+cuda11.cudnn86" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html```
+pip install --upgrade "jax[cuda11_local]==0.4.3" "jaxlib==0.4.3+cuda11.cudnn86" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+```
+
 Expected errors:
 ```
 ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
