@@ -543,7 +543,6 @@ class SGDLearner(learning_lib.SGDLearner):
       data = next(self._data_iterator)
       self._state, metrics = self.step_data(data, self._state)
       self._current_step = utils.get_from_first_device(self._state.steps)
-      import ipdb; ipdb.set_trace()
 
       # Compute elapsed time.
       timestamp = time.time()
@@ -628,7 +627,7 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
     """
     self._random_key = random_key
     self._variable_client = variable_client
-    if adders and not isinstance(List, adders):
+    if adders and not (isinstance(adders, List) or isinstance(adders, Tuple)):
       adders = [adders]
 
     self._adders = adders
