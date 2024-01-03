@@ -22,11 +22,11 @@ import jax.numpy as jnp
 from jax import jit
 
 import rlax
-import lib.networks as neural_networks
+import library.networks as neural_networks
 
-from lib import utils 
+from library import utils 
 from td_agents import basics
-from lib import muzero_mlps
+from library import muzero_mlps
 
 BatchSize = int
 PRNGKey = networks_lib.PRNGKey
@@ -88,7 +88,6 @@ class Config(basics.Config):
   lr_end_value: Optional[float] = 1e-5
   staircase_decay: bool = True
 
-  ema_update: float = 0.0
   tx_pair: rlax.TxPair = rlax.IDENTITY_PAIR
 
   # Replay options
@@ -97,8 +96,9 @@ class Config(basics.Config):
   max_replay_size: int = 100_000
 
   #Loss hps
-  num_bins: Optional[int] = 101  # number of bins for two-hot rep
-  max_scalar_value: float = 10.0  # number of bins for two-hot rep
+  num_bins: Optional[int] = None  # number of bins for two-hot rep
+  scalar_step_size: Optional[float] = .25  # step size between bins
+  max_scalar_value: float = 10.0  # number of bins for two-hot rep  max_scalar_value: float = 10.0  # number of bins for two-hot rep
   v_target_source: str = 'reanalyze' # this interpolates between mcts output vs. observed return
   reanalyze_ratio: float = 0.5 # percent of time to use mcts vs. observed return
   mask_model: bool = True
@@ -122,7 +122,7 @@ class Config(basics.Config):
   gumbel_scale: float = 1.0
 
   # Architecture
-  model_dim: int = 512
+  state_dim: int = 256
 
   transition_blocks: int = 6  # number of resnet blocks
   prediction_blocks: int = 2  # number of resnet blocks
@@ -148,14 +148,14 @@ def muzero_optimizer_constr(config, initial_params=None):
   - max grad norm
   """
 
-  if config.warmup_steps > 0 or config.lr_transition_steps > 0:
-    warmup_steps = config.warmup_steps
-    if config.warmup_steps == 0:
-      warmup_steps = 1
+  ##########################
+  # learning rate schedule
+  ##########################
+  if config.warmup_steps > 0:
     learning_rate = optax.warmup_exponential_decay_schedule(
         init_value=0.0,
         peak_value=config.learning_rate,
-        warmup_steps=warmup_steps,
+        warmup_steps=config.warmup_steps,
         end_value=config.lr_end_value,
         transition_steps=config.lr_transition_steps,
         decay_rate=config.learning_rate_decay,
@@ -163,6 +163,10 @@ def muzero_optimizer_constr(config, initial_params=None):
     )
   else:
     learning_rate = config.learning_rate
+
+  ##########################
+  # weight decay on parameters
+  ##########################
   if config.weight_decay > 0.0:
     def decay_fn(module_name, name,
                   value): return True if name == "w" else False
@@ -177,6 +181,10 @@ def muzero_optimizer_constr(config, initial_params=None):
   else:
     optimizer = optax.adam(
         learning_rate=learning_rate, eps=config.adam_eps)
+
+  ##########################
+  # max grad norm
+  ##########################
   if config.max_grad_norm:
     optimizer = optax.chain(optax.clip_by_global_norm(
         config.max_grad_norm), optimizer)
@@ -292,7 +300,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
 
       # [B, T], [B], [B]
       td_error, total_loss, metrics = loss_fn(
-          data,  # [T, B]
+        data,  # [T, B]
         online_preds,  #[T, B]
         online_state,  # [B]
         target_preds,  # [T, B]
@@ -316,48 +324,35 @@ class MuZeroLossFn(basics.RecurrentLossFn):
             target_params,
             key_grad, **kwargs):
 
-    # applying this ensures no gradients are computed
-    def stop_grad_pytree(pytree):
-      return jax.tree_map(lambda x: jax.lax.stop_gradient(x), pytree)
-
     in_episode = utils.make_episode_mask(data, include_final=True)
-    is_terminal_mask = utils.make_episode_mask(data, include_final=False).astype(jnp.int32)
+    is_terminal_mask = utils.make_episode_mask(data, include_final=False) == 0.0
 
     # [T], [T/T-1], [T]
     key_grad, key = jax.random.split(key_grad)
     policy_probs_target, value_probs_target, reward_probs_target, returns, mcts_values = self.compute_target(
-        data=stop_grad_pytree(data),
+        data=data,
         networks=networks,
-        is_terminal_mask=stop_grad_pytree(is_terminal_mask),
+        is_terminal_mask=is_terminal_mask,
         target_params=target_params,
-        target_preds=stop_grad_pytree(target_preds),
+        target_preds=target_preds,
         rng_key=key,
     )
 
     key_grad, key = jax.random.split(key_grad)
     return self.learn(
       data=data,
-      in_episode=in_episode,
-      is_terminal_mask=is_terminal_mask,
       networks=networks,
       params=params,
-      rng_key=key,
+      in_episode=in_episode,
+      is_terminal_mask=is_terminal_mask,
       online_preds=online_preds,
+      rng_key=key,
       policy_probs_target=policy_probs_target,
       value_probs_target=value_probs_target,
       reward_probs_target=reward_probs_target,
       returns=returns,
       **kwargs,
   )
-
-  def get_invalid_actions(self, batch_size):
-    """This computes invalid actions that match the batch_size."""
-    if self.invalid_actions is None:
-      return None
-    if self.invalid_actions.ndim < 2:
-      self.invalid_actions = jax.numpy.tile(
-          self.invalid_actions, (batch_size, 1))
-    return self.invalid_actions
 
   def compute_target(self,
                      data: jax.Array,
@@ -402,7 +397,6 @@ class MuZeroLossFn(basics.RecurrentLossFn):
             discretizer=self.discretizer,
         ))
 
-    # policy_target = action_probs(mcts_outputs.search_tree.summary().visit_counts)
     num_actions = target_preds.policy_logits.shape[-1]
     policy_target = mcts_outputs.action_weights
 
@@ -456,10 +450,10 @@ class MuZeroLossFn(basics.RecurrentLossFn):
   def learn(self,
             data: reverb.ReplaySample,
             networks: basics.NetworkFn,
+            params: networks_lib.Params,
             in_episode: jax.Array,
             is_terminal_mask: jax.Array,
             online_preds: RootOutput,
-            params: networks_lib.Params,
             rng_key: networks_lib.PRNGKey,
             policy_probs_target: jax.Array,
             value_probs_target: jax.Array,
@@ -558,6 +552,8 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     # ------------
     # get masks for losses
     # ------------
+    # NOTE: npreds = nsteps + self.simulation_steps, number of predictions that will be made overall
+    # NOTE: dim_return is the number of value predictions
     # if dim_return is LESS than number of predictions, then have extra target, so mask it
     extra_v = self.simulation_steps + int(dim_return < npreds)
     policy_mask = jnp.concatenate(
@@ -592,7 +588,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         simulation_actions, self.simulation_steps)
 
     # ------------
-    # model outputs
+    # unrolls the model from each time-step in parallel
     # ------------
     def model_unroll(key, state, actions):
       key, model_key = jax.random.split(key)
@@ -609,23 +605,22 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     )
 
     # ------------
-    # compute loss
+    # compute losses
     # ------------
+
     def compute_losses(
             model_outputs_,
             reward_target_, value_target_, policy_target_,
             reward_mask_, value_mask_, policy_mask_):
-      _batch_categorical_cross_entropy = jax.vmap(
-          rlax.categorical_cross_entropy)
-      reward_ce = _batch_categorical_cross_entropy(
+      reward_ce = jax.vmap(rlax.categorical_cross_entropy)(
           reward_target_, model_outputs_.reward_logits)
       reward_loss = utils.episode_mean(reward_ce, reward_mask_)
 
-      value_ce = _batch_categorical_cross_entropy(
+      value_ce = jax.vmap(rlax.categorical_cross_entropy)(
           value_target_, model_outputs_.value_logits)
       value_loss = utils.episode_mean(value_ce, value_mask_)
 
-      policy_ce = policy_loss_fn(
+      policy_ce = jax.vmap(rlax.categorical_cross_entropy)(
           policy_target_, model_outputs_.policy_logits)
       policy_loss = utils.episode_mean(policy_ce, policy_mask_)
 
@@ -641,7 +636,6 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         model_outputs,
         reward_model_target, value_model_target, policy_model_target,
         reward_model_mask, value_model_mask, policy_model_mask)
-
 
     # all are []
     raw_model_policy_loss = utils.episode_mean(
@@ -661,19 +655,31 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         root_value_loss + model_value_loss +
         root_policy_loss + model_policy_loss)
 
+    value_root_prediction = self.discretizer.logits_to_scalar(
+        online_preds.value_logits[:dim_return])
+    td_error = value_root_prediction - returns
+
     metrics = {
         "0.0.total_loss": total_loss,
+        "0.0.td-error": td_error,
         '0.1.policy_root_loss': raw_root_policy_loss,
         '0.1.policy_model_loss': raw_model_policy_loss,
-        '0.2.model_reward_loss': raw_model_reward_loss,  # T
+        '0.2.reward_model_loss': raw_model_reward_loss,  # T
         '0.3.value_root_loss': raw_root_value_loss,
         '0.3.value_model_loss': raw_model_value_loss,  # T
     }
 
-    value_root_prediction = self.discretizer.logits_to_scalar(
-        online_preds.value_logits[:dim_return])
-    td_error = value_root_prediction - returns
     return td_error, total_loss, metrics
+
+
+  def get_invalid_actions(self, batch_size):
+    """This computes invalid actions that match the batch_size."""
+    if self.invalid_actions is None:
+      return None
+    if self.invalid_actions.ndim < 2:
+      self.invalid_actions = jax.numpy.tile(
+          self.invalid_actions, (batch_size, 1))
+    return self.invalid_actions
 
 
 def make_network(
@@ -965,8 +971,8 @@ def make_minigrid_networks(
     ###########################
     # Setup observation and state functions
     ###########################
-    vision_torso = neural_networks.AtariVisionTorso(
-        out_dim=config.state_dim)
+    vision_torso = neural_networks.BabyAIVisionTorso(
+      conv_dim=0, out_dim=config.state_dim)
     observation_fn = neural_networks.OarTorso(
         num_actions=num_actions,
         vision_torso=vision_torso,
@@ -987,7 +993,7 @@ def make_minigrid_networks(
         # action: [A]
         # state: [D]
         out = muzero_mlps.Transition(
-            channels=config.model_dim,
+            channels=config.state_dim,
             num_blocks=config.transition_blocks)(
             action_onehot, state)
         out = scale_gradient(out, config.scale_grad)
@@ -1008,7 +1014,7 @@ def make_minigrid_networks(
     root_policy_fn = muzero_mlps.PredictionMlp(
         (128, 32), num_actions, name='pred_root_policy')
     model_reward_fn = muzero_mlps.PredictionMlp(
-        (32, 32), config.num_bins, name='pred_model_reward')
+        (32,), config.num_bins, name='pred_model_reward')
 
     if config.seperate_model_nets:
       # what is typically done
@@ -1067,7 +1073,6 @@ def make_minigrid_networks(
         root_pred_fn=root_predictor,
         model_pred_fn=model_predictor)
 
-  return make_network(config=config,
-                      environment_spec=env_spec,
+  return make_network(environment_spec=env_spec,
                       make_core_module=make_core_module,
                       **kwargs)

@@ -118,6 +118,9 @@ class Config(r2d2.R2D2Config):
   # Architecture
   state_dim: int = 512
 
+  #----------------
+  # Epsilon schedule
+  #----------------
   linear_epsilon: bool = False  # whether to use linear or sample from log space for all actors
   epsilon_begin: float = .9
   epsilon_end: float = 0.01
@@ -125,13 +128,18 @@ class Config(r2d2.R2D2Config):
 
   # value-based action-selection options (distributed)
   evaluation_epsilon: float = 0.01
-  num_epsilons: int = 10
-  epsilon_min: float = .01
-  epsilon_max: float = .9
+  # num_epsilons: int = 10
+  # epsilon_min: float = .01
+  # epsilon_max: float = .9
+  # epsilon_base: float = .1
+  num_epsilons: int = 256
+  epsilon_min: float = 1
+  epsilon_max: float = 3
   epsilon_base: float = .1
 
+  #----------------
   # # Learner options
-  # num_learner_steps: int = int(5e5)
+  #----------------
   variable_update_period: int = 400  # how often to update actor
   num_sgd_steps_per_step: int = 1
   seed: int = 1
@@ -153,7 +161,7 @@ class Config(r2d2.R2D2Config):
   num_parallel_calls: int = 1
 
   # Priority options
-  importance_sampling_exponent: float = 0.0
+  importance_sampling_exponent: float = 0.6
   priority_exponent: float = 0.9
   max_priority_weight: float = 0.9
 

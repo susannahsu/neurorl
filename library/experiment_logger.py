@@ -29,7 +29,7 @@ import numpy as np
 import time
 
 from pathlib import Path
-import lib.utils as data_utils
+import library.utils as data_utils
 
 try:
   import wandb

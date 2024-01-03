@@ -17,9 +17,9 @@ import jax
 import jax.numpy as jnp
 import rlax
 
-import lib.networks as networks
+import library.networks as networks
 
-from lib import utils 
+from library import utils 
 from td_agents import basics
 
 Array = acme_types.NestedArray
