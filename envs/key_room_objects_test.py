@@ -4,7 +4,7 @@ from absl import logging
 
 import copy
 from gymnasium import spaces
-from typing import Optional, Union, List, Dict
+from typing import Optional, Union, List, Dict, Tuple
 import itertools
 
 import wandb
@@ -48,26 +48,38 @@ def name(o):
    return f"{o.color} {o.type}"
 
 class ObjectTestTaskFeatures:
-   def __init__(self, colors, types):
-      self.thing2indx = {}
-      for idx, (color, shape) in enumerate(itertools.product(colors, types)):
-          self.thing2indx[(color, shape)] = idx
+  def __init__(self, colors, types):
+    self.thing2indx = {}
+    for idx, (color, shape) in enumerate(itertools.product(colors, types)):
+        self.thing2indx[(color, shape)] = idx
 
-   def task(self, obj2reward: dict):
-      vector = np.zeros(len(self.thing2indx))
-      for obj, reward in obj2reward.items():
-        vector[self.thing2indx[obj]] = reward
 
-      return vector
+  @property
+  def things(self):
+     return self.thing2indx.keys()
 
-   def empty_state_features(self):
-      vector = np.zeros(len(self.thing2indx))
-      return vector
+  def task(self, obj2reward: dict):
+    vector = np.zeros(len(self.thing2indx))
+    for obj, reward in obj2reward.items():
+      vector[self.thing2indx[obj]] = reward
 
-   def state_features(self, color: str, type: str):
-      vector = np.zeros(len(self.thing2indx))
-      vector[self.thing2indx[(color, type)]] = 1.0
-      return vector
+    return vector
+
+  def empty_state_features(self):
+    vector = np.zeros(len(self.thing2indx))
+    return vector
+
+  def index(self, color: str, type: str):
+    key = (color, type)
+    if key in self.thing2indx:
+      return self.thing2indx[key]
+    else:
+      return -1
+
+  def state_features(self, color: str, type: str):
+    vector = np.zeros(len(self.thing2indx))
+    vector[self.thing2indx[(color, type)]] = 1.0
+    return vector
 
 class ObjectTestTask:
     def __init__(self,
@@ -86,11 +98,11 @@ class ObjectTestTask:
 
         assert source in ['shape', 'color']
         self.source = source
-        self.types = ['key', 'task_room', 'box', 'ball']
+        self.types = ['key', 'room', 'box', 'ball']
 
         type2indx = type2indx or {
            'key': 0,
-           'task_room': 1,
+           'room': 1,
            'ball': 2,
            'box': 3,
         }
@@ -101,7 +113,7 @@ class ObjectTestTask:
 
         colors = floor2task_color.values()
 
-        self.task_features_cnstr = ObjectTestTaskFeatures(colors, self.types)
+        self.feature_cnstr = ObjectTestTaskFeatures(colors, self.types)
 
         self.type2indx = type2indx
         self.task_colors = list(floor2task_color.values())
@@ -112,9 +124,9 @@ class ObjectTestTask:
         }
 
     def task_vector(self):
-       vector = self.task_features_cnstr.task(obj2reward={
+       vector = self.feature_cnstr.task(obj2reward={
         (self.goal_color(), 'key'): .1,
-        (self.goal_color(), 'task_room'): .5,
+        (self.goal_color(), 'room'): .5,
         self.goal(): self.task_reward
        })
        return vector
@@ -158,56 +170,82 @@ class ObjectTestTask:
         n = name(*self.type_goal())
         return f"init={self.init}, floor={self.floor}, w={self.w} |-> {n}"
 
-    def reset(self):
-       self.picked_up_key = False
-       self.entered_task_room = False
-       self.task_room = None
+    def reset(self,
+        color_to_room: Dict[str, Tuple[int]],
+        start_room_color: str):
 
-    def set_room(self, room):
-       self.task_room = room
+       self.color_to_room = color_to_room
+       self.room_to_color = {room: color for color, room in color_to_room.items()}
 
-    def agent_in_task_room(self, env):
-      agent_room = env.room_from_pos(*env.agent_pos)
-      return agent_room == self.task_room
+       self.start_room_color = start_room_color
+       self.feature_counts = self.feature_cnstr.empty_state_features()
+       self.prior_counts = self.feature_cnstr.empty_state_features()
+
 
     def step(self, env):
-      color, type = self.goal()
+      """
+      Things we'll check:
+      1. did the agent pick up an object?
+        - held prior vs. held now
+        - at end of each time-step, store self.prior_carrying = env.carrying
+        - at beginning of next time-step, compare: (self.prior_carrying, env.carrying)
+          - if env.carrying and different:
+            increase pick-up count for object type
+      2. did the agent enter a room
+        - room_prior vs. room_now
+        - at end of each time-step, store self.prior_room = current_room
+        - at beginning, if diff: increase count
+      
+      3. state-features = (new instance picking up/entering room)*(1st time doing this).
+        - essentially a "first-occupancy" variant of state-features
 
-      def onehot(type: str = None):
-        x = np.zeros(len(self.types))
-        x[self.type2indx[type]] = 1
-        return x
+      """
+      #=======================
+      # Did the agent pick up a object?
+      #=======================
+      if env.carrying and (env.carrying != self.prior_carrying):
+        idx = self.feature_cnstr.index(
+          env.carrying.color, env.carrying.type)
+        if idx >=0:
+          self.feature_counts[idx] += 1
 
+      #=======================
+      # Did the agent enter a new room?
+      #=======================
+      agent_room = env.room_from_pos(*env.agent_pos)
+      room_color = self.room_to_color[agent_room]
+      if room_color != self.start_room_color and (
+        self.prior_room_color != room_color):
+        idx = self.feature_cnstr.index(
+          env.carrying.color, "room")
+        if idx >=0:
+          self.feature_counts[idx] += 1
+        import ipdb; ipdb.set_trace()
+
+      #=======================
+      # Did the agent enter a new room
+      #=======================
+      first = (self.feature_counts == 1).astype(np.float32)
+      difference = self.feature_counts - self.prior_counts
+      state_features = first*difference
+
+      #=======================
+      # update
+      #=======================
+      self.prior_carrying = env.carrying
+      self.prior_room_color = room_color
+      self.prior_counts = np.array(self.feature_counts)
+
+      #=======================
+      # is the task over?
+      #=======================
       terminal = False
-
-      # check # 1: is the task over?
+      color, type = self.goal()
       if (env.carrying is not None and 
           env.carrying.type == type and 
           env.carrying.color == color):
          terminal = True
-         state_features = self.task_features_cnstr.state_features(
-            color=color, type=type)
-         return state_features, terminal
 
-      # check # 2: have you entered the task room for 1st time
-      if (not self.entered_task_room and 
-            self.agent_in_task_room(env)):
-         self.entered_task_room = True
-         state_features = self.task_features_cnstr.state_features(
-            color=color, type='task_room')
-         return state_features, terminal
-
-      # check # 3: have you picked up the task key
-      if (not self.picked_up_key and 
-            env.carrying is not None and
-            env.carrying.type == 'key' and
-            env.carrying.color == color):
-         self.picked_up_key = True
-         state_features = self.task_features_cnstr.state_features(
-            color=color, type='key')
-         return state_features, terminal
-
-      state_features = self.task_features_cnstr.empty_state_features()
       return state_features, terminal
 
 class KeyRoomObjectTest(LevelGen):
@@ -330,20 +368,26 @@ class KeyRoomObjectTest(LevelGen):
       self.place_agent(*center_room)
       _ = self.room_from_pos(*self.agent_pos)
 
-      ###########################
+      ###########################################
       # Place keys, door, and ball of same color
-      ###########################
+      ###########################################
       self.all_objects = []
       # colors = ['red', 'green', 'yellow', 'grey']
       colors = self.room_colors
       # starts to the right for some reason
       goal_room_coords = [(2,1), (1, 2), (0, 1), (1,0)]
+      colors__to__room = {}
+      # use 'start' key for start room coords
+      start_room_color = 'start'
+      colors__to__room[start_room_color] = self.get_room(*center_room)
 
       def generate_room_objects(color: str):
         return (Key(color), Ball(color), Box(color))
 
       for room_idx, color in enumerate(colors):
         room = goal_room_coords[room_idx]
+        colors__to__room[color] = self.get_room(*room)
+
         key, ball, box = generate_room_objects(color)
         self.all_objects.extend([key, ball, box])
         self.place_in_room(*center_room, key)
@@ -359,9 +403,14 @@ class KeyRoomObjectTest(LevelGen):
       self.task = self.tasks[task_idx]
       task_room_coord = goal_room_coords[task_idx]
 
-      self.task.reset()
-      self.task.set_room(self.get_room(*task_room_coord))
+      self.task.reset(
+        color_to_room=colors__to__room,
+        start_room_color=start_room_color,
+        )
 
+      ###########################################
+      # Place extra objects in main room
+      ###########################################
       if self.include_task_signals:
         init_object = self.task.initial_object()
         self.place_in_room(*center_room, init_object)
@@ -383,7 +432,8 @@ class KeyRoomObjectTest(LevelGen):
 
     def reset(self, *args, **kwargs):
         obs, info = super().reset(*args, **kwargs)
-        self.update_obs(obs, np.zeros_like(self.task_vector))
+        self.update_obs(obs,
+                        state_features=np.zeros_like(self.task_vector))
 
         # reset object counts
         self.object_counts = {name(o):0 for o in self.all_objects}
