@@ -610,35 +610,35 @@ class ContrastiveDynaLossFn(q_learning.R2D2LossFn):
     return batch_td_error, batch_loss, metrics  # [T-1, B], [B]
 
 class DynaArch(hk.RNNCore):
-    """
-    DynaArch is a neural network architecture class that integrates various key components 
-    of a Dyna-style reinforcement learning model. As a subclass of hk.RNNCore, it provides a flexible 
-    framework for constructing and operating a model-based RL agent.
+  """
+  DynaArch is a neural network architecture class that integrates various key components 
+  of a Dyna-style reinforcement learning model. As a subclass of hk.RNNCore, it provides a flexible 
+  framework for constructing and operating a model-based RL agent.
 
-    This architecture is composed of several modules:
-    - An observation function for processing input observations.
-    - A state transformation function for evolving the internal state of the network.
-    - A transition function that models the environment's dynamics based on the current state and action.
-    - A prediction function for estimating future rewards and Q-values.
+  This architecture is composed of several modules:
+  - An observation function for processing input observations.
+  - A state transformation function for evolving the internal state of the network.
+  - A transition function that models the environment's dynamics based on the current state and action.
+  - A prediction function for estimating future rewards and Q-values.
 
-    The architecture supports key operations like:
-    - Initial state generation for starting the RL process.
-    - Single-step application for processing individual time steps.
-    - Unrolling over sequences of inputs, crucial for model-based RL where future state predictions are essential.
+  The architecture supports key operations like:
+  - Initial state generation for starting the RL process.
+  - Single-step application for processing individual time steps.
+  - Unrolling over sequences of inputs, crucial for model-based RL where future state predictions are essential.
 
-    Attributes:
-        observation_fn (hk.Module): Module to process input observations.
-        state_fn (hk.RNNCore): RNN core for state transformation.
-        transition_fn (hk.RNNCore): Module for modeling environment transitions.
-        prediction_fn (Callable): Function for predicting rewards and Q-values.
+  Attributes:
+      observation_fn (hk.Module): Module to process input observations.
+      state_fn (hk.RNNCore): RNN core for state transformation.
+      transition_fn (hk.RNNCore): Module for modeling environment transitions.
+      prediction_fn (Callable): Function for predicting rewards and Q-values.
 
-    Methods:
-        initial_state: Returns the initial state of the network.
-        __call__: Applies the state function to an input and state.
-        unroll: Unrolls the state function over sequences of inputs.
-        apply_model: Applies the model to state-action pairs.
-        unroll_model: Unrolls the model using a sequence of actions.
-    """
+  Methods:
+      initial_state: Returns the initial state of the network.
+      __call__: Applies the state function to an input and state.
+      unroll: Unrolls the state function over sequences of inputs.
+      apply_model: Applies the model to state-action pairs.
+      unroll_model: Unrolls the model using a sequence of actions.
+  """
 
   def __init__(self,
                observation_fn: hk.Module,
@@ -751,30 +751,30 @@ def make_minigrid_networks(
         config: Config,
         task_encoder: Callable[[jax.Array], jax.Array] = lambda obs: None,
         **kwargs) -> basics.MbrlNetworks:
-    """
-    Constructs a set of neural networks tailored for Minigrid environments, specifically for tasks like BabyAI. 
-    This function leverages MuZero-like network structures, configuring them according to the provided environment 
-    specifications and custom configurations.
+  """
+  Constructs a set of neural networks tailored for Minigrid environments, specifically for tasks like BabyAI. 
+  This function leverages MuZero-like network structures, configuring them according to the provided environment 
+  specifications and custom configurations.
 
-    The function encapsulates the process of setting up various components of the network including observation and 
-    state functions, transition dynamics, and prediction mechanisms. It supports customization and flexibility through 
-    configurable parameters and task-specific encoding.
+  The function encapsulates the process of setting up various components of the network including observation and 
+  state functions, transition dynamics, and prediction mechanisms. It supports customization and flexibility through 
+  configurable parameters and task-specific encoding.
 
-    Args:
-        env_spec (specs.EnvironmentSpec): The specification of the environment, including action and observation spaces.
-        config (Config): Configuration parameters for setting up the network, such as dimensions and learning coefficients.
-        task_encoder (Callable): A function to encode task-specific information, defaults to a no-op for generic tasks.
-        **kwargs: Additional keyword arguments for network setup.
+  Args:
+      env_spec (specs.EnvironmentSpec): The specification of the environment, including action and observation spaces.
+      config (Config): Configuration parameters for setting up the network, such as dimensions and learning coefficients.
+      task_encoder (Callable): A function to encode task-specific information, defaults to a no-op for generic tasks.
+      **kwargs: Additional keyword arguments for network setup.
 
-    Returns:
-        basics.MbrlNetworks: A configured model-based reinforcement learning network tailored for Minigrid environments.
+  Returns:
+      basics.MbrlNetworks: A configured model-based reinforcement learning network tailored for Minigrid environments.
 
-    Key Steps:
-    - Setting up observation and state functions: Utilizes vision and state transformation models to process observations.
-    - Defining the transition function: Employs a ResNet-based model for environment dynamics, with gradient scaling techniques.
-    - Configuring prediction functions: Sets up mechanisms for predicting Q-values and rewards based on the state.
+  Key Steps:
+  - Setting up observation and state functions: Utilizes vision and state transformation models to process observations.
+  - Defining the transition function: Employs a ResNet-based model for environment dynamics, with gradient scaling techniques.
+  - Configuring prediction functions: Sets up mechanisms for predicting Q-values and rewards based on the state.
 
-    """
+  """
   num_actions = env_spec.actions.num_values
   state_dim = config.state_dim
 

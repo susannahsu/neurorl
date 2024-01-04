@@ -461,7 +461,7 @@ def sweep(search: str = 'default'):
             "min_replay_size": tune.grid_search([1_000]),
             "agent": tune.grid_search(['dyna']),
             "seed": tune.grid_search([1]),
-            # "reward_coeff": tune.grid_search([10, 1, ]),
+            "state_transform_dims": tune.grid_search([[], [256]]),
             "model_coeff": tune.grid_search(
               [1e-1, 1e-2, 1e-3, 1e-4]),
             "dyna_coeff": tune.grid_search([0.0]),
