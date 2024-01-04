@@ -160,7 +160,36 @@ def setup_experiment_inputs(
     network_factory = functools.partial(
             q_learning.make_minigrid_networks,
             config=config)
+  elif agent == 'dyna':
+    from td_agents import contrastive_dyna
+    config = contrastive_dyna.Config(**config_kwargs)
+    builder = basics.Builder(
+        config=config,
+        get_actor_core_fn=functools.partial(
+            basics.get_actor_core,
+            extract_q_values=lambda preds: preds.q_values),
+        LossFn=contrastive_dyna.ContrastiveDynaLossFn(
+            discount=config.discount,
+            importance_sampling_exponent=config.importance_sampling_exponent,
+            burn_in_length=config.burn_in_length,
+            max_replay_size=config.max_replay_size,
+            max_priority_weight=config.max_priority_weight,
+            bootstrap_n=config.bootstrap_n,
+            # RL loss
+            rl_coeff=config.rl_coeff,
+            # contrastive model + reward loss
+            reward_coeff=config.reward_coeff,
+            model_coeff=config.model_coeff,
+            labels_from_target_params=config.labels_from_target_params,
+            num_negatives=config.num_negatives,
+            simulation_steps=config.simulation_steps,
+            temperature=config.temperature,
+            # dyna loss
+            dyna_coeff=config.dyna_coeff,
 
+        ))
+    network_factory = functools.partial(
+      contrastive_dyna.make_minigrid_networks, config=config)
   elif agent == 'muzero':
     from td_agents import muzero
 
@@ -414,13 +443,29 @@ def sweep(search: str = 'default'):
   if search == 'baselines':
     space = [
         {
-            "group": tune.grid_search(['run-3-babyai-torso']),
-            "agent": tune.grid_search(['muzero']),
+            "group": tune.grid_search(['dyna-1']),
+            "agent": tune.grid_search(['dyna']),
             "seed": tune.grid_search([1]),
             "env.level": tune.grid_search([
                 "BabyAI-GoToRedBallNoDists-v0",
                 "BabyAI-GoToObjS6-v1",
             ]),
+        }
+    ]
+
+  elif search == 'dyna':
+    space = [
+        {
+            "group": tune.grid_search(['dyna-contrast-1']),
+            "num_steps": tune.grid_search([1e6]),
+            "min_replay_size": tune.grid_search([1_000]),
+            "agent": tune.grid_search(['dyna']),
+            "seed": tune.grid_search([1]),
+            # "reward_coeff": tune.grid_search([10, 1, ]),
+            "model_coeff": tune.grid_search(
+              [1e-1, 1e-2, 1e-3, 1e-4]),
+            "dyna_coeff": tune.grid_search([0.0]),
+            "env.rows": tune.grid_search([5]),
         }
     ]
   elif search == 'muzero':
