@@ -70,15 +70,16 @@ import gymnasium
 import dm_env
 import minigrid
 
-from td_agents import q_learning, muzero
+from envs.minigrid_wrappers import DictObservationSpaceWrapper
 
 from library.dm_env_wrappers import GymWrapper
-import library.env_wrappers as env_wrappers
 import library.experiment_builder as experiment_builder
 import library.parallel as parallel
 import library.utils as utils
+
+from td_agents import contrastive_dyna_q as dynaq
+from td_agents import muzero
 from td_agents import basics
-from td_agents.basics import disable_insert_blocking
 
 flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')
@@ -638,7 +639,7 @@ def make_environment(seed: int,
   # environments: https://minigrid.farama.org/environments/babyai/
   env = gymnasium.make(level)
   env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
-  env = env_wrappers.DictObservationSpaceWrapper(env)
+  env = DictObservationSpaceWrapper(env)
 
   # convert to dm_env.Environment enironment
   env = GymWrapper(env)
@@ -675,45 +676,70 @@ def train_single(
   agent = agent_config_kwargs.get('agent', '')
   assert agent != '', 'please set agent'
 
-  if agent == 'qlearning':
+  if agent in ('qlearning',
+               'qlearning_contrast',
+               'dynaq'):
+    if agent == 'qlearning':
+      # just Q-learning with no model-learning or dyna
+      config_kwargs['reward_coeff'] = 0.0
+      config_kwargs['model_coeff'] = 0.0
+      config_kwargs['learn_offline'] = False
+    elif agent == 'qlearning_contrast':
+      # Q-learning + model-learning but NO DYNA
+      config_kwargs['learn_offline'] = False
+
     config = utils.merge_configs(
-        dataclass_configs=[q_learning.Config(), TwoLearnerConfig()],
+        dataclass_configs=[
+          dynaq.Config(), TwoLearnerConfig()],
         dict_configs=config_kwargs,
     )
 
     network_factory = functools.partial(
-        q_learning.make_minigrid_networks, config=config)
+        dynaq.make_minigrid_networks, config=config)
 
-    get_actor_core = basics.get_actor_core
+    get_actor_core = functools.partial(
+      basics.get_actor_core, extract_q_values=lambda p: p.q_values)
 
     online_learner_cls = functools.partial(
       basics.SGDLearner,
       optimizer_cnstr=functools.partial(
           basics.default_adam_constr, config=config),
-      loss_fn=q_learning.R2D2LossFn(
+      # online, learn Q-values + model
+      loss_fn=dynaq.ContrastiveDynaLossFn(
+          # Online Q-learning loss
           discount=config.discount,
-          importance_sampling_exponent=config.importance_sampling_exponent,
+          importance_sampling_exponent=0.0,  # none online
           burn_in_length=config.burn_in_length,
-          max_replay_size=config.max_replay_size,
-          max_priority_weight=config.max_priority_weight,
           bootstrap_n=config.bootstrap_n,
+          rl_coeff=config.rl_coeff,
+          # contrastive model + reward loss
+          reward_coeff=config.reward_coeff,
+          model_coeff=config.model_coeff,
+          labels_from_target_params=config.labels_from_target_params,
+          num_negatives=config.num_negatives,
+          simulation_steps=config.simulation_steps,
+          temperature=config.temperature,
+          # dyna loss
+          dyna_coeff=0.0,
     ))
 
     offline_learner_cls = functools.partial(
       basics.SGDLearner,
       optimizer_cnstr=functools.partial(
           basics.default_adam_constr, config=config),
-      loss_fn=q_learning.R2D2LossFn(
+      loss_fn=dynaq.ContrastiveDynaLossFn(
           discount=config.discount,
-          importance_sampling_exponent=config.importance_sampling_exponent,
+          importance_sampling_exponent=0.0,  # none online
           burn_in_length=config.burn_in_length,
-          max_replay_size=config.max_replay_size,
-          max_priority_weight=config.max_priority_weight,
-          bootstrap_n=1, # 1 time-step
+          bootstrap_n=config.bootstrap_n,
+          # only learn using dyna
+          dyna_coeff=config.dyna_coeff,
+          rl_coeff=0.0,
+          reward_coeff=0.0,
+          model_coeff=0.0,
     ))
 
   elif agent == 'muzero':
-    from td_agents import muzero
     config = utils.merge_configs(
         dataclass_configs=[muzero.Config(), TwoLearnerConfig()],
         dict_configs=config_kwargs,
@@ -862,7 +888,7 @@ def run_single():
   if FLAGS.debug:
     agent_config_kwargs.update(dict(
       online_update_period=5,  # update every 5 steps
-      simulation_steps=1,
+      simulation_steps=2,
       offline_batch_size=2,
       offline_update_period=4,  # update every 4 steps
     ))
@@ -961,9 +987,34 @@ def sweep(search: str = 'default'):
         {
             "agent": tune.grid_search(['qlearning']),
             "seed": tune.grid_search([1]),
+            "group": tune.grid_search(['qlearning-1']),
             "env.level": tune.grid_search([
                 "BabyAI-GoToRedBallNoDists-v0",
-                "BabyAI-GoToObjS6-v1",
+                # "BabyAI-GoToObjS6-v1",
+            ]),
+        },
+        {
+            "agent": tune.grid_search(['qlearning_contrast']),
+            "seed": tune.grid_search([1]),
+            "group": tune.grid_search(['qlearning-1']),
+            "model_coeff": tune.grid_search([1e-2, 1e-3, 1e-4, 1e-5]),
+            "env.level": tune.grid_search([
+                "BabyAI-GoToRedBallNoDists-v0",
+                # "BabyAI-GoToObjS6-v1",
+            ]),
+        },
+    ]
+  elif search == 'dynaq':
+    space = [
+        {
+            "agent": tune.grid_search(['dynaq']),
+            "seed": tune.grid_search([1]),
+            "group": tune.grid_search(['dynaq-1']),
+            "offline_update_period": tune.grid_search([2_000]),
+            "num_offline_updates": tune.grid_search([1, 10]),
+            "env.level": tune.grid_search([
+                "BabyAI-GoToRedBallNoDists-v0",
+                # "BabyAI-GoToObjS6-v1",
             ]),
         }
     ]
@@ -972,8 +1023,7 @@ def sweep(search: str = 'default'):
         {
             "agent": tune.grid_search(['muzero']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['muzero-4']),
-            "action_source": tune.grid_search(['value']),
+            "group": tune.grid_search(['muzero-1']),
             "offline_update_period": tune.grid_search([2_000]),
             "num_offline_updates": tune.grid_search([1, 10]),
             "env.level": tune.grid_search([
