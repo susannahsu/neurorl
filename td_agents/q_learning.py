@@ -132,9 +132,8 @@ def make_minigrid_networks(
   num_actions = env_spec.actions.num_values
 
   def make_core_module() -> R2D2Arch:
-    vision_torso = networks.AtariVisionTorso(
-      out_dim=config.state_dim)
-
+    vision_torso = networks.BabyAIVisionTorso(
+          conv_dim=0, out_dim=config.state_dim)
     observation_fn = networks.OarTorso(
       num_actions=num_actions,
       vision_torso=vision_torso,
