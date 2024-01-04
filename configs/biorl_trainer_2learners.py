@@ -1,4 +1,47 @@
 """
+This Python module orchestrates the setup and execution of reinforcement learning experiments, 
+particularly focusing on model-based RL approaches. It enables comprehensive experimentation 
+with various configurations, learning architectures, and environments, leveraging JAX, Acme, 
+Gymnasium, and other advanced libraries. 
+
+Key Functionalities:
+
+1. run_experiment:
+   - Central function to execute a single RL experiment given specific configurations.
+   - Integrates various components like online/offline learners, environment and network factories, 
+     and evaluation loops.
+   - Handles the training process, logging, checkpointing, and evaluation, ensuring a cohesive 
+     experimental run.
+
+2. make_environment:
+   - Factory function to create and configure Gym environments, particularly MiniGrid environments 
+     like BabyAI tasks.
+   - Wraps Gym environments with additional RL-specific functionalities, enabling seamless 
+     integration with the learning algorithms.
+
+3. train_single:
+   - Sets up and runs an individual RL experiment.
+   - Loads and processes experiment configurations, initializes the necessary components (e.g., 
+     agents, environments), and invokes `run_experiment`.
+
+4. sweep:
+   - Generates a grid of hyperparameters for extensive experimentation and tuning.
+
+Parallel Execution and Sweep Automation:
+- With `--parallel='sbatch'`, this file can automatically launch a series of experiments over settings 
+  defined in the `sweep` function on SLURM, a distributed computing environment.
+- This feature enables large-scale experimentation and automated hyperparameter tuning, making it 
+  highly suitable for research and development in complex RL scenarios.
+
+Dependencies:
+- JAX for efficient computations and automatic differentiation, Acme for RL components, Gymnasium for 
+  environment definitions, and Ray/SLURM for parallelization and distributed processing.
+- Integration with Weights & Biases (wandb) for experiment tracking and monitoring.
+
+This module is an essential tool for RL researchers and practitioners aiming to conduct extensive 
+experiments with model-based reinforcement learning algorithms, offering a robust, flexible, and scalable 
+framework for experimentation.
+
 Running experiments:
 --------------------
 # DEBUGGING, single stream
@@ -77,7 +120,7 @@ import library.experiment_builder as experiment_builder
 import library.parallel as parallel
 import library.utils as utils
 
-from td_agents import contrastive_dyna_q as dynaq
+from td_agents import contrastive_dyna as dynaq
 from td_agents import muzero
 from td_agents import basics
 
@@ -687,6 +730,9 @@ def train_single(
     elif agent == 'qlearning_contrast':
       # Q-learning + model-learning but NO DYNA
       config_kwargs['learn_offline'] = False
+    elif agent == 'qleadynaqrning_contrast':
+      # Q-learning + model-learning + DYNA
+      pass  # nothing special
 
     config = utils.merge_configs(
         dataclass_configs=[
@@ -987,22 +1033,24 @@ def sweep(search: str = 'default'):
         {
             "agent": tune.grid_search(['qlearning']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['qlearning-1']),
+            "group": tune.grid_search(['qlearning-3']),
+            "online_update_period": tune.grid_search([16, 32, 64, 128]),
+            "state_transform_dims": tune.grid_search([[], [256]]),
             "env.level": tune.grid_search([
                 "BabyAI-GoToRedBallNoDists-v0",
                 # "BabyAI-GoToObjS6-v1",
             ]),
         },
-        {
-            "agent": tune.grid_search(['qlearning_contrast']),
-            "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['qlearning-1']),
-            "model_coeff": tune.grid_search([1e-2, 1e-3, 1e-4, 1e-5]),
-            "env.level": tune.grid_search([
-                "BabyAI-GoToRedBallNoDists-v0",
-                # "BabyAI-GoToObjS6-v1",
-            ]),
-        },
+        # {
+        #     "agent": tune.grid_search(['qlearning_contrast']),
+        #     "seed": tune.grid_search([1]),
+        #     "group": tune.grid_search(['qlearning-1']),
+        #     "model_coeff": tune.grid_search([1e-2, 1e-3, 1e-4, 1e-5]),
+        #     "env.level": tune.grid_search([
+        #         "BabyAI-GoToRedBallNoDists-v0",
+        #         # "BabyAI-GoToObjS6-v1",
+        #     ]),
+        # },
     ]
   elif search == 'dynaq':
     space = [
@@ -1010,8 +1058,9 @@ def sweep(search: str = 'default'):
             "agent": tune.grid_search(['dynaq']),
             "seed": tune.grid_search([1]),
             "group": tune.grid_search(['dynaq-1']),
+            "online_update_period": tune.grid_search([16]),
             "offline_update_period": tune.grid_search([2_000]),
-            "num_offline_updates": tune.grid_search([1, 10]),
+            "num_offline_updates": tune.grid_search([10]),
             "env.level": tune.grid_search([
                 "BabyAI-GoToRedBallNoDists-v0",
                 # "BabyAI-GoToObjS6-v1",
