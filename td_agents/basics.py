@@ -573,8 +573,8 @@ class SGDLearner(learning_lib.SGDLearner):
     with jax.profiler.StepTraceAnnotation('step',
                                           step_num=self._current_step):
       data = next(self._data_iterator)
-      state, metrics = self.step_data(data, state)
-      self.set_state(state)
+      self._state, metrics = self.step_data(data, self._state)
+      self._current_step = utils.get_from_first_device(self._state.steps)
 
       self._logger.write(metrics)
 
@@ -793,7 +793,7 @@ def get_actor_core(
     networks: r2d2_networks.R2D2Networks,
     config: Config,
     evaluation: bool = False,
-    linear_epsilon: bool = True,
+    linear_epsilon: bool = False,
     extract_q_values = lambda preds: preds
 ) -> r2d2_actor.R2D2Policy:
   """Returns ActorCore for R2D2."""
