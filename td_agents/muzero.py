@@ -3,7 +3,6 @@ from typing import Optional, Tuple, Optional, Callable, Union, Any
 from absl import logging
 
 import functools
-from functools import partial
 import chex
 import distrax
 import optax
@@ -13,22 +12,22 @@ import numpy as np
 
 from acme import specs
 from acme.jax import networks as networks_lib
-from acme.jax import types as jax_types
-from acme.jax import utils as jax_utils
 from acme.agents.jax import actor_core as actor_core_lib
 
 import dataclasses
 import haiku as hk
 import jax
 import jax.numpy as jnp
-from jax import jit
 
 import rlax
 import library.networks as neural_networks
 
-from library import utils 
+from library import utils
+from library.utils import rolling_window
+from library.utils import scale_gradient 
 from td_agents import basics
 from library import muzero_mlps
+from td_agents.basics import MbrlNetworks, make_mbrl_network
 
 BatchSize = int
 PRNGKey = networks_lib.PRNGKey
@@ -44,14 +43,14 @@ ValueLogits = jax.Array
 InitFn = Callable[[PRNGKey], Params]
 StateFn = Callable[[Params, PRNGKey, Observation, State],
                    Tuple[NetworkOutput, State]]
-RootFn = Callable[[State], Tuple[PolicyLogits, ValueLogits]]
-ModelFn = Callable[[State], Tuple[RewardLogits, PolicyLogits, ValueLogits]]
+RootFn = Callable[[State], Tuple[State, PolicyLogits, ValueLogits]]
+ModelFn = Callable[[State], Tuple[State, RewardLogits, PolicyLogits, ValueLogits]]
 
 
 @dataclasses.dataclass
 class Config(basics.Config):
   """Configuration options for MuZero agent."""
-  discount: float = 0.997**4
+  discount: float = 0.99
 
   # Learner options
   batch_size: Optional[int] = 64
@@ -116,18 +115,6 @@ class Config(basics.Config):
   model_policy_coef: float = 10.0
   model_value_coef: float = 2.5
   model_reward_coef: float = 1.0
-
-@dataclasses.dataclass
-class MuZeroNetworks:
-  """Network that can unroll state-fn and apply model over an input sequence."""
-  init: InitFn
-  apply: StateFn
-  unroll: StateFn
-  init_recurrent_state: Callable[[
-      PRNGKey, Optional[BatchSize]], State]
-  apply_model: ModelFn
-  unroll_model: ModelFn
-
 
 @chex.dataclass(frozen=True)
 class RootOutput:
@@ -197,28 +184,12 @@ def muzero_optimizer_constr(config, initial_params=None):
   return optimizer
 
 
-@partial(jit, static_argnums=(1,))
-def rolling_window(a, size: int):
-    """Create rolling windows of a specified size from an input array.
-
-    This function takes an input array 'a' and a 'size' parameter and creates rolling windows of the specified size from the input array.
-
-    Args:
-        a (array-like): The input array.
-        size (int): The size of the rolling window.
-
-    Returns:
-        A new array containing rolling windows of 'a' with the specified size.
-    """
-    starts = jnp.arange(len(a) - size + 1)
-    return jax.vmap(lambda start: jax.lax.dynamic_slice(a, (start,), (size,)))(starts)
-
 def model_step(params: networks_lib.Params,
                rng_key: jax.Array,
                action: jax.Array,
                state: jax.Array,
                discount: jax.Array,
-               networks: MuZeroNetworks,
+               networks: MbrlNetworks,
                discretizer: utils.Discretizer):
   """One simulation step in MCTS."""
   rng_key, model_key = jax.random.split(rng_key)
@@ -377,7 +348,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
   def compute_target(self,
                      data: jax.Array,
                      is_terminal_mask: jax.Array,
-                     networks: MuZeroNetworks,
+                     networks: MbrlNetworks,
                      target_preds: RootOutput,
                      target_params: networks_lib.Params,
                      rng_key: networks_lib.PRNGKey,
@@ -733,50 +704,11 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     return self.invalid_actions
 
 
-def make_network(
-        environment_spec: specs.EnvironmentSpec,
-        make_core_module: Callable[[], hk.RNNCore]) -> MuZeroNetworks:
-  """Builds a MuZeroNetworks from a hk.Module factory."""
-
-  dummy_observation = jax_utils.zeros_like(environment_spec.observations)
-  dummy_action = jnp.array(0)
-
-  def make_unrollable_network_functions():
-    network = make_core_module()
-
-    def init() -> Tuple[networks_lib.NetworkOutput, State]:
-      out, _ = network(dummy_observation, network.initial_state(None))
-      return network.apply_model(out.state, dummy_action)
-
-    apply = network.__call__
-    return init, (apply,
-                  network.unroll,
-                  network.initial_state,
-                  network.apply_model,
-                  network.unroll_model)
-
-  # Transform and unpack pure functions
-  f = hk.multi_transform(make_unrollable_network_functions)
-  apply, unroll, initial_state_fn, apply_model, unroll_model = f.apply
-
-  def init_recurrent_state(key: jax_types.PRNGKey,
-                           batch_size: Optional[int] =  None) -> State:
-    no_params = None
-    return initial_state_fn(no_params, key, batch_size)
-
-  return MuZeroNetworks(
-      init=f.init,
-      apply=apply,
-      unroll=unroll,
-      apply_model=apply_model,
-      unroll_model=unroll_model,
-      init_recurrent_state=init_recurrent_state)
-
 def policy_select_action(
         params: networks_lib.Params,
         observation: networks_lib.Observation,
         state: basics.ActorState[actor_core_lib.RecurrentState],
-        networks: MuZeroNetworks,
+        networks: MbrlNetworks,
         evaluation: bool = True):
   rng, policy_rng = jax.random.split(state.rng)
 
@@ -797,7 +729,7 @@ def value_select_action(
         params: networks_lib.Params,
         observation: networks_lib.Observation,
         state: basics.ActorState[actor_core_lib.RecurrentState],
-        networks: MuZeroNetworks,
+        networks: MbrlNetworks,
         discretizer: utils.Discretizer,
         discount: float = .99,
         epsilon: float = .99,
@@ -862,7 +794,7 @@ def mcts_select_action(
     params: networks_lib.Params,
     observation: networks_lib.Observation,
     state: basics.ActorState[actor_core_lib.RecurrentState],
-    networks: MuZeroNetworks,
+    networks: MbrlNetworks,
     discount: float = .99,
     evaluation: bool = True):
   rng, policy_rng = jax.random.split(state.rng)
@@ -902,7 +834,7 @@ def mcts_select_action(
       prev_recurrent_state=state.recurrent_state)
 
 def get_actor_core(
-    networks: MuZeroNetworks,
+    networks: MbrlNetworks,
     config: Config,
     discretizer: Optional[utils.Discretizer] = None,
     mcts_policy: Optional[
@@ -1077,35 +1009,24 @@ class MuZeroArch(hk.RNNCore):
     # [T, D], [D]
     return model_output, new_state
 
-def scale_gradient(g: jax.Array, scale: float) -> jax.Array:
-    """Scale the gradient.
-
-    Args:
-        g (_type_): Parameters that contain gradients.
-        scale (float): Scale.
-
-    Returns:
-        Array: Parameters with scaled gradients.
-    """
-    return g * scale + jax.lax.stop_gradient(g) * (1.0 - scale)
-
 def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,
         config: Config,
         task_encoder: Callable[[jax.Array], jax.Array] = lambda obs: None,
-        **kwargs) -> MuZeroNetworks:
+        **kwargs) -> MbrlNetworks:
   """Builds default MuZero networks for BabyAI tasks."""
 
   num_actions = env_spec.actions.num_values
   state_dim = config.state_dim
 
-  def make_core_module() -> MuZeroNetworks:
+  def make_core_module() -> MbrlNetworks:
 
     ###########################
     # Setup observation and state functions
     ###########################
     vision_torso = neural_networks.BabyAIVisionTorso(
-      conv_dim=0, out_dim=config.state_dim)
+        conv_dim=config.out_conv_dim,
+        out_dim=config.state_dim)
     observation_fn = neural_networks.OarTorso(
         num_actions=num_actions,
         vision_torso=vision_torso,
@@ -1206,6 +1127,6 @@ def make_minigrid_networks(
         root_pred_fn=root_predictor,
         model_pred_fn=model_predictor)
 
-  return make_network(environment_spec=env_spec,
+  return make_mbrl_network(environment_spec=env_spec,
                       make_core_module=make_core_module,
                       **kwargs)
