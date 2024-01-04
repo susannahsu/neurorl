@@ -34,7 +34,15 @@ class R2D2LossFn(basics.RecurrentLossFn):
   tx_pair: rlax.TxPair = rlax.IDENTITY_PAIR
   extract_q: Callable[[Array], Array] = lambda preds: preds
 
-  def error(self, data, online_preds, online_state, target_preds, target_state, **kwargs):
+  def error(
+      self,
+      data,
+      online_preds,
+      online_state,
+      target_preds,
+      target_state, 
+      episode_mask: Optional[jax.Array] = None,
+      **kwargs):
     """R2D2 learning
     """
     # Get value-selector actions from online Q-values for double Q-learning.
@@ -64,7 +72,8 @@ class R2D2LossFn(basics.RecurrentLossFn):
     # average over {T} --> # [B]
     if self.mask_loss:
       # [T, B]
-      episode_mask = utils.make_episode_mask(data, include_final=False)
+      if episode_mask is None:
+        episode_mask = utils.make_episode_mask(data, include_final=False)
       batch_loss = utils.episode_mean(
           x=(0.5 * jnp.square(batch_td_error)),
           mask=episode_mask[:-1])
