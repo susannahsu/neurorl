@@ -85,6 +85,13 @@ Agents are defined with 3 things (e.g. [catch_trainer.py](configs/catch_trainer.
 
 # Available (Recurrent) Agents
 
-1. [Q-learning](td_agents/q_learning.py)
-2. [Successor Features](td_agents/usfa.py)
-3. [MuZero](td_agents/muzero.py)
+1. Model-free: [Q-learning](td_agents/q_learning.py)
+2. Model-free: [Successor Features](td_agents/usfa.py)
+3. Model-based: [Dyna w. Contrastive World Model](td_agents/contrastive_dyna.py)
+3. Model-based: [MuZero](td_agents/muzero.py)
+
+### example trainers
+1. simplest: [catch trainer](configs/catch_trainer.py)
+2. [minigrid trainer](configs/minigrid_trainer.py)
+
+Each one shows how to run Q-learning, dyna, or MuZero.
