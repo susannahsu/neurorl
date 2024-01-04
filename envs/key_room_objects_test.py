@@ -7,7 +7,10 @@ from gymnasium import spaces
 from typing import Optional, Union, List, Dict, Tuple
 import itertools
 
-import wandb
+try:
+  import wandb
+except:
+   pass
 import dm_env
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,7 +21,10 @@ from minigrid.core.world_object import Ball, Box, Key, Floor
 from minigrid.envs.babyai.core.roomgrid_level import RoomGridLevel, RejectSampling
 from minigrid.envs.babyai.core.verifier import Instr
 
-from library.utils import LevelAvgObserver, array_from_fig
+try:
+  from library.utils import LevelAvgObserver
+except:
+   LevelAvgObserver = object
 
 Number = Union[int, float, np.float32]
 
@@ -180,6 +186,7 @@ class ObjectTestTask:
        self.start_room_color = start_room_color
        self.feature_counts = self.feature_cnstr.empty_state_features()
        self.prior_counts = self.feature_cnstr.empty_state_features()
+       self.timestep = 0
 
 
     def step(self, env):
@@ -200,6 +207,7 @@ class ObjectTestTask:
         - essentially a "first-occupancy" variant of state-features
 
       """
+      self.timestep += 1
       #=======================
       # Did the agent pick up a object?
       #=======================
@@ -208,6 +216,7 @@ class ObjectTestTask:
           env.carrying.color, env.carrying.type)
         if idx >=0:
           self.feature_counts[idx] += 1
+        # print(f"{self.timestep}: picked up {env.carrying.color} {env.carrying.type}")
 
       #=======================
       # Did the agent enter a new room?
@@ -217,10 +226,10 @@ class ObjectTestTask:
       if room_color != self.start_room_color and (
         self.prior_room_color != room_color):
         idx = self.feature_cnstr.index(
-          env.carrying.color, "room")
+          room_color, "room")
         if idx >=0:
           self.feature_counts[idx] += 1
-        import ipdb; ipdb.set_trace()
+        # print(f"{self.timestep}: entered {room_color} room")
 
       #=======================
       # Did the agent enter a new room
