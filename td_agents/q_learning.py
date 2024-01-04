@@ -72,6 +72,8 @@ class R2D2LossFn(basics.RecurrentLossFn):
       batch_loss = 0.5 * jnp.square(batch_td_error).mean(axis=0)
 
     metrics = {
+        '1.q_loss': batch_loss.mean(),
+        '1.q_td_error': jnp.abs(batch_td_error).mean(),
         'z.q_mean': self.extract_q(online_preds).mean(),
         'z.q_var': self.extract_q(online_preds).var(),
         # 'z.q_max': online_preds.q_values.max(),
