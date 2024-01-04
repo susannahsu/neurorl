@@ -49,21 +49,25 @@ Change "search" to what you want to search over.
 """
 import functools 
 
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from enum import Enum
 
 from absl import flags
 from absl import app
 from absl import logging
+import dataclasses
 import os
 from ray import tune
 from launchpad.nodes.python.local_multi_processing import PythonProcess
 import launchpad as lp
 
+from acme.agents.jax import actor_core as actor_core_lib
 from acme import wrappers as acme_wrappers
 from acme.jax import experiments
 import dm_env
+import haiku as hk
+import jax
 
 import minigrid
 
@@ -73,6 +77,11 @@ import library.experiment_builder as experiment_builder
 import library.experiment_logger as experiment_logger
 import library.parallel as parallel
 import library.utils as utils
+
+from td_agents import basics
+from td_agents import q_learning
+from td_agents import usfa
+from td_agents import muzero
 
 import envs.key_room as key_room
 from envs.key_room_objects_test import (
@@ -95,11 +104,61 @@ flags.DEFINE_bool(
 FLAGS = flags.FLAGS
 
 
+@dataclasses.dataclass
+class MuZeroConfig(muzero.Config):
+  """Configuration options for MuZero agent."""
+  trace_length: int = 40
+  min_scalar_value: Optional[float] = None
+  num_bins: Optional[int] = 81  # number of bins for two-hot rep
+  scalar_step_size: Optional[float] = None  # step size between bins
+  value_target_source: str = 'return'
+
+  value_layers: Tuple[int] = (512, 512)
+  reward_layers: Tuple[int] = (128)
+
 class TestOptions(Enum):
   shape = 0
   color = 1
   ambigious = 2
 
+
+def muzero_policy_act_mcts_eval(
+    networks,
+    config,
+    discretizer,
+    mcts_policy,
+    evaluation: bool = True,
+):
+  """Returns ActorCore for MuZero."""
+
+  if evaluation:
+    select_action = functools.partial(muzero.mcts_select_action,
+                                      networks=networks,
+                                      evaluation=evaluation,
+                                      mcts_policy=mcts_policy,
+                                      discretizer=discretizer,
+                                      discount=config.discount)
+  else:
+    select_action = functools.partial(muzero.policy_select_action,
+                                      networks=networks,
+                                      evaluation=evaluation)
+
+  def init(rng):
+    rng, state_rng = jax.random.split(rng, 2)
+    initial_core_state = networks.init_recurrent_state(
+        state_rng)
+
+    return basics.ActorState(
+        rng=rng,
+        recurrent_state=initial_core_state,
+        prev_recurrent_state=initial_core_state)
+
+  def get_extras(state):
+    return {'core_state': state.prev_recurrent_state}
+
+  return actor_core_lib.ActorCore(init=init,
+                                  select_action=select_action,
+                                  get_extras=get_extras)
 
 def make_keyroom_object_test_env(seed: int,
                      setting: TestOptions,
@@ -228,69 +287,123 @@ def setup_experiment_inputs(
   # -----------------------
   agent = agent_config_kwargs.get('agent', '')
   assert agent != '', 'please set agent'
-  
+
+  #################################
+  # flat agents
+  #################################
+
   if agent == 'flat_q':
-    from td_agents import basics
-    from td_agents import q_learning
-    import haiku as hk
+    # has no mechanism to select from object options since dependent on what agent sees
+    env_kwargs['object_options'] = False
+
     config = q_learning.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=functools.partial(
         basics.get_actor_core,
-        linear_epsilon=config.linear_epsilon,
       ),
       LossFn=q_learning.R2D2LossFn(
         discount=config.discount,
-        
         importance_sampling_exponent=config.importance_sampling_exponent,
         burn_in_length=config.burn_in_length,
         max_replay_size=config.max_replay_size,
         max_priority_weight=config.max_priority_weight,
         bootstrap_n=config.bootstrap_n,
       ))
-    # NOTE: main differences below
     network_factory = functools.partial(
-            q_learning.make_minigrid_networks,
-            config=config,
-            task_encoder=lambda obs: hk.Linear(128)(obs['task']))
+      q_learning.make_minigrid_networks,
+      config=config,
+      task_encoder=lambda obs: hk.nets.MLP(
+        (128, 128), activate_final=True)(obs['task']))
 
-    env_kwargs['object_options'] = False  # has no mechanism to select from object options since dependent on what agent sees
 
   elif agent == 'flat_usfa':
-    from td_agents import basics
-    from td_agents import usfa
+    # has no mechanism to select from object options since dependent on what agent sees
+    env_kwargs['object_options'] = False
+
+
     config = usfa.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=functools.partial(
         basics.get_actor_core,
         extract_q_values=lambda preds: preds.q_values,
-        linear_epsilon=config.linear_epsilon,
         ),
       LossFn=usfa.UsfaLossFn(
         discount=config.discount,
-
         importance_sampling_exponent=config.importance_sampling_exponent,
         burn_in_length=config.burn_in_length,
         max_replay_size=config.max_replay_size,
         max_priority_weight=config.max_priority_weight,
         bootstrap_n=config.bootstrap_n,
       ))
-    # NOTE: main differences below
     network_factory = functools.partial(
             usfa.make_minigrid_networks, config=config)
-    env_kwargs['object_options'] = False  # has no mechanism to select from object options since dependent on what agent sees
+
+  elif agent == 'flat_muzero':
+    # has no mechanism to select from object options since dependent on what agent sees
+    env_kwargs['object_options'] = False
+
+    config = MuZeroConfig(**config_kwargs)
+
+    import mctx
+    # currently using same policy in learning and acting
+    mcts_policy = functools.partial(
+        mctx.gumbel_muzero_policy,
+        max_depth=config.max_sim_depth,
+        num_simulations=config.num_simulations,
+        gumbel_scale=config.gumbel_scale)
+
+    discretizer = utils.Discretizer(
+        num_bins=config.num_bins,
+        step_size=config.scalar_step_size,
+        max_value=config.max_scalar_value,
+        min_value=config.min_scalar_value,
+        tx_pair=config.tx_pair,
+    )
+    config.num_bins = discretizer.num_bins
+
+    builder = basics.Builder(
+        config=config,
+        get_actor_core_fn=functools.partial(
+            muzero_policy_act_mcts_eval,
+            mcts_policy=mcts_policy,
+            discretizer=discretizer,
+        ),
+        optimizer_cnstr=muzero.muzero_optimizer_constr,
+        LossFn=muzero.MuZeroLossFn(
+            discount=config.discount,
+            importance_sampling_exponent=config.importance_sampling_exponent,
+            burn_in_length=config.burn_in_length,
+            max_replay_size=config.max_replay_size,
+            max_priority_weight=config.max_priority_weight,
+            bootstrap_n=config.bootstrap_n,
+            value_target_source=config.value_target_source,
+            discretizer=discretizer,
+            mcts_policy=mcts_policy,
+            simulation_steps=config.simulation_steps,
+            reanalyze_ratio=config.reanalyze_ratio,
+            root_policy_coef=config.root_policy_coef,
+            root_value_coef=config.root_value_coef,
+            model_policy_coef=config.model_policy_coef,
+            model_value_coef=config.model_value_coef,
+            model_reward_coef=config.model_reward_coef,
+        ))
+    network_factory = functools.partial(
+        muzero.make_minigrid_networks,
+        config=config,
+        task_encoder=lambda obs: hk.nets.MLP(
+              (128, 128), activate_final=True)(obs['task']))
+  #################################
+  # object centric agents
+  #################################
   elif agent == 'object_usfa':
-    from td_agents import basics
-    from td_agents import usfa
     config = usfa.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=functools.partial(
         basics.get_actor_core,
         extract_q_values=lambda preds: preds.q_values,
-        linear_epsilon=config.linear_epsilon,
         ),
       LossFn=usfa.UsfaLossFn(
         discount=config.discount,
@@ -521,28 +634,88 @@ def sweep(search: str = 'default'):
     space = [
         {
             "num_steps": tune.grid_search([20e6]),
-            "agent": tune.grid_search(['flat_q', 'flat_usfa']),
-            "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['obj-test-6']),
-            "env.setting": tune.grid_search([0]),
-            "samples_per_insert": tune.grid_search([10]),
-            "epsilon_steps": tune.grid_search([6e6]),
+            "agent": tune.grid_search(['flat_muzero', 'flat_q']),
+            "seed": tune.grid_search([1, 2, 3]),
+            "group": tune.grid_search(['baselines-1']),
+            "env.setting": tune.grid_search([0, 1]),
+            # "samples_per_insert": tune.grid_search([10]),
+            # "epsilon_steps": tune.grid_search([6e6]),
             # "env.transfer_task_option": tune.grid_search([0]),
-            "linear_epsilon": tune.grid_search([True, False]),
         },
+    ]
+  elif search == 'muzero':
+    space = [
+        # {
+
+        #     "num_steps": tune.grid_search([10e6]),
+        #     "agent": tune.grid_search(['flat_muzero']),
+        #     "seed": tune.grid_search([1]),
+        #     "group": tune.grid_search(['muzero-test-2-trace']),
+        #     "env.setting": tune.grid_search([0]),
+        #     "value_target_source": tune.grid_search(["return"]),
+        #     "trace_length": tune.grid_search([80]),
+        #     "batch_size": tune.grid_search([32, 64]),
+        # },
+        {
+            "num_steps": tune.grid_search([10e6]),
+            "agent": tune.grid_search(['flat_muzero']),
+            "seed": tune.grid_search([1]),
+            "group": tune.grid_search(['muzero-baseline']),
+            "env.setting": tune.grid_search([0]),
+        },
+        # {
+        #     "num_steps": tune.grid_search([10e6]),
+        #     "agent": tune.grid_search(['flat_muzero']),
+        #     "seed": tune.grid_search([1]),
+        #     "group": tune.grid_search(['muzero-test-2-bins']),
+        #     "env.setting": tune.grid_search([0]),
+        #     "value_target_source": tune.grid_search(["return"]),
+        #     "num_bins": tune.grid_search([101, 301]),
+        # },
     ]
   elif search == 'sf':
     space = [
+        # {
+        #     "num_steps": tune.grid_search([15e6]),
+        #     "agent": tune.grid_search(['flat_usfa']),
+        #     "seed": tune.grid_search([1]),
+        #     "group": tune.grid_search(['sf-test-12-q-final_conv_dim']),
+        #     "env.setting": tune.grid_search([0]),
+        #     "samples_per_insert": tune.grid_search([0]),
+        #     "importance_sampling_exponent": tune.grid_search([.6]),
+        #     "final_conv_dim": tune.grid_search([16]),
+        #     "conv_flat_dim": tune.grid_search([0]),
+        #     "sf_layers": tune.grid_search([[512, 512], [1024]]),
+        #     "policy_layers": tune.grid_search([[], [32]]),
+        # },
+        # {
+        #     "num_steps": tune.grid_search([15e6]),
+        #     "agent": tune.grid_search(['flat_usfa']),
+        #     "seed": tune.grid_search([1]),
+        #     "group": tune.grid_search(['sf-test-12-q-conv_flat_dim']),
+        #     "env.setting": tune.grid_search([0]),
+        #     "samples_per_insert": tune.grid_search([0]),
+        #     "importance_sampling_exponent": tune.grid_search([.6]),
+        #     "final_conv_dim": tune.grid_search([0]),
+        #     # "trace_length": tune.grid_search([40]),
+        #     # "batch_size": tune.grid_search([32, 64]),
+        #     "conv_flat_dim": tune.grid_search([256]),
+        #     "sf_layers": tune.grid_search([[512, 512]]),
+        #     "policy_layers": tune.grid_search([[]]),
+        # },
         {
-            "num_steps": tune.grid_search([20e6]),
+            "num_steps": tune.grid_search([15e6]),
             "agent": tune.grid_search(['flat_usfa']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['sf-test-6']),
+            "group": tune.grid_search(['sf-test-14-ind-avg']),
             "env.setting": tune.grid_search([0]),
             "samples_per_insert": tune.grid_search([0]),
-            "sf_layers": tune.grid_search([[128, 128], [512]]),
-            "policy_layers": tune.grid_search([[], [32], [128]]),
-            "linear_epsilon": tune.grid_search([False]),
+            "importance_sampling_exponent": tune.grid_search([.6]),
+            "final_conv_dim": tune.grid_search([16]),
+            "conv_flat_dim": tune.grid_search([0]),
+            'head': tune.grid_search(['ind']),
+            "sf_layers": tune.grid_search([[512], [512, 512], [1024]]),
+            "policy_layers": tune.grid_search([[]]),
         },
     ]
   elif search == 'speed':
