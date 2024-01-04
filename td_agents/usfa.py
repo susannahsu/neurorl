@@ -28,10 +28,10 @@ class Config(basics.Config):
   nsamples: int = 0  # no samples outside of train vector
   importance_sampling_exponent: float = 0.0
 
+  conv_flat_dim: Optional[int] = 256
   sf_layers : Tuple[int]=(128, 128)
-  policy_layers : Tuple[int]=(32)
-
-  importance_sampling_exponent: float = 0.0
+  policy_layers : Tuple[int]=(32,)
+  head: str = 'independent'
 
 def cumulants_from_env(data, online_preds, online_state, target_preds, target_state):
   return data.observation.observation['state_features']  # [T, B, C]
@@ -72,6 +72,9 @@ class UsfaLossFn(basics.RecurrentLossFn):
 
   extract_cumulants: Callable = cumulants_from_env
   extract_task: Callable = lambda data: data.observation.observation['task']
+  extract_task_dim: Callable = lambda x: x[:, :, 0]
+  loss_prop_task: bool = False
+
   index_cumulants: Callable[
     [jnp.ndarray], jnp.ndarray] = lambda x : x[:-1]
 
@@ -124,8 +127,8 @@ class UsfaLossFn(basics.RecurrentLossFn):
       discounts[:-1])  # [T, B]          (vmap None,1)
 
     # [T, B, N, C] --> [T, B]
-    # sum over cumulants, mean over # of policies
-    batch_td_error = batch_td_error.sum(axis=3).mean(axis=2)
+    # mean over cumulants, mean over # of policies
+    batch_td_error = batch_td_error.mean(axis=3).mean(axis=2)
 
     if self.mask_loss:
       # [T, B]
@@ -137,13 +140,25 @@ class UsfaLossFn(basics.RecurrentLossFn):
     else:
       batch_loss = (0.5 * jnp.square(batch_td_error)).mean(axis=(0,2,3))
 
+    #---------------------
+    # Q-learning TD-error
+    #---------------------
+    task_td = self.extract_task_dim(batch_td_error)
+    task_w = self.extract_task(data)[:-1]
+    # [T, B, C]*[T, B, C] = [T, B]
+    value_td_error = (task_td*task_w).sum(-1)
+
+
     metrics = {
-      '2.cumulants': cumulants.mean(),
-      '2.sf_mean': online_sf.mean(),
+      '0.sf_loss': batch_loss,
+      '0.td_error': jnp.abs(value_td_error),
+      '1.sf_td_error': jnp.abs(batch_td_error),
+      '2.cumulants': cumulants,
+      '2.sf_mean': online_sf,
       '2.sf_var': online_sf.var(),
       }
 
-    return batch_td_error, batch_loss, metrics # [T, B], [B]
+    return value_td_error, batch_loss, metrics # [T, B], [B]
 
 class USFAPreds(NamedTuple):
   q_values: jnp.ndarray  # q-value
@@ -151,13 +166,91 @@ class USFAPreds(NamedTuple):
   policy: jnp.ndarray  # policy vector
   task: jnp.ndarray  # task vector (potentially embedded)
 
+class MonolithicSfHead(hk.Module):
+  def __init__(self, layers: int, num_actions: int, state_features_dim: int,
+               name: Optional[str] = None):
+    super(IndependentSfHead, self).__init__(name=name)
+    self.net = hk.nets.MLP(
+        tuple(layers)+(num_actions * state_features_dim,))
+    self.num_actions = num_actions
+    self.state_features_dim = state_features_dim
+
+  def __call__(self,
+               sf_input: jnp.ndarray,
+               policy: jnp.ndarray,
+               task: jnp.ndarray) -> jnp.ndarray:
+    """Compute successor features and q-valuesu
+    
+    Args:
+        inputs (jnp.ndarray): D_1
+        policy (jnp.ndarray): D_2
+        task (jnp.ndarray): D_1
+    
+    Returns:
+        jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
+    """
+    sf_input = jnp.concatenate((sf_input, policy))  # 2D
+
+    # [A * C]
+    sf = self.net(sf_input)
+    # [A, C]
+    sf = jnp.reshape(sf, (self.num_actions, self.state_features_dim))
+
+    def dot(a, b): return jnp.sum(a*b).sum()
+
+    # dot-product: A
+    q_values = jax.vmap(
+        dot, in_axes=(0, None), out_axes=0)(sf, task)
+
+    assert q_values.shape[0] == self.num_actions, 'wrong shape'
+    return sf, q_values
+
+# class IndependentSfHead(hk.Module):
+#   def __init__(self, layers: int, num_actions: int, state_features_dim: int,
+#                name: Optional[str] = None):
+#     super(IndependentSfHead, self).__init__(name=name)
+#     self.net_factory = lambda: hk.nets.MLP(
+#         tuple(layers)+(num_actions,))
+#     self.num_actions = num_actions
+#     self.state_features_dim = state_features_dim
+
+#   def __call__(self,
+#                sf_input: jnp.ndarray,
+#                policy: jnp.ndarray,
+#                task: jnp.ndarray) -> jnp.ndarray:
+#     """Compute successor features and q-valuesu
+    
+#     Args:
+#         inputs (jnp.ndarray): D_1
+#         policy (jnp.ndarray): D_2
+#         task (jnp.ndarray): D_1
+    
+#     Returns:
+#         jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
+#     """
+#     sf_input = jnp.concatenate((sf_input, policy))  # 2D
+
+#     # [[A], ..., [A]]
+#     sf = [self.net_factory()(sf_input) for _ in range(self.state_features_dim)]
+#     # [A, C]
+#     sf = jnp.stack(sf, axis=1)
+
+#     def dot(a, b): return jnp.sum(a*b).sum()
+
+#     # dot-product: A
+#     q_values = jax.vmap(
+#         dot, in_axes=(0, None), out_axes=0)(sf, task)
+
+#     assert q_values.shape[0] == self.num_actions, 'wrong shape'
+#     return sf, q_values
+
 class SfGpiHead(hk.Module):
   """Universal Successor Feature Approximator GPI head"""
   def __init__(self,
     num_actions: int,
     state_features_dim: int,
-    sf_layers : Tuple[int]=(128, 128),
-    policy_layers : Tuple[int]=(32),
+    sf_net : hk.Module,
+    policy_layers : Tuple[int]=(32,),
     nsamples: int=10,
     variance: Optional[float]=0.5,
     eval_task_support: str = 'train', 
@@ -187,8 +280,7 @@ class SfGpiHead(hk.Module):
     else:
       self.policy_net = lambda x: x
 
-    self.sf_net = hk.nets.MLP(
-      tuple(sf_layers)+(num_actions * state_features_dim,))
+    self.sf_net = sf_net
 
   def __call__(self,
     usfa_input: jnp.ndarray,  # memory output (e.g. LSTM)
@@ -243,64 +335,35 @@ class SfGpiHead(hk.Module):
     usfa_input: jnp.ndarray,
     policies: jnp.ndarray,
     task: jnp.ndarray) -> USFAPreds:
-      """Summary
-      
-      Args:
-          usfa_input (jnp.ndarray): D, typically rnn_output
-          policies (jnp.ndarray): N x D
-          task (jnp.ndarray): D
-      Returns:
-          USFAPreds: Description
-      """
+    """Summary
+    
+    Args:
+        usfa_input (jnp.ndarray): D, typically rnn_output
+        policies (jnp.ndarray): N x D
+        task (jnp.ndarray): D
+    Returns:
+        USFAPreds: Description
+    """
 
-      def compute_sf_q(sf_input: jnp.ndarray,
-                       policy: jnp.ndarray,
-                       task: jnp.ndarray) -> jnp.ndarray:
-        """Compute successor features and q-valuesu
-        
-        Args:
-            inputs (jnp.ndarray): D_1
-            policy (jnp.ndarray): D_2
-            task (jnp.ndarray): D_1
-        
-        Returns:
-            jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
-        """
-        sf_input = jnp.concatenate((sf_input, policy))  # 2D
+    policy_embeddings = self.policy_net(policies)
+    sfs, q_values = jax.vmap(
+      self.sf_net, in_axes=(None, 0, None), out_axes=0)(
+        usfa_input,
+        policy_embeddings,
+        task)
 
-        # [A * C]
-        sf = self.sf_net(sf_input)
-        # [A, C]
-        sf = jnp.reshape(sf, (self.num_actions, self.state_features_dim))
+    # GPI
+    # -----------------------
+    # [N, A] --> [A]
+    q_values = jnp.max(q_values, axis=-2)
 
-        dot = lambda a,b: jnp.sum(a*b).sum()
+    policies = expand_tile_dim(policies, axis=-2, size=self.num_actions)
 
-        # dot-product: A
-        q_values = jax.vmap(
-          dot, in_axes=(0, None), out_axes=0)(sf, task)
-
-        assert q_values.shape[0] == self.num_actions, 'wrong shape'
-        return sf, q_values
-
-      policy_embeddings = self.policy_net(policies)
-      sfs, q_values = jax.vmap(
-        compute_sf_q, in_axes=(None, 0, None), out_axes=0)(
-          usfa_input,
-          policy_embeddings,
-          task)
-
-      # GPI
-      # -----------------------
-      # [N, A] --> [A]
-      q_values = jnp.max(q_values, axis=-2)
-
-      policies = expand_tile_dim(policies, axis=-2, size=self.num_actions)
-
-      return USFAPreds(
-        sf=sfs,       # [N, A, D_w]
-        policy=policies,         # [N, A, D_w]
-        q_values=q_values,  # [N, A]
-        task=task)         # [D_w]
+    return USFAPreds(
+      sf=sfs,       # [N, A, D_w]
+      policy=policies,         # [N, A, D_w]
+      q_values=q_values,  # [N, A]
+      task=task)         # [D_w]
 
 class UsfaArch(hk.RNNCore):
   """Universal Successor Feature Approximator."""
@@ -375,8 +438,10 @@ def make_minigrid_networks(
   state_features_dim = env_spec.observations.observation['state_features'].shape[0]
 
   def make_core_module() -> UsfaArch:
-    vision_torso = networks.AtariVisionTorso(
-      out_dim=config.state_dim)
+    vision_torso = networks.BabyAIVisionTorso(
+        flatten=True,
+        conv_dim=0,
+        out_dim=config.conv_flat_dim)
 
     observation_fn = networks.OarTorso(
       num_actions=num_actions,
@@ -388,124 +453,14 @@ def make_minigrid_networks(
       num_actions=num_actions,
       state_features_dim=state_features_dim,
       nsamples=config.nsamples,
-      sf_layers=config.sf_layers,
+      sf_net=MonolithicSfHead(
+          layers=config.sf_layers,
+          state_features_dim=state_features_dim,
+          num_actions=num_actions),
       policy_layers=config.policy_layers,
       eval_task_support=config.eval_task_support)
 
     return UsfaArch(
-      torso=observation_fn,
-      memory=hk.LSTM(config.state_dim),
-      head=usfa_head)
-
-  return networks_lib.make_unrollable_network(
-    env_spec, make_core_module)
-
-class ObjectOrientedUsfaArch(hk.RNNCore):
-  """Universal Successor Feature Approximator."""
-
-  def __init__(self,
-               torso: networks.OarTorso,
-               memory: hk.RNNCore,
-               head: SfGpiHead,
-               name: str = 'usfa_arch'):
-    super().__init__(name=name)
-    self._torso = torso
-    self._memory = memory
-    self._head = head
-  def make_object_oriented_usfa_inputs(
-      self,
-      inputs: observation_action_reward.OAR,
-      core_outputs: jnp.ndarray,
-      ):
-    action_embdder = lambda x: hk.Linear(128, w_init=hk.initializers.RandomNormal)(x)
-    object_embdder = lambda x: hk.Linear(128, w_init=hk.initializers.RandomNormal)(x)
-
-    # each are [B, N, D] where N differs for action and object embeddings
-    action_embeddings = hk.BatchApply(action_embdder)(inputs.observation['actions'])
-    object_embeddings = hk.BatchApply(object_embdder)(inputs.observation['objects'])
-    option_inputs = jnp.concatenate((action_embeddings, object_embeddings), axis=-2)
-
-    # vmap concat over middle dimension to replicate concat across all "actions"
-    # [B, D1] + [B, A, D2] --> [B, A, D1+D2]
-    concat = lambda a, b: jnp.concatenate((a,b), axis=-1)
-    concat = jax.vmap(in_axes=(None, 1), out_axes=1)(concat)
-
-    return concat(core_outputs, option_inputs)
-
-  def __call__(
-      self,
-      inputs: observation_action_reward.OAR,  # [B, ...]
-      state: hk.LSTMState,  # [B, ...]
-      evaluation: bool = False,
-  ) -> Tuple[USFAPreds, hk.LSTMState]:
-    torso_outputs = self._torso(inputs)  # [B, D+A+1]
-    memory_input = jnp.concatenate(
-      (torso_outputs.image, torso_outputs.action), axis=-1)
-    core_outputs, new_state = self._memory(memory_input, state)
-
-    import ipdb; ipdb.set_trace()
-    head_inputs = USFAInputs(
-      task=inputs.observation['task'],
-      usfa_input=self.make_object_oriented_usfa_inputs(inputs, core_outputs),
-      train_tasks=inputs.observation['train_tasks'],
-    )
-    if evaluation:
-      predictions = self._head.evaluate(head_inputs)
-      import ipdb; ipdb.set_trace()
-    else:
-      predictions = self._head(head_inputs)
-      import ipdb; ipdb.set_trace()
-    return predictions, new_state
-
-  def initial_state(self, batch_size: Optional[int],
-                    **unused_kwargs) -> hk.LSTMState:
-    return self._memory.initial_state(batch_size)
-
-  def unroll(
-      self,
-      inputs: observation_action_reward.OAR,  # [T, B, ...]
-      state: hk.LSTMState  # [T, ...]
-  ) -> Tuple[USFAPreds, hk.LSTMState]:
-    """Efficient unroll that applies torso, core, and duelling mlp in one pass."""
-    torso_outputs = hk.BatchApply(self._torso)(inputs)  # [T, B, D+A+1]
-
-    memory_input = jnp.concatenate(
-      (torso_outputs.image, torso_outputs.action), axis=-1)
-
-    core_outputs, new_states = hk.static_unroll(
-      self._memory, memory_input, state)
-
-    head_inputs = USFAInputs(
-      task=torso_outputs.task,
-      usfa_input=core_outputs,
-    )
-    predictions = hk.BatchApply(self._head)(head_inputs)  # [T, B, A]
-    return predictions, new_states
-
-def make_object_oriented_minigrid_networks(
-        env_spec: specs.EnvironmentSpec,
-        config: Config) -> networks_lib.UnrollableNetwork:
-  """Builds default USFA networks for Minigrid games."""
-
-  num_actions = env_spec.actions.num_values
-  state_features_dim = env_spec.observations.observation['state_features'].shape[0]
-
-  def make_core_module() -> ObjectOrientedUsfaArch:
-    vision_torso = networks.AtariVisionTorso()
-
-    observation_fn = networks.OarTorso(
-      num_actions=num_actions,
-      vision_torso=vision_torso,
-      output_fn=networks.TorsoOutput,
-    )
-
-    usfa_head = SfGpiHead(
-      num_actions=num_actions,
-      state_features_dim=state_features_dim,
-      nsamples=config.nsamples,
-      eval_task_support=config.eval_task_support)
-
-    return ObjectOrientedUsfaArch(
       torso=observation_fn,
       memory=hk.LSTM(config.state_dim),
       head=usfa_head)
