@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import collections
@@ -9,6 +10,7 @@ from pprint import pprint
 import dm_env
 from dm_env import specs
 import jax
+from jax import jit
 import jax.numpy as jnp
 import numpy as np
 import operator
@@ -274,3 +276,33 @@ class Discretizer:
       num_bins=self._num_bins)
       probs = jnp.clip(probs, 0, 1)  # for numerical stability
       return probs
+
+
+@partial(jit, static_argnums=(1,))
+def rolling_window(a, size: int):
+    """Create rolling windows of a specified size from an input array.
+
+    This function takes an input array 'a' and a 'size' parameter and creates rolling windows of the specified size from the input array.
+
+    Args:
+        a (array-like): The input array.
+        size (int): The size of the rolling window.
+
+    Returns:
+        A new array containing rolling windows of 'a' with the specified size.
+    """
+    starts = jnp.arange(len(a) - size + 1)
+    return jax.vmap(lambda start: jax.lax.dynamic_slice(a, (start,), (size,)))(starts)
+
+
+def scale_gradient(g: jax.Array, scale: float) -> jax.Array:
+    """Scale the gradient.
+
+    Args:
+        g (_type_): Parameters that contain gradients.
+        scale (float): Scale.
+
+    Returns:
+        Array: Parameters with scaled gradients.
+    """
+    return g * scale + jax.lax.stop_gradient(g) * (1.0 - scale)

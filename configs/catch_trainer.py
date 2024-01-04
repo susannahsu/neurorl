@@ -165,7 +165,7 @@ def make_muzero_networks(
         out = muzero_mlps.SimpleTransition(
             num_blocks=2)(
             action_onehot, state)
-        out = muzero.scale_gradient(out, config.scale_grad)
+        out = utils.scale_gradient(out, config.scale_grad)
         return out, out
 
       if action_onehot.ndim == 2:

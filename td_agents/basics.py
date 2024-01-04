@@ -24,7 +24,7 @@ from acme.agents.jax.dqn import learning_lib
 from acme.utils import async_utils
 from acme.utils import counting
 from acme.utils import loggers
-from acme.jax import utils
+from acme.jax import types as jax_types, utils, utils as jax_utils
 from acme.jax import networks as network_lib
 from acme.jax import variable_utils
 from acme.agents.jax import r2d2
@@ -39,20 +39,14 @@ from acme.utils import loggers
 
 
 
-
-
-import jax
-import optax
-import reverb
-import numpy as np
-
 import jax
 import jax.numpy as jnp
-from jax._src.lib import xla_bridge # for clearing cache
+import numpy as np
 import optax
+import tree
 import reverb
 import rlax
-import tree
+
 
 
 _PMAP_AXIS_NAME = 'data'
@@ -64,15 +58,16 @@ Policy = r2d2_actor.R2D2Policy
 
 # Only simple observations & discrete action spaces for now.
 Observation = jax.Array
+State = acme_types.NestedArray
 
 # initializations
-ValueInitFn = Callable[[networks_lib.PRNGKey, Observation, hk.LSTMState],
-                             networks_lib.Params]
+InitFn = Callable[[networks_lib.PRNGKey], networks_lib.Params]
 
 # calling networks
-RecurrentStateFn = Callable[[networks_lib.Params], hk.LSTMState]
-ValueFn = Callable[[networks_lib.Params, Observation, hk.LSTMState],
+RecurrentStateFn = Callable[[networks_lib.Params], State]
+ValueFn = Callable[[networks_lib.Params, Observation, State],
                          networks_lib.Value]
+ModelFn = Callable[[State], acme_types.NestedArray]
 
 @chex.dataclass(frozen=True, mappable_dataclass=False)
 class ActorState(Generic[actor_core_lib.RecurrentState]):
@@ -117,6 +112,7 @@ class Config(r2d2.R2D2Config):
 
   # Architecture
   state_dim: int = 512
+  out_conv_dim: int = 32
 
   #----------------
   # Epsilon schedule
@@ -177,11 +173,22 @@ class NetworkFn:
       observations, for learning.
     initial_state: Recurrent state at the beginning of an episode.
   """
-  init: ValueInitFn
+  init: InitFn
   forward: ValueFn
   unroll: ValueFn
   initial_state: RecurrentStateFn
   evaluation: Optional[ValueFn] = None
+
+
+@dataclasses.dataclass
+class MbrlNetworks:
+  """Network that can unroll state-fn and apply model over an input sequence."""
+  init: InitFn
+  apply: RecurrentStateFn
+  unroll: RecurrentStateFn
+  init_recurrent_state: RecurrentStateFn
+  apply_model: ModelFn
+  unroll_model: ModelFn
 
 @dataclasses.dataclass
 class RecurrentLossFn(learning_lib.LossFn):
@@ -868,4 +875,43 @@ def disable_insert_blocking(
         max(1, int(
             (rate_limiter_info.max_diff - rate_limiter_info.min_diff) / 2)))
   return modified_tables, sample_sizes
+
+def make_mbrl_network(
+        environment_spec: specs.EnvironmentSpec,
+        make_core_module: Callable[[], hk.RNNCore]) -> MbrlNetworks:
+  """Builds a MbrlNetworks from a hk.Module factory."""
+
+  dummy_observation = jax_utils.zeros_like(environment_spec.observations)
+  dummy_action = jnp.array(0)
+
+  def make_unrollable_network_functions():
+    network = make_core_module()
+
+    def init() -> Tuple[networks_lib.NetworkOutput, State]:
+      out, _ = network(dummy_observation, network.initial_state(None))
+      return network.apply_model(out.state, dummy_action)
+
+    apply = network.__call__
+    return init, (apply,
+                  network.unroll,
+                  network.initial_state,
+                  network.apply_model,
+                  network.unroll_model)
+
+  # Transform and unpack pure functions
+  f = hk.multi_transform(make_unrollable_network_functions)
+  apply, unroll, initial_state_fn, apply_model, unroll_model = f.apply
+
+  def init_recurrent_state(key: jax_types.PRNGKey,
+                           batch_size: Optional[int] =  None) -> State:
+    no_params = None
+    return initial_state_fn(no_params, key, batch_size)
+
+  return MbrlNetworks(
+      init=f.init,
+      apply=apply,
+      unroll=unroll,
+      apply_model=apply_model,
+      unroll_model=unroll_model,
+      init_recurrent_state=init_recurrent_state)
 
