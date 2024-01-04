@@ -63,13 +63,16 @@ import gymnasium
 import dm_env
 import minigrid
 
-from td_agents import basics
+
+from envs.minigrid_wrappers import DictObservationSpaceWrapper
 
 from library.dm_env_wrappers import GymWrapper
-import library.env_wrappers as env_wrappers
 import library.experiment_builder as experiment_builder
 import library.parallel as parallel
 import library.utils as utils
+
+from td_agents import basics
+
 
 flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')
@@ -101,7 +104,7 @@ def make_environment(seed: int,
   # environments: https://minigrid.farama.org/environments/babyai/
   env = gymnasium.make(level)
   env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
-  env = env_wrappers.DictObservationSpaceWrapper(env)
+  env = DictObservationSpaceWrapper(env)
 
   # convert to dm_env.Environment enironment
   env = GymWrapper(env)
