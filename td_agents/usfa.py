@@ -26,12 +26,15 @@ import library.networks as networks
 class Config(basics.Config):
   eval_task_support: str = "train"  # options:
   nsamples: int = 0  # no samples outside of train vector
-  importance_sampling_exponent: float = 0.0
 
-  conv_flat_dim: Optional[int] = 256
+  sf_net_type: str = 'mono'
+  final_conv_dim: int = 16
+  conv_flat_dim: Optional[int] = 0
   sf_layers : Tuple[int]=(128, 128)
   policy_layers : Tuple[int]=(32,)
-  head: str = 'independent'
+
+  sf_coeff: float = 1.0
+  q_coeff: float = 0.0
 
 def cumulants_from_env(data, online_preds, online_state, target_preds, target_state):
   return data.observation.observation['state_features']  # [T, B, C]
@@ -77,6 +80,9 @@ class UsfaLossFn(basics.RecurrentLossFn):
 
   index_cumulants: Callable[
     [jnp.ndarray], jnp.ndarray] = lambda x : x[:-1]
+
+  sf_coeff: float = 1.0
+  q_coeff: float = 0.5
 
   def error(self, data, online_preds, online_state, target_preds, target_state, **kwargs):
     # ======================================================
@@ -126,6 +132,20 @@ class UsfaLossFn(basics.RecurrentLossFn):
       self.index_cumulants(cumulants),  # [T, B, C]       (vmap None,1)
       discounts[:-1])  # [T, B]          (vmap None,1)
 
+
+    #---------------------
+    # Q-learning TD-error
+    # needs to happen now because will be averaging over dim N
+    #  below this.
+    #---------------------
+    task_td = self.extract_task_dim(batch_td_error)
+    task_w = self.extract_task(data)[:-1]
+    # [T, B, C]*[T, B, C] = [T, B]
+    value_td_error = (task_td*task_w).sum(-1)
+
+    #---------------------
+    # Compute average loss for SFs
+    #---------------------
     # [T, B, N, C] --> [T, B]
     # mean over cumulants, mean over # of policies
     batch_td_error = batch_td_error.mean(axis=3).mean(axis=2)
@@ -133,20 +153,27 @@ class UsfaLossFn(basics.RecurrentLossFn):
     if self.mask_loss:
       # [T, B]
       episode_mask = make_episode_mask(data, include_final=False)
-      # average over {T, N, C} --> # [B]
       batch_loss = episode_mean(
         x=(0.5 * jnp.square(batch_td_error)),
         mask=episode_mask[:-1])
     else:
       batch_loss = (0.5 * jnp.square(batch_td_error)).mean(axis=(0,2,3))
+    batch_loss = batch_loss*self.sf_coeff
 
     #---------------------
-    # Q-learning TD-error
+    # Compute average loss for Q-values
     #---------------------
-    task_td = self.extract_task_dim(batch_td_error)
-    task_w = self.extract_task(data)[:-1]
-    # [T, B, C]*[T, B, C] = [T, B]
-    value_td_error = (task_td*task_w).sum(-1)
+    if self.q_coeff > 0.0:
+      if self.mask_loss:
+        # [T, B]
+        q_batch_loss = episode_mean(
+          x=(0.5 * jnp.square(value_td_error)),
+          mask=episode_mask[:-1])
+      else:
+        q_batch_loss = (0.5 * jnp.square(value_td_error)).mean(axis=(0,2,3))
+
+      batch_loss += q_batch_loss*self.sf_coeff
+
 
 
     metrics = {
@@ -169,7 +196,7 @@ class USFAPreds(NamedTuple):
 class MonolithicSfHead(hk.Module):
   def __init__(self, layers: int, num_actions: int, state_features_dim: int,
                name: Optional[str] = None):
-    super(IndependentSfHead, self).__init__(name=name)
+    super(MonolithicSfHead, self).__init__(name=name)
     self.net = hk.nets.MLP(
         tuple(layers)+(num_actions * state_features_dim,))
     self.num_actions = num_actions
@@ -205,44 +232,44 @@ class MonolithicSfHead(hk.Module):
     assert q_values.shape[0] == self.num_actions, 'wrong shape'
     return sf, q_values
 
-# class IndependentSfHead(hk.Module):
-#   def __init__(self, layers: int, num_actions: int, state_features_dim: int,
-#                name: Optional[str] = None):
-#     super(IndependentSfHead, self).__init__(name=name)
-#     self.net_factory = lambda: hk.nets.MLP(
-#         tuple(layers)+(num_actions,))
-#     self.num_actions = num_actions
-#     self.state_features_dim = state_features_dim
+class IndependentSfHead(hk.Module):
+  def __init__(self, layers: int, num_actions: int, state_features_dim: int,
+               name: Optional[str] = None):
+    super(IndependentSfHead, self).__init__(name=name)
+    self.net_factory = lambda: hk.nets.MLP(
+        tuple(layers)+(num_actions,))
+    self.num_actions = num_actions
+    self.state_features_dim = state_features_dim
 
-#   def __call__(self,
-#                sf_input: jnp.ndarray,
-#                policy: jnp.ndarray,
-#                task: jnp.ndarray) -> jnp.ndarray:
-#     """Compute successor features and q-valuesu
+  def __call__(self,
+               sf_input: jnp.ndarray,
+               policy: jnp.ndarray,
+               task: jnp.ndarray) -> jnp.ndarray:
+    """Compute successor features and q-valuesu
     
-#     Args:
-#         inputs (jnp.ndarray): D_1
-#         policy (jnp.ndarray): D_2
-#         task (jnp.ndarray): D_1
+    Args:
+        inputs (jnp.ndarray): D_1
+        policy (jnp.ndarray): D_2
+        task (jnp.ndarray): D_1
     
-#     Returns:
-#         jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
-#     """
-#     sf_input = jnp.concatenate((sf_input, policy))  # 2D
+    Returns:
+        jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
+    """
+    sf_input = jnp.concatenate((sf_input, policy))  # 2D
 
-#     # [[A], ..., [A]]
-#     sf = [self.net_factory()(sf_input) for _ in range(self.state_features_dim)]
-#     # [A, C]
-#     sf = jnp.stack(sf, axis=1)
+    # [[A], ..., [A]]
+    sf = [self.net_factory()(sf_input) for _ in range(self.state_features_dim)]
+    # [A, C]
+    sf = jnp.stack(sf, axis=1)
 
-#     def dot(a, b): return jnp.sum(a*b).sum()
+    def dot(a, b): return jnp.sum(a*b).sum()
 
-#     # dot-product: A
-#     q_values = jax.vmap(
-#         dot, in_axes=(0, None), out_axes=0)(sf, task)
+    # dot-product: A
+    q_values = jax.vmap(
+        dot, in_axes=(0, None), out_axes=0)(sf, task)
 
-#     assert q_values.shape[0] == self.num_actions, 'wrong shape'
-#     return sf, q_values
+    assert q_values.shape[0] == self.num_actions, 'wrong shape'
+    return sf, q_values
 
 class SfGpiHead(hk.Module):
   """Universal Successor Feature Approximator GPI head"""
@@ -440,7 +467,7 @@ def make_minigrid_networks(
   def make_core_module() -> UsfaArch:
     vision_torso = networks.BabyAIVisionTorso(
         flatten=True,
-        conv_dim=0,
+        conv_dim=config.final_conv_dim,
         out_dim=config.conv_flat_dim)
 
     observation_fn = networks.OarTorso(
@@ -449,14 +476,23 @@ def make_minigrid_networks(
       output_fn=networks.TorsoOutput,
     )
 
+    if config.sf_net_type == 'ind':
+      sf_net = IndependentSfHead(
+        layers=config.sf_layers,
+        state_features_dim=state_features_dim,
+        num_actions=num_actions)
+    elif config.sf_net_type == 'mono':
+      sf_net = MonolithicSfHead(
+        layers=config.sf_layers,
+        state_features_dim=state_features_dim,
+        num_actions=num_actions)
+    else:
+      raise NotImplementedError
     usfa_head = SfGpiHead(
       num_actions=num_actions,
       state_features_dim=state_features_dim,
       nsamples=config.nsamples,
-      sf_net=MonolithicSfHead(
-          layers=config.sf_layers,
-          state_features_dim=state_features_dim,
-          num_actions=num_actions),
+      sf_net=sf_net,
       policy_layers=config.policy_layers,
       eval_task_support=config.eval_task_support)
 
