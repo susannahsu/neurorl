@@ -103,13 +103,23 @@ ModelFn = Callable[[State], Tuple[RewardLogits, PolicyLogits, ValueLogits]]
 class Config(basics.Config):
 
   # arch configs
-  state_transform_dims: Tuple[int] = (256,)
+  state_transform_dims: Optional[Tuple[int]] = None
   q_dim: int = 512
   transition_blocks: int = 2  # number of resnet blocks in model
   scale_grad: float = 0.5  # how to scale gradient in transition model
 
+  # Replay options
+  samples_per_insert: float = 50.0
+  min_replay_size: int = 1_000
+  max_replay_size: int = 100_000
+
+  # Learner options
+  batch_size: Optional[int] = 32
+  trace_length: Optional[int] = 20
+  sequence_period: Optional[int] = None
+
   rl_coeff: float = 1.0  # online RL loss coeff
-  dyna_coeff: float = 1.0  # dyna RL loss coeff
+  dyna_coeff: float = 1e-3  # dyna RL loss coeff
   reward_coeff: float = 1.0  # reward model loss
 
   # contrastive loss configs

@@ -52,7 +52,7 @@ python -m ipdb -c continue configs/biorl_trainer_2learners.py \
   --use_wandb=False \
   --wandb_entity=wcarvalho92 \
   --wandb_project=forage_debug \
-  --search='muzero'
+  --search='dynaq'
 
 # JAX does Just In Time (JIT) compilation. remove this. useful for debugging.
 JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/biorl_trainer_2learners.py \
@@ -62,7 +62,7 @@ JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/biorl_trainer_2learners.py 
   --use_wandb=False \
   --wandb_entity=wcarvalho92 \
   --wandb_project=forage_debug \
-  --search='muzero'
+  --search='dynaq'
 
 # launch jobs on slurm
 python configs/biorl_trainer_2learners.py \
@@ -72,13 +72,13 @@ python configs/biorl_trainer_2learners.py \
   --account=kempner_fellows \
   --wandb_entity=wcarvalho92 \
   --wandb_project=forage \
-  --search='muzero'
+  --search='dynaq'
 
 """
 
 import sys
 import functools 
-from typing import List, Sequence, Optional, Callable
+from typing import List, Sequence, Optional, Callable, Optional
 
 import dataclasses
 from absl import flags
@@ -106,12 +106,13 @@ from acme.tf import savers
 from acme.utils import counting
 
 import jax
-import reverb
-from reverb import structured_writer as sw
-from ray import tune
 import gymnasium
 import dm_env
 import minigrid
+import numpy as np
+from ray import tune
+import reverb
+from reverb import structured_writer as sw
 
 from envs.minigrid_wrappers import DictObservationSpaceWrapper
 
@@ -146,7 +147,7 @@ class TwoLearnerConfig:
   learn_online: bool = True
   online_burn_in_length: int = 0
   online_batch_size: int = 1  # number of batch elements
-  online_update_period: int = 20  # time-window
+  online_update_period: int = 16  # time-window
   num_online_updates: int = 1
 
   # offline learner options
@@ -155,11 +156,48 @@ class TwoLearnerConfig:
   offline_burn_in_length: int = 0
   offline_trace_length: int = 0 # number of learning steps
   offline_batch_size: int = 32
-  offline_update_period: int = 2_000  # how often learner updated offline
-  num_offline_updates: int = 100
+  offline_update_period: Optional[int] = None  # how often learner updated offline. if none, at end of episode.
+  num_offline_updates: int = 20
 
   sequence_period: int = 40  # how often data is added to buffer
   trace_length: int = 1  # how often data is added to buffer
+
+def make_environment(seed: int,
+                     level="BabyAI-GoToRedBallNoDists-v0",
+                     evaluation: bool = False,
+                     **kwargs) -> dm_env.Environment:
+  """Loads environments. For now, just "goto X" from minigrid. change as needed.
+  
+  Args:
+      evaluation (bool, optional): whether evaluation.
+  
+  Returns:
+      dm_env.Environment: Multitask environment is returned.
+  """
+  del seed
+  del evaluation
+
+  # create gymnasium.Gym environment
+  # environments: https://minigrid.farama.org/environments/babyai/
+  env = gymnasium.make(level)
+  env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
+  env = DictObservationSpaceWrapper(env)
+
+  # convert to dm_env.Environment enironment
+  env = GymWrapper(env)
+
+  ####################################
+  # ACME wrappers
+  ####################################
+  # add acme wrappers
+  wrapper_list = [
+    # put action + reward in observation
+    acme_wrappers.ObservationActionRewardWrapper,
+    # cheaper to do computation in single precision
+    acme_wrappers.SinglePrecisionWrapper,
+  ]
+
+  return acme_wrappers.wrap_all(env, wrapper_list)
 
 
 def run_experiment(
@@ -254,6 +292,21 @@ def run_experiment(
   extras_spec = policy.get_extras(dummy_actor_state)
 
   assert config.learn_offline or config.learn_online
+
+  offline_update_period = config.offline_update_period
+  #-------------
+  # if have not set offline update period, use episode length
+  #-------------
+  if offline_update_period is None and config.learn_offline:
+    timestep = environment.reset()
+    episode_length = 1
+    while not timestep.last():
+      num_actions = environment_spec.actions.num_values
+      random_action = np.random.randint(num_actions)
+      timestep = environment.step(random_action)
+      episode_length += 1
+    offline_update_period = episode_length
+
   #################################################
   # ONLINE BUFFER
   # -------------
@@ -499,11 +552,12 @@ def run_experiment(
   #################################################
   # Make train and eval environment actors
   #################################################
+
   variable_client = variable_utils.VariableClient(
       offline_learner if config.learn_offline else online_learner,
       key='actor_variables',
       # how often to update actor with parameters
-      update_period=length_between_online_updates if config.learn_online else config.offline_update_period)
+      update_period=length_between_online_updates if config.learn_online else offline_update_period)
 
   actor_adders = []
   if config.learn_offline:
@@ -626,7 +680,7 @@ def run_experiment(
         training_state, trained = maybe_update(
             step_count=step_count,
             num_updates=config.num_offline_updates,
-            period=config.offline_update_period,
+            period=offline_update_period,
             training_state=training_state,
             table=offline_replay_tables[0],
             learner=offline_learner,
@@ -663,43 +717,6 @@ def run_experiment(
 
   environment.close()
 
-def make_environment(seed: int,
-                     level="BabyAI-GoToRedBallNoDists-v0",
-                     evaluation: bool = False,
-                     **kwargs) -> dm_env.Environment:
-  """Loads environments. For now, just "goto X" from minigrid. change as needed.
-  
-  Args:
-      evaluation (bool, optional): whether evaluation.
-  
-  Returns:
-      dm_env.Environment: Multitask environment is returned.
-  """
-  del seed
-  del evaluation
-
-  # create gymnasium.Gym environment
-  # environments: https://minigrid.farama.org/environments/babyai/
-  env = gymnasium.make(level)
-  env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
-  env = DictObservationSpaceWrapper(env)
-
-  # convert to dm_env.Environment enironment
-  env = GymWrapper(env)
-
-  ####################################
-  # ACME wrappers
-  ####################################
-  # add acme wrappers
-  wrapper_list = [
-    # put action + reward in observation
-    acme_wrappers.ObservationActionRewardWrapper,
-    # cheaper to do computation in single precision
-    acme_wrappers.SinglePrecisionWrapper,
-  ]
-
-  return acme_wrappers.wrap_all(env, wrapper_list)
-
 def train_single(
     env_kwargs: dict = None,
     wandb_init_kwargs: dict = None,
@@ -730,9 +747,11 @@ def train_single(
     elif agent == 'qlearning_contrast':
       # Q-learning + model-learning but NO DYNA
       config_kwargs['learn_offline'] = False
-    elif agent == 'qleadynaqrning_contrast':
+    elif agent == 'dynaq':
       # Q-learning + model-learning + DYNA
       pass  # nothing special
+    else:
+      logging.warning(f"agent '{agent}' settings not found. defauting to dynaq")
 
     config = utils.merge_configs(
         dataclass_configs=[
@@ -1035,22 +1054,24 @@ def sweep(search: str = 'default'):
             "seed": tune.grid_search([1]),
             "group": tune.grid_search(['qlearning-3']),
             "online_update_period": tune.grid_search([16, 32, 64, 128]),
-            "state_transform_dims": tune.grid_search([[], [256]]),
             "env.level": tune.grid_search([
                 "BabyAI-GoToRedBallNoDists-v0",
-                # "BabyAI-GoToObjS6-v1",
+                "BabyAI-GoToObjS6-v1",
             ]),
         },
-        # {
-        #     "agent": tune.grid_search(['qlearning_contrast']),
-        #     "seed": tune.grid_search([1]),
-        #     "group": tune.grid_search(['qlearning-1']),
-        #     "model_coeff": tune.grid_search([1e-2, 1e-3, 1e-4, 1e-5]),
-        #     "env.level": tune.grid_search([
-        #         "BabyAI-GoToRedBallNoDists-v0",
-        #         # "BabyAI-GoToObjS6-v1",
-        #     ]),
-        # },
+    ]
+  elif search == 'qcontrast':
+    space = [
+      {
+        "agent": tune.grid_search(['qlearning_contrast']),
+        "seed": tune.grid_search([1]),
+        "group": tune.grid_search(['qcontrast-1']),
+        "num_online_updates": tune.grid_search([1, 2, 4, 8]),
+        "env.level": tune.grid_search([
+            "BabyAI-GoToRedBallNoDists-v0",
+            "BabyAI-GoToObjS6-v1",
+        ]),
+      },
     ]
   elif search == 'dynaq':
     space = [
@@ -1059,25 +1080,23 @@ def sweep(search: str = 'default'):
             "seed": tune.grid_search([1]),
             "group": tune.grid_search(['dynaq-1']),
             "online_update_period": tune.grid_search([16]),
-            "offline_update_period": tune.grid_search([2_000]),
-            "num_offline_updates": tune.grid_search([10]),
+            "offline_update_period": tune.grid_search([None]),
+            "num_offline_updates": tune.grid_search([1, 5, 20, 50, 100]),
             "env.level": tune.grid_search([
                 "BabyAI-GoToRedBallNoDists-v0",
                 # "BabyAI-GoToObjS6-v1",
             ]),
         }
     ]
-  elif search == 'muzero':
+  elif search == 'baselines':
     space = [
         {
-            "agent": tune.grid_search(['muzero']),
-            "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['muzero-1']),
-            "offline_update_period": tune.grid_search([2_000]),
-            "num_offline_updates": tune.grid_search([1, 10]),
+            "agent": tune.grid_search(['qlearning', 'qlearning_contrast', 'dynaq']),
+            "seed": tune.grid_search([1, 2, 3]),
+            "group": tune.grid_search(['baseline-results-1']),
             "env.level": tune.grid_search([
                 "BabyAI-GoToRedBallNoDists-v0",
-                # "BabyAI-GoToObjS6-v1",
+                "BabyAI-GoToObjS6-v1",
             ]),
         }
     ]
