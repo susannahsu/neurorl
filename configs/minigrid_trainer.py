@@ -442,54 +442,29 @@ def run_many():
 def sweep(search: str = 'default'):
   if search == 'baselines':
     space = [
-        {
-            "group": tune.grid_search(['dyna-1']),
-            "agent": tune.grid_search(['dyna']),
-            "seed": tune.grid_search([1]),
-            "env.level": tune.grid_search([
-                "BabyAI-GoToRedBallNoDists-v0",
-                "BabyAI-GoToObjS6-v1",
-            ]),
-        }
-    ]
-
-  elif search == 'dyna':
-    space = [
-        {
-            "group": tune.grid_search(['dyna-contrast-1']),
-            "num_steps": tune.grid_search([1e6]),
-            "min_replay_size": tune.grid_search([1_000]),
-            "agent": tune.grid_search(['dyna']),
-            "seed": tune.grid_search([1]),
-            "state_transform_dims": tune.grid_search([[], [256]]),
-            "model_coeff": tune.grid_search(
-              [1e-1, 1e-2, 1e-3, 1e-4]),
-            "dyna_coeff": tune.grid_search([0.0]),
-            "env.rows": tune.grid_search([5]),
-        }
-    ]
-  elif search == 'muzero':
-    space = [
-        # {
-        #     "group": tune.grid_search(['muzero-run-2']),
-        #     "agent": tune.grid_search(['muzero']),
-        #     "seed": tune.grid_search([1]),
-        #     "warmup_steps": tune.grid_search([1_000]),
-        #     "lr_transition_steps": tune.grid_search([1_000, 100_000]),
-        #     "env.level": tune.grid_search([
-        #         "BabyAI-GoToRedBallNoDists-v0",
-        #     ]),
-        # },
-        {
-            "group": tune.grid_search(['muzero-run-6']),
-            "agent": tune.grid_search(['muzero']),
-            "seed": tune.grid_search([1]),
-            # "samples_per_insert_tolerance_rate": tune.grid_search([.5, 1., 10.]),
-            "samples_per_insert": tune.grid_search([50., 25.]),
-            "env.level": tune.grid_search([
-                "BabyAI-GoToRedBallNoDists-v0",
-            ]),
-        }
+      # MuZero + Q-learning
+      {
+          "group": tune.grid_search(['baselines-2']),
+          "agent": tune.grid_search(['muzero', 'qlearning']),
+          "seed": tune.grid_search([1]),
+          "env.level": tune.grid_search([
+              "BabyAI-GoToRedBallNoDists-v0",
+              "BabyAI-GoToObjS6-v1",
+          ]),
+      },
+      # DYNA baselines. 
+      # when dyna_coeff=0.0, Q-learning + contrastive learning
+      {
+          "group": tune.grid_search(['dyna-full-1']),
+          "num_steps": tune.grid_search([1e6]),
+          "agent": tune.grid_search(['dyna']),
+          "seed": tune.grid_search([1]),
+          "dyna_coeff": tune.grid_search([0.0, 1e-3]),
+          "env.level": tune.grid_search([
+              "BabyAI-GoToRedBallNoDists-v0",
+              "BabyAI-GoToObjS6-v1",
+          ]),
+      }
     ]
   else:
     raise NotImplementedError(search)
