@@ -591,7 +591,7 @@ def sweep(search: str = 'default'):
     space = [
         {
             "group": tune.grid_search(['run-2']),
-            "num_steps": tune.grid_search([10e6]),
+            "num_steps": tune.grid_search([50e6]),
             #"agent": tune.grid_search(['qlearning', 'muzero']),
             "agent": tune.grid_search(['muzero', 'qlearning']),
             "num_bins": tune.grid_search([101]), 
@@ -603,7 +603,7 @@ def sweep(search: str = 'default'):
     space = [
         {
             "agent": tune.grid_search(['muzero']),
-            "num_steps": tune.grid_search([10e6]),
+            "num_steps": tune.grid_search([50e6]),
             "seed": tune.grid_search([1]),
             "seed": tune.grid_search([1]),
             "env.difficulty": tune.grid_search([2,3,7]),
