@@ -186,6 +186,8 @@ class ObjectTestTask:
        self.start_room_color = start_room_color
        self.feature_counts = self.feature_cnstr.empty_state_features()
        self.prior_counts = self.feature_cnstr.empty_state_features()
+       self.feature_counts = self.feature_counts.astype(np.int32)
+       self.prior_counts = self.prior_counts.astype(np.int32)
        self.timestep = 0
 
 
@@ -216,7 +218,6 @@ class ObjectTestTask:
           env.carrying.color, env.carrying.type)
         if idx >=0:
           self.feature_counts[idx] += 1
-        # print(f"{self.timestep}: picked up {env.carrying.color} {env.carrying.type}")
 
       #=======================
       # Did the agent enter a new room?
@@ -229,13 +230,12 @@ class ObjectTestTask:
           room_color, "room")
         if idx >=0:
           self.feature_counts[idx] += 1
-        # print(f"{self.timestep}: entered {room_color} room")
 
       #=======================
       # Did the agent enter a new room
       #=======================
       first = (self.feature_counts == 1).astype(np.float32)
-      difference = self.feature_counts - self.prior_counts
+      difference = (self.feature_counts - self.prior_counts).astype(np.float32)
       state_features = first*difference
 
       #=======================

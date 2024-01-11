@@ -105,6 +105,22 @@ FLAGS = flags.FLAGS
 
 
 @dataclasses.dataclass
+class UsfaConfig(usfa.Config):
+  eval_task_support: str = "train"  # options:
+  nsamples: int = 0  # no samples outside of train vector
+  importance_sampling_exponent: float = 0.6
+
+  sf_net_type: str = 'mono'
+  final_conv_dim: int = 16
+  conv_flat_dim: Optional[int] = 0
+  sf_layers : Tuple[int]=(128, 128)
+  policy_layers : Tuple[int]=()
+
+  sf_coeff: float = 1.0
+  q_coeff: float = 0.5
+
+
+@dataclasses.dataclass
 class MuZeroConfig(muzero.Config):
   """Configuration options for MuZero agent."""
   trace_length: int = 40
@@ -322,7 +338,7 @@ def setup_experiment_inputs(
     env_kwargs['object_options'] = False
 
 
-    config = usfa.Config(**config_kwargs)
+    config = UsfaConfig(**config_kwargs)
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=functools.partial(
@@ -336,6 +352,8 @@ def setup_experiment_inputs(
         max_replay_size=config.max_replay_size,
         max_priority_weight=config.max_priority_weight,
         bootstrap_n=config.bootstrap_n,
+        sf_coeff=config.sf_coeff,
+        q_coeff=config.q_coeff,
       ))
     network_factory = functools.partial(
             usfa.make_minigrid_networks, config=config)
@@ -676,45 +694,32 @@ def sweep(search: str = 'default'):
   elif search == 'sf':
     space = [
         # {
-        #     "num_steps": tune.grid_search([15e6]),
+        #     "num_steps": tune.grid_search([100e6]),
         #     "agent": tune.grid_search(['flat_usfa']),
         #     "seed": tune.grid_search([1]),
-        #     "group": tune.grid_search(['sf-test-12-q-final_conv_dim']),
-        #     "env.setting": tune.grid_search([0]),
-        #     "samples_per_insert": tune.grid_search([0]),
-        #     "importance_sampling_exponent": tune.grid_search([.6]),
-        #     "final_conv_dim": tune.grid_search([16]),
-        #     "conv_flat_dim": tune.grid_search([0]),
-        #     "sf_layers": tune.grid_search([[512, 512], [1024]]),
-        #     "policy_layers": tune.grid_search([[], [32]]),
-        # },
-        # {
-        #     "num_steps": tune.grid_search([15e6]),
-        #     "agent": tune.grid_search(['flat_usfa']),
-        #     "seed": tune.grid_search([1]),
-        #     "group": tune.grid_search(['sf-test-12-q-conv_flat_dim']),
+        #     "group": tune.grid_search(['sf-flat-16']),
         #     "env.setting": tune.grid_search([0]),
         #     "samples_per_insert": tune.grid_search([0]),
         #     "importance_sampling_exponent": tune.grid_search([.6]),
         #     "final_conv_dim": tune.grid_search([0]),
-        #     # "trace_length": tune.grid_search([40]),
-        #     # "batch_size": tune.grid_search([32, 64]),
         #     "conv_flat_dim": tune.grid_search([256]),
+        #     'sf_net_type': tune.grid_search(['ind', 'mono']),
         #     "sf_layers": tune.grid_search([[512, 512]]),
         #     "policy_layers": tune.grid_search([[]]),
         # },
         {
-            "num_steps": tune.grid_search([15e6]),
+            "num_steps": tune.grid_search([100e6]),
             "agent": tune.grid_search(['flat_usfa']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['sf-test-14-ind-avg']),
+            "group": tune.grid_search(['sf-flat-17']),
             "env.setting": tune.grid_search([0]),
             "samples_per_insert": tune.grid_search([0]),
             "importance_sampling_exponent": tune.grid_search([.6]),
             "final_conv_dim": tune.grid_search([16]),
             "conv_flat_dim": tune.grid_search([0]),
-            'head': tune.grid_search(['ind']),
-            "sf_layers": tune.grid_search([[512], [512, 512], [1024]]),
+            'sf_net_type': tune.grid_search(['ind', 'mono']),
+            "sf_layers": tune.grid_search([
+              [512, 512], [1024], [1024, 1024]]),
             "policy_layers": tune.grid_search([[]]),
         },
     ]
