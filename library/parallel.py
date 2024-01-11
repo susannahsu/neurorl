@@ -347,8 +347,9 @@ def run_sbatch(
 
     # dir will be root_path/folder/group/exp_name
     # exp_name is also name in wandb
+    base_path = os.path.join(root_path, folder, search_name)
     log_dir, exp_name = gen_log_dir(
-      base_dir=os.path.join(root_path, folder, group),
+      base_dir=os.path.join(base_path, group),
       return_kwpath=True,
       path_skip=['num_steps', 'num_learner_steps', 'group'],
       **agent_config,
@@ -373,7 +374,7 @@ def run_sbatch(
   # save configs for all runs
   #################################
   # root_path/run_{search_name}-date-hour.pkl
-  base_path = os.path.join(root_path, folder, 'runs', search_name)
+  base_path = os.path.join(base_path, 'runs')
   paths.process_path(base_path)
 
   base_filename = os.path.join(base_path, date_time(time=True))
