@@ -19,7 +19,7 @@ import library.utils as utils
 
 flags.DEFINE_integer('num_actors', 6, 'number of actors.')
 flags.DEFINE_integer('config_idx', 1, 'number of actors.')
-flags.DEFINE_integer('num_cpus', 32, 'number of cpus.')
+flags.DEFINE_integer('num_cpus', 16, 'number of cpus.')
 flags.DEFINE_integer('memory', 120_000, 'memory (in mbs).')
 flags.DEFINE_integer('max_concurrent', 12, 'number of concurrent jobs')
 flags.DEFINE_string('account', '', 'account on slurm servers to use.')
@@ -325,7 +325,7 @@ def run_sbatch(
     run_distributed: bool = True):
   """For each possible configuration of a run, create a config entry. save a list of all config entries. When SBATCH is called, it will use the ${SLURM_ARRAY_TASK_ID} to run a particular one.
   """
-
+  wandb_init_kwargs = wandb_init_kwargs or dict()
   #################################
   # create configs for all runs
   #################################
@@ -347,8 +347,9 @@ def run_sbatch(
 
     # dir will be root_path/folder/group/exp_name
     # exp_name is also name in wandb
+    base_path = os.path.join(root_path, folder, search_name)
     log_dir, exp_name = gen_log_dir(
-      base_dir=os.path.join(root_path, folder, group),
+      base_dir=os.path.join(base_path, group),
       return_kwpath=True,
       path_skip=['num_steps', 'num_learner_steps', 'group'],
       **agent_config,
@@ -364,19 +365,16 @@ def run_sbatch(
       folder=log_dir,
       num_actors=num_actors,
       run_distributed=run_distributed,
+      wandb_project=wandb_init_kwargs.get('project', None),
+      wandb_entity=wandb_init_kwargs.get('entity', None),
     )
-    if wandb_init_kwargs:
-      save_config.update(
-        wandb_project=wandb_init_kwargs['project'],
-        wandb_entity=wandb_init_kwargs['entity'],
-      )
     save_configs.append(save_config)
 
   #################################
   # save configs for all runs
   #################################
   # root_path/run_{search_name}-date-hour.pkl
-  base_path = os.path.join(root_path, folder, 'runs', search_name)
+  base_path = os.path.join(base_path, 'runs')
   paths.process_path(base_path)
 
   base_filename = os.path.join(base_path, date_time(time=True))
@@ -418,6 +416,7 @@ def run_sbatch(
   #################################
   # create sbatch file
   #################################
+  base_filename = os.path.join(base_path, date_time(time=False))
   sbatch_contents = f"#SBATCH --gres=gpu:{FLAGS.num_gpus}\n"
   sbatch_contents += f"#SBATCH -c {FLAGS.num_cpus}\n"
   sbatch_contents += f"#SBATCH --mem {FLAGS.memory}\n"
@@ -425,8 +424,8 @@ def run_sbatch(
   sbatch_contents += f"#SBATCH -p {FLAGS.partition}\n"
   sbatch_contents += f"#SBATCH -t {FLAGS.time}"
   sbatch_contents += f"#SBATCH --account {FLAGS.account}\n"
-  sbatch_contents += f"#SBATCH -o {base_filename}_id=%j.out\n"
-  sbatch_contents += f"#SBATCH -e {base_filename}_id=%j.err\n"
+  sbatch_contents += f"#SBATCH -o {base_filename}/id=%j.out\n"
+  sbatch_contents += f"#SBATCH -e {base_filename}/id=%j.err\n"
 
   run_file_contents = "#!/bin/bash\n" + sbatch_contents + python_file_contents
   print("-"*20)
