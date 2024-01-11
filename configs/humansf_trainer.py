@@ -126,6 +126,22 @@ class UsfaConfig(usfa.Config):
   eval_task_support: str = "train"  # options:
 
 @dataclasses.dataclass
+class UsfaConfig(usfa.Config):
+  eval_task_support: str = "train"  # options:
+  nsamples: int = 0  # no samples outside of train vector
+  importance_sampling_exponent: float = 0.6
+
+  sf_net_type: str = 'mono'
+  final_conv_dim: int = 16
+  conv_flat_dim: Optional[int] = 0
+  sf_layers : Tuple[int]=(128, 128)
+  policy_layers : Tuple[int]=()
+
+  sf_coeff: float = 1.0
+  q_coeff: float = 0.5
+
+
+@dataclasses.dataclass
 class MuZeroConfig(muzero.Config):
   """Configuration options for MuZero agent."""
   trace_length: int = 20

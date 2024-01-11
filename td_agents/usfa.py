@@ -87,7 +87,7 @@ class UsfaLossFn(basics.RecurrentLossFn):
   extract_task_dim: Callable = lambda x: x[:, :, 0]
 
   sf_coeff: float = 1.0
-  q_coeff: float = 0.5
+  q_coeff: float = 0.0
 
   def error(self, data, online_preds, online_state, target_preds, target_state, **kwargs):
     # ======================================================
@@ -168,6 +168,7 @@ class UsfaLossFn(basics.RecurrentLossFn):
     #---------------------
     # Compute average loss for Q-values
     #---------------------
+
     q_loss = jnp.zeros_like(batch_loss)
     if self.q_coeff > 0.0:
       if self.mask_loss:
