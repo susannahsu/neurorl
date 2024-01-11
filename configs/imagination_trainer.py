@@ -120,17 +120,17 @@ def observation_encoder(
     max_num_stacks: int=mental_blocks.MAX_STACKS,
     max_num_blocks: int=mental_blocks.MAX_BLOCKS):
   # create embeddings for different elements in state repr
-  cur_stack_embed = hk.Linear(512, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
-  table_stack_embed = hk.Linear(256, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  cur_stack_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  table_stack_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
   goal_stack_embed = cur_stack_embed
-  intersection_embed = hk.Linear(128, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
-  cur_pointer_embed = hk.Linear(128, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  intersection_embed = hk.Linear(16, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  cur_pointer_embed = hk.Linear(16, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
   table_pointer_embed = cur_pointer_embed
-  input_parsed_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  input_parsed_embed = hk.Linear(16, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
   goal_parsed_embed = input_parsed_embed
   # backbone of the encoder: mlp with relu
-  mlp = hk.nets.MLP([512,256,128], activate_final=True) # default RELU activations between layers (and after final layer)
-  def fn(x, dropout_rate=0.1):
+  mlp = hk.nets.MLP([128,128], activate_final=True) # default RELU activations between layers (and after final layer)
+  def fn(x, dropout_rate=None):
     # concatenate embeddings and previous reward and action
     x = jnp.concatenate((
         cur_stack_embed(x.observation[:max_num_stacks*max_num_blocks, :].reshape(-1)),
@@ -146,7 +146,7 @@ def observation_encoder(
       ))
     # relu first, then mlp, relu
     x = jax.nn.relu(x)
-    return mlp(x, dropout_rate=dropout_rate, rng=1)
+    return mlp(x, dropout_rate=dropout_rate)
   # If there's a batch dim, applies vmap first.
   has_batch_dim = inputs.reward.ndim > 0
   if has_batch_dim: # have batch dimension

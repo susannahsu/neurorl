@@ -39,6 +39,8 @@ class Simulator():
 		self.state_size = self.state.size # total number of elements in flattened state matrix
 		num_valid_blocks = [[1 for _ in goal_stack] for goal_stack in goal_stacks]
 		self.num_valid_blocks = sum(sum(l) for l in num_valid_blocks)
+		self.reward_upper_bound = sum([self.base_block_reward / (self.reward_decay_factor**(intersection+1)) for istack in range(len(goal_stacks)) for jblock in range(len(goal_stacks[istack])) for intersection in range(jblock+1)]) - self.action_cost
+		self.reward_lower_bound = -self.action_cost*3
 		self.max_episode_reward = sum([self.base_block_reward / (self.reward_decay_factor**(intersection+1)) for istack in range(len(goal_stacks)) for jblock in range(len(goal_stacks[istack])) for intersection in range(jblock+1)] 
 								+ [-5*action_cost for istack in range(len(goal_stacks)) for _ in range(len(goal_stacks[istack]))]
 								+ [-1*action_cost for _ in range(len(goal_stacks)) ] + [-action_cost, -action_cost])
@@ -190,7 +192,8 @@ class Simulator():
 		self.current_time += 1
 		if self.current_time >= self.max_steps:
 			truncated = True
-		return self.state.copy(), reward, terminated, truncated, info
+		normalized_reward = 2*(reward - self.reward_lower_bound)/(self.reward_upper_bound-self.reward_lower_bound) - 1
+		return self.state.copy(), normalized_reward, terminated, truncated, info
 
 
 	def __intersection(self, curstack, goalstack):
