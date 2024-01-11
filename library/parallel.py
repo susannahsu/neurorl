@@ -416,6 +416,7 @@ def run_sbatch(
   #################################
   # create sbatch file
   #################################
+  base_filename = os.path.join(base_path, date_time(time=False))
   sbatch_contents = f"#SBATCH --gres=gpu:{FLAGS.num_gpus}\n"
   sbatch_contents += f"#SBATCH -c {FLAGS.num_cpus}\n"
   sbatch_contents += f"#SBATCH --mem {FLAGS.memory}\n"
@@ -423,8 +424,8 @@ def run_sbatch(
   sbatch_contents += f"#SBATCH -p {FLAGS.partition}\n"
   sbatch_contents += f"#SBATCH -t {FLAGS.time}"
   sbatch_contents += f"#SBATCH --account {FLAGS.account}\n"
-  sbatch_contents += f"#SBATCH -o {base_filename}_id=%j.out\n"
-  sbatch_contents += f"#SBATCH -e {base_filename}_id=%j.err\n"
+  sbatch_contents += f"#SBATCH -o {base_filename}/id=%j.out\n"
+  sbatch_contents += f"#SBATCH -e {base_filename}/id=%j.err\n"
 
   run_file_contents = "#!/bin/bash\n" + sbatch_contents + python_file_contents
   print("-"*20)
