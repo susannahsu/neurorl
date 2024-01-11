@@ -72,7 +72,7 @@ from td_agents import q_learning, basics, muzero
 from library import muzero_mlps
 
 from library.dm_env_wrappers import GymWrapper
-import library.env_wrappers as env_wrappers
+#import library.env_wrappers as env_wrappers
 import library.experiment_builder as experiment_builder
 import library.parallel as parallel
 import library.utils as utils
@@ -94,11 +94,12 @@ FLAGS = flags.FLAGS
 
 State = jax.Array
 
+"""
 def observation_encoder(
     inputs: acme_wrappers.observation_action_reward.OAR,
     num_actions: int):
-  """Dummy function that just concatenations obs, action, reward.
-  If there's a batch dim, applies vmap first."""
+  #Dummy function that just concatenations obs, action, reward.
+  #If there's a batch dim, applies vmap first.
   def fn(x):
     x = jnp.concatenate((
       x.observation.reshape(-1),  #[N*D]
@@ -109,6 +110,46 @@ def observation_encoder(
   has_batch_dim = inputs.reward.ndim > 0
   if has_batch_dim:
     # have batch dimension
+    fn = jax.vmap(fn)
+  return fn(inputs)
+"""
+
+def observation_encoder(
+    inputs: acme_wrappers.observation_action_reward.OAR,
+    num_actions: int,
+    max_num_stacks: int=mental_blocks.MAX_STACKS,
+    max_num_blocks: int=mental_blocks.MAX_BLOCKS):
+  # create embeddings for different elements in state repr
+  cur_stack_embed = hk.Linear(512, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  table_stack_embed = hk.Linear(256, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  goal_stack_embed = cur_stack_embed
+  intersection_embed = hk.Linear(128, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  cur_pointer_embed = hk.Linear(128, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  table_pointer_embed = cur_pointer_embed
+  input_parsed_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  goal_parsed_embed = input_parsed_embed
+  # backbone of the encoder: mlp with relu
+  mlp = hk.nets.MLP([512,256,128], activate_final=True) # default RELU activations between layers (and after final layer)
+  def fn(x, dropout_rate=0.1):
+    # concatenate embeddings and previous reward and action
+    x = jnp.concatenate((
+        cur_stack_embed(x.observation[:max_num_stacks*max_num_blocks, :].reshape(-1)),
+        table_stack_embed(x.observation[max_num_stacks*max_num_blocks:max_num_stacks*max_num_blocks+max_num_blocks, :].reshape(-1)),
+        goal_stack_embed(x.observation[max_num_stacks*max_num_blocks+max_num_blocks:2*max_num_stacks*max_num_blocks+max_num_blocks, :].reshape(-1)),
+        intersection_embed(x.observation[2*max_num_stacks*max_num_blocks+max_num_blocks:2*max_num_stacks*max_num_blocks+max_num_blocks+max_num_stacks, :].reshape(-1)),
+        cur_pointer_embed(x.observation[-4, :].reshape(-1)),
+        table_pointer_embed(x.observation[-3, :].reshape(-1)),
+        input_parsed_embed(x.observation[-2, :].reshape(-1)),
+        goal_parsed_embed(x.observation[-1, :].reshape(-1)),
+        jnp.expand_dims(jnp.tanh(x.reward), 0),   # [1]
+        jax.nn.one_hot(x.action, num_actions)  # [A]
+      ))
+    # relu first, then mlp, relu
+    x = jax.nn.relu(x)
+    return mlp(x, dropout_rate=dropout_rate, rng=1)
+  # If there's a batch dim, applies vmap first.
+  has_batch_dim = inputs.reward.ndim > 0
+  if has_batch_dim: # have batch dimension
     fn = jax.vmap(fn)
   return fn(inputs)
 
@@ -245,7 +286,7 @@ def make_muzero_networks(
 
 
 def make_environment(seed: int,
-                     difficulty: int= 1,
+                     difficulty: int= 2,
                      evaluation: bool = False,
                      **kwargs) -> dm_env.Environment:
   """Loads environments. 
@@ -550,7 +591,10 @@ def sweep(search: str = 'default'):
     space = [
         {
             "group": tune.grid_search(['run-2']),
-            "agent": tune.grid_search(['qlearning', 'muzero']),
+            "num_steps": tune.grid_search([10e6]),
+            #"agent": tune.grid_search(['qlearning', 'muzero']),
+            "agent": tune.grid_search(['muzero', 'qlearning']),
+            "num_bins": tune.grid_search([101]), 
             "seed": tune.grid_search([1]),
             "env.difficulty": tune.grid_search([2]),
         }
@@ -559,9 +603,10 @@ def sweep(search: str = 'default'):
     space = [
         {
             "agent": tune.grid_search(['muzero']),
+            "num_steps": tune.grid_search([10e6]),
             "seed": tune.grid_search([1]),
             "seed": tune.grid_search([1]),
-            "env.difficulty": tune.grid_search([7]),
+            "env.difficulty": tune.grid_search([2,3,7]),
         }
     ]
 
