@@ -504,7 +504,7 @@ class KeyRoomObjectTest(LevelGen):
 def dict_mean(dict_list):
     mean_dict = {}
     for key in dict_list[0].keys():
-        mean_dict[key] = sum(d[key] for d in dict_list) / len(dict_list)
+        mean_dict[key] = sum(d.get(key, 0) for d in dict_list) / len(dict_list)
     return mean_dict
 
 class ObjectCountObserver(LevelAvgObserver):
@@ -535,6 +535,7 @@ class ObjectCountObserver(LevelAvgObserver):
     if self.idx % self.reset == 0 and self.logging:
 
       for key, counts in self.results.items():
+
         # {name: counts}
         data = dict_mean(counts)
 

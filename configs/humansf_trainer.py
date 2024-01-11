@@ -103,34 +103,39 @@ flags.DEFINE_bool(
     'auto_name_wandb', True, 'automatically name wandb.')
 FLAGS = flags.FLAGS
 
+@dataclasses.dataclass
+class QlearningConfig(q_learning.Config):
+  samples_per_insert: float = 0.0
 
 @dataclasses.dataclass
 class UsfaConfig(usfa.Config):
-  eval_task_support: str = "train"  # options:
-  nsamples: int = 0  # no samples outside of train vector
-  importance_sampling_exponent: float = 0.6
 
-  sf_net_type: str = 'mono'
+  # arch
   final_conv_dim: int = 16
   conv_flat_dim: Optional[int] = 0
-  sf_layers : Tuple[int]=(128, 128)
+  sf_layers : Tuple[int]=(1024,)
   policy_layers : Tuple[int]=()
 
+  # learner
+  importance_sampling_exponent: float = 0.6
+  samples_per_insert: float = 0.0
   sf_coeff: float = 1.0
-  q_coeff: float = 0.5
+  q_coeff: float = 1.0
 
+  # eval actor
+  eval_task_support: str = "train"  # options:
 
 @dataclasses.dataclass
 class MuZeroConfig(muzero.Config):
   """Configuration options for MuZero agent."""
-  trace_length: int = 40
+  trace_length: int = 20
   min_scalar_value: Optional[float] = None
   num_bins: Optional[int] = 81  # number of bins for two-hot rep
   scalar_step_size: Optional[float] = None  # step size between bins
   value_target_source: str = 'return'
 
   value_layers: Tuple[int] = (512, 512)
-  reward_layers: Tuple[int] = (128)
+  reward_layers: Tuple[int] = (128,)
 
 class TestOptions(Enum):
   shape = 0
@@ -312,7 +317,7 @@ def setup_experiment_inputs(
     # has no mechanism to select from object options since dependent on what agent sees
     env_kwargs['object_options'] = False
 
-    config = q_learning.Config(**config_kwargs)
+    config = QlearningConfig(**config_kwargs)
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=functools.partial(
@@ -492,10 +497,11 @@ def train_single(
     env_kwargs=env_kwargs,
     debug=debug)
 
+  env_setting = experiment_config_inputs.final_env_kwargs['setting']
   logger_factory_kwargs = dict(
-    actor_label="actor",
-    evaluator_label="evaluator",
-    learner_label="learner",
+    actor_label=f"actor-{env_setting}",
+    evaluator_label=f"evaluator-{env_setting}",
+    learner_label=f"learner",
   )
 
   experiment = experiment_builder.build_online_experiment_config(
@@ -653,27 +659,22 @@ def sweep(search: str = 'default'):
         {
             "num_steps": tune.grid_search([20e6]),
             "agent": tune.grid_search(['flat_muzero', 'flat_q']),
-            "seed": tune.grid_search([1, 2, 3]),
-            "group": tune.grid_search(['baselines-1']),
-            "env.setting": tune.grid_search([0, 1]),
-            # "samples_per_insert": tune.grid_search([10]),
-            # "epsilon_steps": tune.grid_search([6e6]),
-            # "env.transfer_task_option": tune.grid_search([0]),
+            "seed": tune.grid_search([4]),
+            "group": tune.grid_search(['baselines-5']),
+            "env.setting": tune.grid_search([0, 1, 2]),
+        },
+        {
+            "num_steps": tune.grid_search([20e6]),
+            "agent": tune.grid_search(['flat_usfa']),
+            "seed": tune.grid_search([4]),
+            "group": tune.grid_search(['baselines-5']),
+            "eval_task_support": tune.grid_search(['train']),
+            "env.setting": tune.grid_search([0, 1, 2]),
         },
     ]
   elif search == 'muzero':
     space = [
-        # {
 
-        #     "num_steps": tune.grid_search([10e6]),
-        #     "agent": tune.grid_search(['flat_muzero']),
-        #     "seed": tune.grid_search([1]),
-        #     "group": tune.grid_search(['muzero-test-2-trace']),
-        #     "env.setting": tune.grid_search([0]),
-        #     "value_target_source": tune.grid_search(["return"]),
-        #     "trace_length": tune.grid_search([80]),
-        #     "batch_size": tune.grid_search([32, 64]),
-        # },
         {
             "num_steps": tune.grid_search([10e6]),
             "agent": tune.grid_search(['flat_muzero']),
@@ -681,46 +682,18 @@ def sweep(search: str = 'default'):
             "group": tune.grid_search(['muzero-baseline']),
             "env.setting": tune.grid_search([0]),
         },
-        # {
-        #     "num_steps": tune.grid_search([10e6]),
-        #     "agent": tune.grid_search(['flat_muzero']),
-        #     "seed": tune.grid_search([1]),
-        #     "group": tune.grid_search(['muzero-test-2-bins']),
-        #     "env.setting": tune.grid_search([0]),
-        #     "value_target_source": tune.grid_search(["return"]),
-        #     "num_bins": tune.grid_search([101, 301]),
-        # },
+
     ]
   elif search == 'sf':
     space = [
-        # {
-        #     "num_steps": tune.grid_search([100e6]),
-        #     "agent": tune.grid_search(['flat_usfa']),
-        #     "seed": tune.grid_search([1]),
-        #     "group": tune.grid_search(['sf-flat-16']),
-        #     "env.setting": tune.grid_search([0]),
-        #     "samples_per_insert": tune.grid_search([0]),
-        #     "importance_sampling_exponent": tune.grid_search([.6]),
-        #     "final_conv_dim": tune.grid_search([0]),
-        #     "conv_flat_dim": tune.grid_search([256]),
-        #     'sf_net_type': tune.grid_search(['ind', 'mono']),
-        #     "sf_layers": tune.grid_search([[512, 512]]),
-        #     "policy_layers": tune.grid_search([[]]),
-        # },
         {
-            "num_steps": tune.grid_search([100e6]),
+            "num_steps": tune.grid_search([30e6]),
             "agent": tune.grid_search(['flat_usfa']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['sf-flat-17']),
+            "group": tune.grid_search(['sf-flat-25-q-coeff-mean']),
             "env.setting": tune.grid_search([0]),
-            "samples_per_insert": tune.grid_search([0]),
-            "importance_sampling_exponent": tune.grid_search([.6]),
-            "final_conv_dim": tune.grid_search([16]),
-            "conv_flat_dim": tune.grid_search([0]),
-            'sf_net_type': tune.grid_search(['ind', 'mono']),
-            "sf_layers": tune.grid_search([
-              [512, 512], [1024], [1024, 1024]]),
-            "policy_layers": tune.grid_search([[]]),
+            "q_coeff": tune.grid_search([1.0]),
+            "sf_coeff": tune.grid_search([1.0]),
         },
     ]
   elif search == 'speed':
