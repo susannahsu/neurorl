@@ -19,9 +19,12 @@ Copied from: https://github.com/deepmind/acme/blob/master/examples/baselines/rl_
 """
 # Do not preallocate GPU memory for JAX.
 import os
+
 # https://github.com/google/jax/issues/8302
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ["WANDB__SERVICE_WAIT"] = "300"
+
 
 import dataclasses
 import datetime

@@ -119,32 +119,16 @@ class UsfaConfig(usfa.Config):
   # learner
   importance_sampling_exponent: float = 0.6
   samples_per_insert: float = 0.0
-  sf_coeff: float = 1.0
+  sf_coeff: float = 10.0
   q_coeff: float = 1.0
 
   # eval actor
   eval_task_support: str = "train"  # options:
 
 @dataclasses.dataclass
-class UsfaConfig(usfa.Config):
-  eval_task_support: str = "train"  # options:
-  nsamples: int = 0  # no samples outside of train vector
-  importance_sampling_exponent: float = 0.6
-
-  sf_net_type: str = 'mono'
-  final_conv_dim: int = 16
-  conv_flat_dim: Optional[int] = 0
-  sf_layers : Tuple[int]=(128, 128)
-  policy_layers : Tuple[int]=()
-
-  sf_coeff: float = 1.0
-  q_coeff: float = 0.5
-
-
-@dataclasses.dataclass
 class MuZeroConfig(muzero.Config):
   """Configuration options for MuZero agent."""
-  trace_length: int = 20
+  trace_length: int = 40
   min_scalar_value: Optional[float] = None
   num_bins: Optional[int] = 81  # number of bins for two-hot rep
   scalar_step_size: Optional[float] = None  # step size between bins
@@ -514,9 +498,10 @@ def train_single(
     debug=debug)
 
   env_setting = experiment_config_inputs.final_env_kwargs['setting']
+  test_setting = TestOptions(env_setting).name
   logger_factory_kwargs = dict(
-    actor_label=f"actor-{env_setting}",
-    evaluator_label=f"evaluator-{env_setting}",
+    actor_label=f"actor-{test_setting}",
+    evaluator_label=f"evaluator-{test_setting}",
     learner_label=f"learner",
   )
 
@@ -673,19 +658,41 @@ def sweep(search: str = 'default'):
   if search == 'flat':
     space = [
         {
-            "num_steps": tune.grid_search([20e6]),
-            "agent": tune.grid_search(['flat_muzero', 'flat_q']),
+            "num_steps": tune.grid_search([40e6]),
+            "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
             "seed": tune.grid_search([4]),
-            "group": tune.grid_search(['baselines-5']),
-            "env.setting": tune.grid_search([0, 1, 2]),
+            "group": tune.grid_search(['baselines-8']),
+            "env.setting": tune.grid_search([0,1,2]),
         },
+    ]
+  elif search == 'flat-0':
+    space = [
         {
             "num_steps": tune.grid_search([20e6]),
-            "agent": tune.grid_search(['flat_usfa']),
+            "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
             "seed": tune.grid_search([4]),
-            "group": tune.grid_search(['baselines-5']),
-            "eval_task_support": tune.grid_search(['train']),
-            "env.setting": tune.grid_search([0, 1, 2]),
+            "group": tune.grid_search(['baselines-flat-0']),
+            "env.setting": tune.grid_search([0]),
+        },
+    ]
+  elif search == 'flat-1':
+    space = [
+        {
+            "num_steps": tune.grid_search([20e6]),
+            "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
+            "seed": tune.grid_search([4]),
+            "group": tune.grid_search(['baselines-flat-1']),
+            "env.setting": tune.grid_search([1]),
+        },
+    ]
+  elif search == 'flat-2':
+    space = [
+        {
+            "num_steps": tune.grid_search([20e6]),
+            "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
+            "seed": tune.grid_search([4]),
+            "group": tune.grid_search(['baselines-flat-2']),
+            "env.setting": tune.grid_search([2]),
         },
     ]
   elif search == 'muzero':
