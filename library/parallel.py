@@ -415,10 +415,12 @@ def run_sbatch(
   #################################
   # create sbatch file
   #################################
-  base_filename = os.path.join(base_path, date_time(time=False))
+  job_name=f"{folder},{search_name}"
   sbatch_contents = f"#SBATCH --gres=gpu:{FLAGS.num_gpus}\n"
   sbatch_contents += f"#SBATCH -c {FLAGS.num_cpus}\n"
   sbatch_contents += f"#SBATCH --mem {FLAGS.memory}\n"
+  sbatch_contents += f"#SBATCH -J {job_name}\n"
+
   # sbatch_contents += f"#SBATCH --mem-per-cpu={FLAGS.memory}\n"
   sbatch_contents += f"#SBATCH -p {FLAGS.partition}\n"
   sbatch_contents += f"#SBATCH -t {FLAGS.time}"
