@@ -415,7 +415,8 @@ def run_sbatch(
   #################################
   # create sbatch file
   #################################
-  job_name=f"{folder},{search_name}"
+  short_folder_name = os.path.basename(os.path.normpath(folder))
+  job_name=f"{short_folder_name},{search_name}"
   sbatch_contents = f"#SBATCH --gres=gpu:{FLAGS.num_gpus}\n"
   sbatch_contents += f"#SBATCH -c {FLAGS.num_cpus}\n"
   sbatch_contents += f"#SBATCH --mem {FLAGS.memory}\n"
