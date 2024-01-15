@@ -759,6 +759,7 @@ def train_single(
         dict_configs=config_kwargs,
     )
 
+    # NOTE: probably will change this
     network_factory = functools.partial(
         dynaq.make_minigrid_networks, config=config)
 
@@ -779,7 +780,7 @@ def train_single(
           rl_coeff=config.rl_coeff,
           # contrastive model + reward loss
           reward_coeff=config.reward_coeff,
-          model_coeff=config.model_coeff,
+          model_coeff=config.model_coeff,  # coefficient for learning the model, not from the model
           labels_from_target_params=config.labels_from_target_params,
           num_negatives=config.num_negatives,
           simulation_steps=config.simulation_steps,
