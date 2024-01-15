@@ -1,3 +1,4 @@
+import abc
 from functools import partial
 from typing import Any, Dict, List, Optional, Sequence, Union
 
@@ -20,6 +21,8 @@ import rlax
 
 import matplotlib.pyplot as plt
 from acme.utils.observers import EnvLoopObserver
+
+from library.basics import ActorObserver, ActorState
 
 Number = Union[int, float, np.float32, jnp.float32]
 
@@ -167,6 +170,45 @@ class LevelAvgReturnObserver(LevelAvgObserver):
 
     return result
 
+class AvgStateTDObserver(ActorObserver):
+  def __init__(self, period=100, prefix: str = '0.state', get_task_name=None):
+    super(AvgStateTDObserver, self).__init__()
+    self.results = collections.defaultdict(list)
+    self.task_name = None
+    self.period = period
+    self.prefix = prefix
+    self.idx = 0
+    self.logging = True
+    if get_task_name is None:
+      def get_task_name(env): return "Episode"
+      logging.info(
+          "WARNING: if multi-task, suggest setting `get_task_name` in `LevelAvgReturnObserver`. This will log separate statistics for each task.")
+    self._get_task_name = get_task_name
+
+  def observe_first(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
+    """Observes the initial state and initial time-step.
+    
+    Usually state will be all zeros and time-step will be output of reset."""
+    import ipdb; ipdb.set_trace()
+
+  def observe_action(self, state: ActorState, act: jax.Array) -> None:
+    """Observe state and action that are due to observation of time-step.
+    
+    Should be state after previous time-step along"""
+    import ipdb; ipdb.set_trace()
+
+  def observe_timestep(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
+    """Observe next.
+    
+    Should be state after previous time-step along"""
+    import ipdb; ipdb.set_trace()
+
+  def get_metrics(self) -> Dict[str, Number]:
+    """Returns metrics collected for the current episode."""
+    import ipdb; ipdb.set_trace()
+
+    if self.idx % self.period == 0:
+      import ipdb; ipdb.set_trace()
 
 def episode_mean(x, mask):
   if len(mask.shape) < len(x.shape):

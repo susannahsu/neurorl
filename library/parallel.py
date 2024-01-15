@@ -19,7 +19,7 @@ import library.utils as utils
 
 flags.DEFINE_integer('num_actors', 6, 'number of actors.')
 flags.DEFINE_integer('config_idx', 1, 'number of actors.')
-flags.DEFINE_integer('num_cpus', 32, 'number of cpus.')
+flags.DEFINE_integer('num_cpus', 16, 'number of cpus.')
 flags.DEFINE_integer('memory', 120_000, 'memory (in mbs).')
 flags.DEFINE_integer('max_concurrent', 12, 'number of concurrent jobs')
 flags.DEFINE_string('account', '', 'account on slurm servers to use.')
@@ -335,6 +335,7 @@ def run_sbatch(
   logging.info("searching:")
   pprint(configurations)
   save_configs = []
+  base_path = os.path.join(root_path, folder, search_name)
   for config in configurations:
     # either look for group name in setting, wandb_init_kwargs, or use search name
     if 'group' in config:
@@ -348,7 +349,7 @@ def run_sbatch(
     # dir will be root_path/folder/group/exp_name
     # exp_name is also name in wandb
     log_dir, exp_name = gen_log_dir(
-      base_dir=os.path.join(root_path, folder, group),
+      base_dir=os.path.join(base_path, group),
       return_kwpath=True,
       path_skip=['num_steps', 'num_learner_steps', 'group'],
       **agent_config,
@@ -372,12 +373,11 @@ def run_sbatch(
   #################################
   # save configs for all runs
   #################################
-  # root_path/run_{search_name}-date-hour.pkl
-  base_path = os.path.join(root_path, folder, 'runs', search_name)
+  base_path = os.path.join(base_path, f'runs-{date_time(True)}')
   paths.process_path(base_path)
 
-  base_filename = os.path.join(base_path, date_time(time=True))
-  configs_file = f"{base_filename}_config.pkl"
+  # base_filename = os.path.join(base_path, date_time(time=True))
+  configs_file = f"{base_path}/config.pkl"
   with open(configs_file, 'wb') as fp:
       pickle.dump(save_configs, fp)
       logging.info(f'Saved: {configs_file}')
@@ -397,7 +397,7 @@ def run_sbatch(
   python_file_contents += f" --subprocess={True}"
   python_file_contents += f" --make_path={False}"
 
-  run_file = f"{base_filename}_run.sh"
+  run_file = f"{base_path}/run.sh"
 
   if debug:
     # create file and run single python command
@@ -415,15 +415,18 @@ def run_sbatch(
   #################################
   # create sbatch file
   #################################
+  job_name=f'{search_name}-{date_time(True)}'
   sbatch_contents = f"#SBATCH --gres=gpu:{FLAGS.num_gpus}\n"
   sbatch_contents += f"#SBATCH -c {FLAGS.num_cpus}\n"
   sbatch_contents += f"#SBATCH --mem {FLAGS.memory}\n"
+  sbatch_contents += f"#SBATCH -J {job_name}\n"
+
   # sbatch_contents += f"#SBATCH --mem-per-cpu={FLAGS.memory}\n"
   sbatch_contents += f"#SBATCH -p {FLAGS.partition}\n"
   sbatch_contents += f"#SBATCH -t {FLAGS.time}"
   sbatch_contents += f"#SBATCH --account {FLAGS.account}\n"
-  sbatch_contents += f"#SBATCH -o {base_filename}_id=%j.out\n"
-  sbatch_contents += f"#SBATCH -e {base_filename}_id=%j.err\n"
+  sbatch_contents += f"#SBATCH -o {base_path}/id=%j.out\n"
+  sbatch_contents += f"#SBATCH -e {base_path}/id=%j.err\n"
 
   run_file_contents = "#!/bin/bash\n" + sbatch_contents + python_file_contents
   print("-"*20)
