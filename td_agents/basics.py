@@ -1,4 +1,5 @@
 
+import abc
 import sys
 import functools
 import time
@@ -55,7 +56,12 @@ import rlax
 import tree
 
 
+from library.utils import ActorObserver
+
 _PMAP_AXIS_NAME = 'data'
+
+Number = Union[int, float, np.float32, jnp.float32]
+
 LossFn = learning_lib.LossFn
 TrainingState = learning_lib.TrainingState
 ReverbUpdate = learning_lib.ReverbUpdate
@@ -79,6 +85,7 @@ class ActorState(Generic[actor_core_lib.RecurrentState]):
   rng: networks_lib.PRNGKey
   recurrent_state: actor_core_lib.RecurrentState
   prev_recurrent_state: actor_core_lib.RecurrentState
+  predictions: Optional[jax.Array] = None
   epsilon: Optional[jax.Array] = None
   step: Optional[jax.Array] = None
 
@@ -595,6 +602,55 @@ def default_adam_constr(config, **kwargs):
     ]
   return optax.chain(*optimizer_chain)
 
+
+class ActorObserver(abc.ABC):
+  """An interface for collecting metrics/counters from actor.
+
+  # Note: agent.state has as a field, the agents predictions, e.g. Q-values.
+
+  Episode goes:
+    # observe initial
+    timestep = env.reset()
+    state = agent.init_state()
+
+    agent.observe_first(timestep)  # self.state is initialized
+    # inside, self.observer.observe_first(state, timestep) is called
+
+    while timestep.not_last():
+      action = agent.select_action(timestep)  # agent.state is updated
+      # inside, self.observer.observe_action(state, action) is called
+
+      next_timestep = env.step(action)
+      agent.observe(action, next_timestep)
+      # inside, self.observer.observe_timestep(next_timestep) is called
+      
+      timestep = next_timestep
+
+  """
+
+  @abc.abstractmethod
+  def observe_first(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
+    """Observes the initial state and initial time-step.
+    
+    Usually state will be all zeros and time-step will be output of reset."""
+
+  @abc.abstractmethod
+  def observe_action(self, state: ActorState, act: jax.Array) -> None:
+    """Observe state and action that are due to observation of time-step.
+    
+    Should be state after previous time-step along"""
+
+  @abc.abstractmethod
+  def observe_timestep(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
+    """Observe next.
+    
+    Should be state after previous time-step along"""
+
+  @abc.abstractmethod
+  def get_metrics(self) -> Dict[str, Number]:
+    """Returns metrics collected for the current episode."""
+
+
 class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras]):
   """A generic actor implemented on top of ActorCore.
 
@@ -609,6 +665,7 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
       random_key: network_lib.PRNGKey,
       variable_client: Optional[variable_utils.VariableClient],
       adders: Optional[Union[adders.Adder, List[adders.Adder]]] = None,
+      observers: Optional[List[ActorObserver]] = (),
       jit: bool = True,
       backend: Optional[str] = 'cpu',
       per_episode_update: bool = False
@@ -631,6 +688,7 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
       adders = [adders]
 
     self._adders = adders
+    self._observers = observers
     self._state = None
 
     # Unpack ActorCore, jitting if requested.
@@ -647,19 +705,27 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
   def _params(self):
     return self._variable_client.params if self._variable_client else []
 
-  def select_action(self,
-                    observation: network_lib.Observation) -> types.NestedArray:
-    action, self._state = self._policy(self._params, observation, self._state)
-    return utils.to_numpy(action)
-
   def observe_first(self, timestep: dm_env.TimeStep):
     self._random_key, key = jax.random.split(self._random_key)
     self._state = self._init(key)
+
+    for observer in self._observers:
+      observer.observe_first(timestep, self._state)
+
     if self._adders:
       for adder in self._adders:
         adder.add_first(timestep)
     if self._variable_client and self._per_episode_update:
       self._variable_client.update_and_wait()
+
+  def select_action(self,
+                    observation: network_lib.Observation) -> types.NestedArray:
+    action, self._state = self._policy(self._params, observation, self._state)
+
+    for observer in self._observers:
+      observer.observe_action(self._state, action)
+
+    return utils.to_numpy(action)
 
   def observe(self, action: network_lib.Action, next_timestep: dm_env.TimeStep):
     if self._adders:
@@ -667,9 +733,14 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
         adder.add(
             action, next_timestep, extras=self._get_extras(self._state))
 
+    for observer in self._observers:
+      observer.observe_timestep(next_timestep)
+
+
   def update(self, wait: bool = False):
     if self._variable_client and not self._per_episode_update:
       self._variable_client.update(wait)
+
 
 class Builder(r2d2.R2D2Builder):
   """TD agent Builder. Agent is derivative of R2D2 but may use different network/loss function
@@ -787,6 +858,7 @@ def get_actor_core(
         rng=rng,
         epsilon=state.epsilon,
         step=state.step + 1,
+        predictions=preds,
         recurrent_state=recurrent_state,
         prev_recurrent_state=state.recurrent_state)
 
@@ -841,4 +913,5 @@ def disable_insert_blocking(
         max(1, int(
             (rate_limiter_info.max_diff - rate_limiter_info.min_diff) / 2)))
   return modified_tables, sample_sizes
+
 

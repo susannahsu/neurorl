@@ -415,7 +415,7 @@ def run_sbatch(
   #################################
   # create sbatch file
   #################################
-  job_name=f"{folder},{search_name}"
+  job_name=f'{search_name}-{date_time(True)}'
   sbatch_contents = f"#SBATCH --gres=gpu:{FLAGS.num_gpus}\n"
   sbatch_contents += f"#SBATCH -c {FLAGS.num_cpus}\n"
   sbatch_contents += f"#SBATCH --mem {FLAGS.memory}\n"
