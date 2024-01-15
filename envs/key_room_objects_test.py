@@ -1,3 +1,8 @@
+"""
+
+
+TODO: state-feature construction should really be a member of `TaskFeatures` class, not `Task` class. 
+"""
 from __future__ import annotations
 from enum import Enum
 from absl import logging
@@ -53,12 +58,13 @@ def construct(shape: str, color: str):
 def name(o):
    return f"{o.color} {o.type}"
 
-class ObjectTestTaskFeatures:
-  def __init__(self, colors, types):
+
+class TaskFeaturesFlat:
+  def __init__(self, colors, types, task_color: str):
+    del task_color # never used
     self.thing2indx = {}
     for idx, (color, shape) in enumerate(itertools.product(colors, types)):
         self.thing2indx[(color, shape)] = idx
-
 
   @property
   def things(self):
@@ -77,15 +83,48 @@ class ObjectTestTaskFeatures:
 
   def index(self, color: str, type: str):
     key = (color, type)
-    if key in self.thing2indx:
-      return self.thing2indx[key]
+    return self.thing2indx.get(key, -1)
+
+  # def state_features(self, color: str, type: str):
+  #   vector = np.zeros(len(self.thing2indx))
+  #   vector[self.thing2indx[(color, type)]] = 1.0
+  #   return vector
+
+class TaskFeaturesFlatAmbiguous:
+  """Shapes map to idx ambiguous to color. Basically unique types/shapes get their own index but unique colors don't. """
+  def __init__(self, colors, types, task_color: str):
+    self.thing2indx = {}
+    self.shapes = shapes = types
+    self.colors = colors
+    self.task_color = task_color
+
+    for idx, shape in enumerate(shapes):
+      for color in colors:
+        self.thing2indx[(color, shape)] = idx
+
+  @property
+  def things(self):
+     return self.thing2indx.keys()
+
+  def empty_state_features(self):
+    vector = np.zeros(len(self.shapes))
+    return vector
+
+  def task(self, obj2reward: dict):
+    vector = self.empty_state_features()
+
+    for shape in self.shapes:
+      key = (self.task_color, shape)
+      vector[self.thing2indx[key]] = obj2reward.get(key, 0)
+
+    return vector
+
+  def index(self, color: str, type: str):
+    key = (color, type)
+    if color == self.task_color:
+      return self.thing2indx.get(key, -1)
     else:
       return -1
-
-  def state_features(self, color: str, type: str):
-    vector = np.zeros(len(self.thing2indx))
-    vector[self.thing2indx[(color, type)]] = 1.0
-    return vector
 
 class ObjectTestTask:
     def __init__(self,
@@ -96,6 +135,7 @@ class ObjectTestTask:
                  floor2task_color: dict = None,
                  type2indx: dict = None,
                  task_reward: float = 1.0,
+                 task_features_cls: str = 'flat',
                  ):
         self.floor = floor
         self.init = init
@@ -116,18 +156,28 @@ class ObjectTestTask:
             'blue': 'red',
             'yellow': 'green',
         }
-
-        colors = floor2task_color.values()
-
-        self.feature_cnstr = ObjectTestTaskFeatures(colors, self.types)
-
-        self.type2indx = type2indx
-        self.task_colors = list(floor2task_color.values())
         self.floor2task_color = floor2task_color
+
         self.shape2task_color = {
             'ball': 'red',
             'box': 'green',
         }
+
+        colors = floor2task_color.values()
+
+        self.type2indx = type2indx
+        self.task_colors = list(colors)
+
+        self.task_features_cls = task_features_cls
+        if task_features_cls == 'flat':
+          TaskFeaturesCls = TaskFeaturesFlat
+        elif task_features_cls == 'ambiguous_flat':
+          TaskFeaturesCls = TaskFeaturesFlatAmbiguous
+        else:
+          raise NotImplementedError(task_features_cls)
+
+        self.feature_cnstr = TaskFeaturesCls(colors, self.types, task_color=self.goal_color())
+
 
     def task_vector(self):
        vector = self.feature_cnstr.task(obj2reward={
@@ -178,7 +228,11 @@ class ObjectTestTask:
 
     def reset(self,
         color_to_room: Dict[str, Tuple[int]],
-        start_room_color: str):
+        start_room_color: str,
+        task_signals_present: bool = True,
+        ):
+       if self.task_features_cls == 'ambiguous_flat':
+          assert task_signals_present, 'no signal for task'
 
        self.color_to_room = color_to_room
        self.room_to_color = {room: color for color, room in color_to_room.items()}
@@ -189,7 +243,6 @@ class ObjectTestTask:
        self.feature_counts = self.feature_counts.astype(np.int32)
        self.prior_counts = self.prior_counts.astype(np.int32)
        self.timestep = 0
-
 
     def step(self, env):
       """
@@ -410,15 +463,9 @@ class KeyRoomObjectTest(LevelGen):
 
       task_idx = np.random.randint(len(self.tasks))
       self.task = self.tasks[task_idx]
-      task_room_coord = goal_room_coords[task_idx]
-
-      self.task.reset(
-        color_to_room=colors__to__room,
-        start_room_color=start_room_color,
-        )
 
       ###########################################
-      # Place extra objects in main room
+      # Place extra task signals in main room
       ###########################################
       if self.include_task_signals:
         init_object = self.task.initial_object()
@@ -429,6 +476,16 @@ class KeyRoomObjectTest(LevelGen):
         self.place_in_room(*center_room, init_floor)
         self.place_in_room(*center_room, init_floor)
         self.place_in_room(*center_room, init_floor)
+
+      ###########################################
+      # reset task
+      ###########################################
+      self.task.reset(
+        color_to_room=colors__to__room,
+        start_room_color=start_room_color,
+        task_signals_present=self.include_task_signals,
+        )
+
 
       self.instrs = DummyInstr()
       self.task_vector = self.task.task_vector()

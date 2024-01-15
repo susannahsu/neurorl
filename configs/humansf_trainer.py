@@ -42,7 +42,8 @@ python configs/humansf_trainer.py \
   --account=kempner_fellows \
   --wandb_entity=wcarvalho92 \
   --wandb_project=human_objects_sf \
-  --search='sf'
+  --max_concurrent=12 \
+  --search='ambiguous_flat'
 
 Change "search" to what you want to search over.
 
@@ -186,6 +187,7 @@ def make_keyroom_object_test_env(seed: int,
                      room_size: int = 6,
                      evaluation: bool = False,
                      object_options: bool = True,
+                     task_features_cls: str='flat',
                      **kwargs) -> dm_env.Environment:
   """Loads environments.
   
@@ -196,40 +198,38 @@ def make_keyroom_object_test_env(seed: int,
       dm_env.Environment: Multitask environment is returned.
   """
   del seed
+  TaskCls = functools.partial(
+    ObjectTestTask, task_features_cls=task_features_cls)
 
   if setting == TestOptions.shape.value:
     # in this setting, the initial shape indicates the task color
     train_tasks = []
     test_tasks = []
     for c in ['blue', 'yellow']:
-        train_tasks.append(
-          ObjectTestTask(
-            source='shape', init='ball', floor=c, w='box'))
-        test_tasks.append(
-          ObjectTestTask(
-            source='shape', init='ball', floor=c, w='ball'))
+      train_tasks.append(
+        TaskCls(source='shape', init='ball', floor=c, w='box'))
+      test_tasks.append(
+        TaskCls(source='shape', init='ball', floor=c, w='ball'))
 
-        train_tasks.append(
-          ObjectTestTask(
-            source='shape', init='box', floor=c, w='ball'))
-        test_tasks.append(
-          ObjectTestTask(
-            source='shape', init='box', floor=c, w='box'))
+      train_tasks.append(
+        TaskCls(source='shape', init='box', floor=c, w='ball'))
+      test_tasks.append(
+        TaskCls(source='shape', init='box', floor=c, w='box'))
 
   elif setting == TestOptions.color.value:
     # in this setting, the floor color indicates the task color
     train_tasks = [
-      ObjectTestTask(floor='blue', init='ball', w='box'),
-      ObjectTestTask(floor='blue', init='box', w='box'),
-      ObjectTestTask(floor='yellow', init='ball', w='ball'),
-      ObjectTestTask(floor='yellow', init='box', w='ball'),
+      TaskCls(floor='blue', init='ball', w='box'),
+      TaskCls(floor='blue', init='box', w='box'),
+      TaskCls(floor='yellow', init='ball', w='ball'),
+      TaskCls(floor='yellow', init='box', w='ball'),
     ]
 
     test_tasks = [
-      ObjectTestTask(floor='blue', init='ball', w='ball'),
-      ObjectTestTask(floor='blue', init='box', w='ball'),
-      ObjectTestTask(floor='yellow', init='ball', w='box'),
-      ObjectTestTask(floor='yellow', init='box', w='box'),
+      TaskCls(floor='blue', init='ball', w='ball'),
+      TaskCls(floor='blue', init='box', w='ball'),
+      TaskCls(floor='yellow', init='ball', w='box'),
+      TaskCls(floor='yellow', init='box', w='box'),
     ]
 
   elif setting == TestOptions.ambigious.value:
@@ -240,15 +240,15 @@ def make_keyroom_object_test_env(seed: int,
     }
 
     train_tasks = [
-        ObjectTestTask(floor='red', init='ball', w='box', floor2task_color=floor2task_color),
-        ObjectTestTask(floor='green', init='box', w='ball', floor2task_color=floor2task_color),
+        TaskCls(floor='red', init='ball', w='box', floor2task_color=floor2task_color),
+        TaskCls(floor='green', init='box', w='ball', floor2task_color=floor2task_color),
     ]
 
     test_tasks = [
-        ObjectTestTask(floor='red', init='ball', w='ball', floor2task_color=floor2task_color),
-        ObjectTestTask(floor='red', init='box', w='ball', floor2task_color=floor2task_color),
-        ObjectTestTask(floor='green', init='box', w='box', floor2task_color=floor2task_color),
-        ObjectTestTask(floor='green', init='ball', w='box', floor2task_color=floor2task_color),
+        TaskCls(floor='red', init='ball', w='ball', floor2task_color=floor2task_color),
+        TaskCls(floor='red', init='box', w='ball', floor2task_color=floor2task_color),
+        TaskCls(floor='green', init='box', w='box', floor2task_color=floor2task_color),
+        TaskCls(floor='green', init='ball', w='box', floor2task_color=floor2task_color),
     ]
 
   else:
@@ -665,77 +665,27 @@ def sweep(search: str = 'default'):
             "env.setting": tune.grid_search([0,1,2]),
         },
     ]
-  elif search == 'flat-0':
+  elif search == 'ambiguous_flat':
     space = [
-        {
-            "num_steps": tune.grid_search([20e6]),
-            "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
-            "seed": tune.grid_search([4]),
-            "group": tune.grid_search(['baselines-flat-0']),
-            "env.setting": tune.grid_search([0]),
-        },
-    ]
-  elif search == 'flat-1':
-    space = [
-        {
-            "num_steps": tune.grid_search([20e6]),
-            "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
-            "seed": tune.grid_search([4]),
-            "group": tune.grid_search(['baselines-flat-1']),
-            "env.setting": tune.grid_search([1]),
-        },
-    ]
-  elif search == 'flat-2':
-    space = [
-        {
-            "num_steps": tune.grid_search([20e6]),
-            "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
-            "seed": tune.grid_search([4]),
-            "group": tune.grid_search(['baselines-flat-2']),
-            "env.setting": tune.grid_search([2]),
-        },
-    ]
-  elif search == 'muzero':
-    space = [
+        # {
+        #     "num_steps": tune.grid_search([30e6]),
+        #     "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
+        #     "seed": tune.grid_search([5]),
+        #     "group": tune.grid_search(['ambiguous-flat-1']),
+        #     "env.setting": tune.grid_search([0]),
+        #     "env.task_features_cls": tune.grid_search(['ambiguous_flat']),
+        # },
 
-        {
-            "num_steps": tune.grid_search([10e6]),
-            "agent": tune.grid_search(['flat_muzero']),
-            "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['muzero-baseline']),
-            "env.setting": tune.grid_search([0]),
-        },
-
-    ]
-  elif search == 'sf':
-    space = [
         {
             "num_steps": tune.grid_search([30e6]),
-            "agent": tune.grid_search(['flat_usfa']),
-            "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['sf-flat-25-q-coeff-mean']),
+            "agent": tune.grid_search(['flat_q']),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['ambiguous-flat-1']),
             "env.setting": tune.grid_search([0]),
-            "q_coeff": tune.grid_search([1.0]),
-            "sf_coeff": tune.grid_search([1.0]),
+            "env.task_features_cls": tune.grid_search(['ambiguous_flat']),
         },
     ]
-  elif search == 'speed':
-    space = [
-        {
-            "agent": tune.grid_search(['flat_q', 'flat_usfa']),
-            "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['speed-test-8']),
-            "samples_per_insert": tune.grid_search([10]),
-            "env.setting": tune.grid_search([0]),
-        },
-    ]
-  elif search == 'objects':
-    space = [
-        {
-            "seed": tune.grid_search([5,6,7,8]),
-            "agent": tune.grid_search(['object_usfa']),
-        }
-    ]
+
   else:
     raise NotImplementedError(search)
 
