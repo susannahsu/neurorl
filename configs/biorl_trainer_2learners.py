@@ -47,7 +47,6 @@ Running experiments:
 # DEBUGGING, single stream
 python -m ipdb -c continue configs/biorl_trainer_2learners.py \
   --parallel='none' \
-  --run_distributed=False \
   --debug=True \
   --use_wandb=False \
   --wandb_entity=wcarvalho92 \
@@ -57,7 +56,6 @@ python -m ipdb -c continue configs/biorl_trainer_2learners.py \
 # JAX does Just In Time (JIT) compilation. remove this. useful for debugging.
 JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/biorl_trainer_2learners.py \
   --parallel='none' \
-  --run_distributed=False \
   --debug=True \
   --use_wandb=False \
   --wandb_entity=wcarvalho92 \
@@ -140,6 +138,9 @@ Evaluation = bool
 
 @dataclasses.dataclass
 class TwoLearnerConfig:
+
+  state_dim: int = 256
+
   eval_every: int = 100
   num_eval_episodes: int = 10
 
@@ -212,6 +213,7 @@ def run_experiment(
     logger_factory: Optional[loggers.LoggerFactory] = None,
     environment_spec: Optional[specs.EnvironmentSpec] = None,
     observers: Sequence[EnvLoopObserver] = (),
+    actor_observers: Sequence[basics.ActorObserver] = (),
     eval_every: int = 100,
     num_eval_episodes: int = 1):
   """
@@ -571,6 +573,7 @@ def run_experiment(
       random_key=actor_key,
       variable_client=variable_client,
       adders=actor_adders,
+      observers=actor_observers,
       backend='cpu')
   eval_actor = basics.BasicActor(
       actor=get_actor_core(networks=networks,
@@ -826,6 +829,14 @@ def train_single(
         ),
       ]
 
+  actor_observers = [
+    utils.AvgStateTDObserver(
+      period=1,
+      prefix='actor',
+      get_task_name=lambda e: "task"
+    )
+  ]
+
   # -----------------------
   # setup logger factory
   # -----------------------
@@ -850,6 +861,7 @@ def train_single(
       environment_factory=environment_factory,
       network_factory=network_factory,
       observers=observers,
+      actor_observers=actor_observers,
       logger_factory=logger_factory,
       eval_every=config.eval_every,
       num_eval_episodes=config.num_eval_episodes)
@@ -923,7 +935,7 @@ def run_single():
       wandb_init_kwargs = dict()
 
 
-  if FLAGS.debug and not FLAGS.subprocess:
+  if not FLAGS.subprocess:
       configs = parallel.get_all_configurations(spaces=sweep(FLAGS.search))
       first_agent_config, first_env_config = parallel.get_agent_env_configs(
           config=configs[0])
@@ -1005,10 +1017,23 @@ def sweep(search: str = 'default'):
         {
             "agent": tune.grid_search(['dynaq']),
             "seed": tune.grid_search([1]),
-            "group": tune.grid_search(['dynaq-1']),
+            "group": tune.grid_search(['dynaq-2']),
             "online_update_period": tune.grid_search([16]),
             "offline_update_period": tune.grid_search([None]),
-            "num_offline_updates": tune.grid_search([1, 5, 20, 50, 100]),
+            "num_offline_updates": tune.grid_search([1]),
+            "env.level": tune.grid_search([
+                "BabyAI-GoToRedBallNoDists-v0",
+                # "BabyAI-GoToObjS6-v1",
+            ]),
+        }
+    ]
+  elif search == 'observer':
+    space = [
+        {
+            "agent": tune.grid_search(['qlearning']),
+            "seed": tune.grid_search([1]),
+            "group": tune.grid_search(['observer-2']),
+            "online_update_period": tune.grid_search([16]),
             "env.level": tune.grid_search([
                 "BabyAI-GoToRedBallNoDists-v0",
                 # "BabyAI-GoToObjS6-v1",

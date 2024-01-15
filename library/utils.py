@@ -18,11 +18,12 @@ import operator
 import tree
 import math
 import rlax
+import wandb
 
 import matplotlib.pyplot as plt
 from acme.utils.observers import EnvLoopObserver
 
-from library.basics import ActorObserver, ActorState
+from td_agents.basics import ActorObserver, ActorState
 
 Number = Union[int, float, np.float32, jnp.float32]
 
@@ -171,13 +172,17 @@ class LevelAvgReturnObserver(LevelAvgObserver):
     return result
 
 class AvgStateTDObserver(ActorObserver):
-  def __init__(self, period=100, prefix: str = '0.state', get_task_name=None):
+  def __init__(self,
+               period=100,
+               prefix: str = 'AvgStateTDObserver',
+               get_task_name=None,
+               discount: float = .99):
     super(AvgStateTDObserver, self).__init__()
-    self.results = collections.defaultdict(list)
     self.task_name = None
     self.period = period
     self.prefix = prefix
-    self.idx = 0
+    self.discount = discount
+    self.idx = -1
     self.logging = True
     if get_task_name is None:
       def get_task_name(env): return "Episode"
@@ -189,26 +194,75 @@ class AvgStateTDObserver(ActorObserver):
     """Observes the initial state and initial time-step.
     
     Usually state will be all zeros and time-step will be output of reset."""
-    import ipdb; ipdb.set_trace()
+    self.idx += 1
 
-  def observe_action(self, state: ActorState, act: jax.Array) -> None:
+    # epsiode just ended, flush metrics if you want
+    if self.idx > 0:
+      self.flush_metrics()
+
+    # start collecting metrics again
+    self.actor_states = [state]
+    self.timesteps = [timestep]
+    self.actions = []
+
+  def observe_action(self, state: ActorState, action: jax.Array) -> None:
     """Observe state and action that are due to observation of time-step.
     
     Should be state after previous time-step along"""
-    import ipdb; ipdb.set_trace()
+    self.actor_states.append(state)
+    self.actions.append(action)
 
-  def observe_timestep(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
+  def observe_timestep(self, timestep: dm_env.TimeStep) -> None:
     """Observe next.
-    
-    Should be state after previous time-step along"""
-    import ipdb; ipdb.set_trace()
 
-  def get_metrics(self) -> Dict[str, Number]:
+    Should be time-step after selecting action"""
+    self.timesteps.append(timestep)
+
+  def flush_metrics(self) -> Dict[str, Number]:
     """Returns metrics collected for the current episode."""
-    import ipdb; ipdb.set_trace()
+    if not self.idx % self.period == 0:
+      return
 
-    if self.idx % self.period == 0:
-      import ipdb; ipdb.set_trace()
+    ##################################
+    # compute mean hidden
+    ##################################
+    recurrent_states = [s.recurrent_state for s in self.actor_states[1:]]
+    lstm_hidden = jnp.stack([s.hidden for s in recurrent_states])  # [T, D]
+
+    lstm_mean = lstm_hidden.mean(axis=1)
+
+    ##################################
+    # compute td-error
+    ##################################
+    # first prediction is empty (None)
+    predictions = [s.predictions for s in self.actor_states[1:]]
+    q_values = jnp.stack([p.q_values for p in predictions])  # [T, A]
+
+    npreds = len(q_values)
+    actions = jnp.stack(self.actions)[:npreds]
+    q_values = rlax.batched_index(q_values, actions)  # [T]
+
+    # ignore 0th (reset) time-step w/ 0 reward and last (terminal) time-step
+    rewards = jnp.stack([t.reward for t in self.timesteps])[1:-1]
+
+    q_pred = q_values[:-1]
+    targets = rewards + self.discount*q_values[1:]
+
+    td_error = q_pred - targets
+
+    ##################################
+    # log
+    ##################################
+    def get_wandb_obj(x, label: str, title: Optional[str] = None):
+      t = np.arange(x)
+      data = [[t, x] for (t, x) in zip(t, x)]
+      table = wandb.Table(data=data, columns=["time", label])
+      return wandb.plot.line(table, "time", label, title=title)
+
+    wandb.log({
+      f'{self.prefix}/lstm_mean': get_wandb_obj(lstm_mean, label='lstm'),
+      f'{self.prefix}/td_error': get_wandb_obj(td_error, label='td_error')
+    })
 
 def episode_mean(x, mask):
   if len(mask.shape) < len(x.shape):

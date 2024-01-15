@@ -50,8 +50,6 @@ import rlax
 
 
 
-from library.utils import ActorObserver
-
 _PMAP_AXIS_NAME = 'data'
 
 Number = Union[int, float, np.float32, jnp.float32]
@@ -675,14 +673,10 @@ class ActorObserver(abc.ABC):
     Should be state after previous time-step along"""
 
   @abc.abstractmethod
-  def observe_timestep(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
+  def observe_timestep(self, timestep: dm_env.TimeStep) -> None:
     """Observe next.
     
     Should be state after previous time-step along"""
-
-  @abc.abstractmethod
-  def get_metrics(self) -> Dict[str, Number]:
-    """Returns metrics collected for the current episode."""
 
 
 class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras]):
@@ -744,7 +738,7 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
     self._state = self._init(key)
 
     for observer in self._observers:
-      observer.observe_first(timestep, self._state)
+      observer.observe_first(timestep=timestep, state=self._state)
 
     if self._adders:
       for adder in self._adders:
@@ -757,7 +751,7 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
     action, self._state = self._policy(self._params, observation, self._state)
 
     for observer in self._observers:
-      observer.observe_action(self._state, action)
+      observer.observe_action(state=self._state, action=action)
 
     return utils.to_numpy(action)
 
@@ -768,7 +762,7 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
             action, next_timestep, extras=self._get_extras(self._state))
 
     for observer in self._observers:
-      observer.observe_timestep(next_timestep)
+      observer.observe_timestep(timestep=next_timestep)
 
 
   def update(self, wait: bool = False):
