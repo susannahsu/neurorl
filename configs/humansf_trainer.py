@@ -75,7 +75,6 @@ import minigrid
 from library.dm_env_wrappers import GymWrapper
 import library.env_wrappers as env_wrappers
 import library.experiment_builder as experiment_builder
-import library.experiment_logger as experiment_logger
 import library.parallel as parallel
 import library.utils as utils
 
@@ -83,8 +82,8 @@ from td_agents import basics
 from td_agents import q_learning
 from td_agents import usfa
 from td_agents import muzero
+from td_agents import object_q_learning
 
-import envs.key_room as key_room
 from envs.key_room_objects_test import (
   ObjectTestTask,
   KeyRoomObjectTest,
@@ -107,6 +106,12 @@ FLAGS = flags.FLAGS
 @dataclasses.dataclass
 class QlearningConfig(q_learning.Config):
   samples_per_insert: float = 0.0
+
+@dataclasses.dataclass
+class ObjectQlearningConfig(object_q_learning.Config):
+  samples_per_insert: float = 0.0
+
+
 
 @dataclasses.dataclass
 class UsfaConfig(usfa.Config):
@@ -420,6 +425,30 @@ def setup_experiment_inputs(
   #################################
   # object centric agents
   #################################
+  elif agent == 'object_q':
+    # has no mechanism to select from object options since dependent on what agent sees
+    env_kwargs['object_options'] = True
+
+    config = ObjectQlearningConfig(**config_kwargs)
+    builder = basics.Builder(
+      config=config,
+      get_actor_core_fn=functools.partial(
+        basics.get_actor_core,
+      ),
+      LossFn=q_learning.R2D2LossFn(
+        discount=config.discount,
+        importance_sampling_exponent=config.importance_sampling_exponent,
+        burn_in_length=config.burn_in_length,
+        max_replay_size=config.max_replay_size,
+        max_priority_weight=config.max_priority_weight,
+        bootstrap_n=config.bootstrap_n,
+      ))
+    network_factory = functools.partial(
+      q_learning.make_minigrid_networks,
+      config=config,
+      task_encoder=lambda obs: hk.nets.MLP(
+        (128, 128), activate_final=True)(obs))
+
   elif agent == 'object_usfa':
     config = usfa.Config(**config_kwargs)
     builder = basics.Builder(
@@ -681,6 +710,27 @@ def sweep(search: str = 'default'):
             "agent": tune.grid_search(['flat_q']),
             "seed": tune.grid_search([5]),
             "group": tune.grid_search(['ambiguous-flat-1']),
+            "env.setting": tune.grid_search([0]),
+            "env.task_features_cls": tune.grid_search(['ambiguous_flat']),
+        },
+    ]
+
+  elif search == 'object_q':
+    space = [
+        # {
+        #     "num_steps": tune.grid_search([30e6]),
+        #     "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
+        #     "seed": tune.grid_search([5]),
+        #     "group": tune.grid_search(['ambiguous-flat-1']),
+        #     "env.setting": tune.grid_search([0]),
+        #     "env.task_features_cls": tune.grid_search(['ambiguous_flat']),
+        # },
+
+        {
+            "num_steps": tune.grid_search([30e6]),
+            "agent": tune.grid_search(['object_q']),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['object_q-1']),
             "env.setting": tune.grid_search([0]),
             "env.task_features_cls": tune.grid_search(['ambiguous_flat']),
         },
