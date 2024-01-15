@@ -175,20 +175,12 @@ class AvgStateTDObserver(ActorObserver):
   def __init__(self,
                period=100,
                prefix: str = 'AvgStateTDObserver',
-               get_task_name=None,
                discount: float = .99):
     super(AvgStateTDObserver, self).__init__()
-    self.task_name = None
     self.period = period
     self.prefix = prefix
     self.discount = discount
     self.idx = -1
-    self.logging = True
-    if get_task_name is None:
-      def get_task_name(env): return "Episode"
-      logging.info(
-          "WARNING: if multi-task, suggest setting `get_task_name` in `LevelAvgReturnObserver`. This will log separate statistics for each task.")
-    self._get_task_name = get_task_name
 
   def observe_first(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
     """Observes the initial state and initial time-step.

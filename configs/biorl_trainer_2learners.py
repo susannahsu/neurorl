@@ -833,7 +833,7 @@ def train_single(
     utils.AvgStateTDObserver(
       period=1000,
       prefix='actor',
-      get_task_name=lambda e: "task"
+      discount=config.discount,
     )
   ]
 
