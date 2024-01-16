@@ -63,13 +63,16 @@ import gymnasium
 import dm_env
 import minigrid
 
-from td_agents import basics
+
+from envs.minigrid_wrappers import DictObservationSpaceWrapper
 
 from library.dm_env_wrappers import GymWrapper
-import library.env_wrappers as env_wrappers
 import library.experiment_builder as experiment_builder
 import library.parallel as parallel
 import library.utils as utils
+
+from td_agents import basics
+
 
 flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')
@@ -101,7 +104,7 @@ def make_environment(seed: int,
   # environments: https://minigrid.farama.org/environments/babyai/
   env = gymnasium.make(level)
   env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
-  env = env_wrappers.DictObservationSpaceWrapper(env)
+  env = DictObservationSpaceWrapper(env)
 
   # convert to dm_env.Environment enironment
   env = GymWrapper(env)
@@ -157,7 +160,36 @@ def setup_experiment_inputs(
     network_factory = functools.partial(
             q_learning.make_minigrid_networks,
             config=config)
+  elif agent == 'dyna':
+    from td_agents import contrastive_dyna
+    config = contrastive_dyna.Config(**config_kwargs)
+    builder = basics.Builder(
+        config=config,
+        get_actor_core_fn=functools.partial(
+            basics.get_actor_core,
+            extract_q_values=lambda preds: preds.q_values),
+        LossFn=contrastive_dyna.ContrastiveDynaLossFn(
+            discount=config.discount,
+            importance_sampling_exponent=config.importance_sampling_exponent,
+            burn_in_length=config.burn_in_length,
+            max_replay_size=config.max_replay_size,
+            max_priority_weight=config.max_priority_weight,
+            bootstrap_n=config.bootstrap_n,
+            # RL loss
+            rl_coeff=config.rl_coeff,
+            # contrastive model + reward loss
+            reward_coeff=config.reward_coeff,
+            model_coeff=config.model_coeff,
+            labels_from_target_params=config.labels_from_target_params,
+            num_negatives=config.num_negatives,
+            simulation_steps=config.simulation_steps,
+            temperature=config.temperature,
+            # dyna loss
+            dyna_coeff=config.dyna_coeff,
 
+        ))
+    network_factory = functools.partial(
+      contrastive_dyna.make_minigrid_networks, config=config)
   elif agent == 'muzero':
     from td_agents import muzero
 
@@ -410,38 +442,29 @@ def run_many():
 def sweep(search: str = 'default'):
   if search == 'baselines':
     space = [
-        {
-            "group": tune.grid_search(['run-3-babyai-torso']),
-            "agent": tune.grid_search(['muzero']),
-            "seed": tune.grid_search([1]),
-            "env.level": tune.grid_search([
-                "BabyAI-GoToRedBallNoDists-v0",
-                "BabyAI-GoToObjS6-v1",
-            ]),
-        }
-    ]
-  elif search == 'muzero':
-    space = [
-        # {
-        #     "group": tune.grid_search(['muzero-run-2']),
-        #     "agent": tune.grid_search(['muzero']),
-        #     "seed": tune.grid_search([1]),
-        #     "warmup_steps": tune.grid_search([1_000]),
-        #     "lr_transition_steps": tune.grid_search([1_000, 100_000]),
-        #     "env.level": tune.grid_search([
-        #         "BabyAI-GoToRedBallNoDists-v0",
-        #     ]),
-        # },
-        {
-            "group": tune.grid_search(['muzero-run-6']),
-            "agent": tune.grid_search(['muzero']),
-            "seed": tune.grid_search([1]),
-            # "samples_per_insert_tolerance_rate": tune.grid_search([.5, 1., 10.]),
-            "samples_per_insert": tune.grid_search([50., 25.]),
-            "env.level": tune.grid_search([
-                "BabyAI-GoToRedBallNoDists-v0",
-            ]),
-        }
+      # MuZero + Q-learning
+      {
+          "group": tune.grid_search(['baselines-2']),
+          "agent": tune.grid_search(['muzero', 'qlearning']),
+          "seed": tune.grid_search([1]),
+          "env.level": tune.grid_search([
+              "BabyAI-GoToRedBallNoDists-v0",
+              "BabyAI-GoToObjS6-v1",
+          ]),
+      },
+      # DYNA baselines. 
+      # when dyna_coeff=0.0, Q-learning + contrastive learning
+      {
+          "group": tune.grid_search(['dyna-full-1']),
+          "num_steps": tune.grid_search([1e6]),
+          "agent": tune.grid_search(['dyna']),
+          "seed": tune.grid_search([1]),
+          "dyna_coeff": tune.grid_search([0.0, 1e-3]),
+          "env.level": tune.grid_search([
+              "BabyAI-GoToRedBallNoDists-v0",
+              "BabyAI-GoToObjS6-v1",
+          ]),
+      }
     ]
   else:
     raise NotImplementedError(search)

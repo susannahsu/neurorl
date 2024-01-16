@@ -1,32 +1,33 @@
 
 from typing import Optional, Tuple, Optional, Callable, Union, Any
+from absl import logging
 
 import functools
-from functools import partial
 import chex
 import distrax
 import optax
 import mctx
 import reverb
+import numpy as np
 
 from acme import specs
 from acme.jax import networks as networks_lib
-from acme.jax import types as jax_types
-from acme.jax import utils as jax_utils
 from acme.agents.jax import actor_core as actor_core_lib
 
 import dataclasses
 import haiku as hk
 import jax
 import jax.numpy as jnp
-from jax import jit
 
 import rlax
 import library.networks as neural_networks
 
-from library import utils 
+from library import utils
+from library.utils import rolling_window
+from library.utils import scale_gradient 
 from td_agents import basics
 from library import muzero_mlps
+from td_agents.basics import MbrlNetworks, make_mbrl_network
 
 BatchSize = int
 PRNGKey = networks_lib.PRNGKey
@@ -42,34 +43,9 @@ ValueLogits = jax.Array
 InitFn = Callable[[PRNGKey], Params]
 StateFn = Callable[[Params, PRNGKey, Observation, State],
                    Tuple[NetworkOutput, State]]
-RootFn = Callable[[State], Tuple[PolicyLogits, ValueLogits]]
-ModelFn = Callable[[State], Tuple[RewardLogits, PolicyLogits, ValueLogits]]
+RootFn = Callable[[State], Tuple[State, PolicyLogits, ValueLogits]]
+ModelFn = Callable[[State], Tuple[State, RewardLogits, PolicyLogits, ValueLogits]]
 
-@dataclasses.dataclass
-class MuZeroNetworks:
-  """Network that can unroll state-fn and apply model over an input sequence."""
-  init: InitFn
-  apply: StateFn
-  unroll: StateFn
-  init_recurrent_state: Callable[[
-      PRNGKey, Optional[BatchSize]], State]
-  apply_model: ModelFn
-  unroll_model: ModelFn
-
-
-@chex.dataclass(frozen=True)
-class RootOutput:
-  state: jax.Array
-  value_logits: jax.Array
-  policy_logits: jax.Array
-
-
-@chex.dataclass(frozen=True)
-class ModelOutput:
-  new_state: jax.Array
-  reward_logits: jax.Array
-  value_logits: jax.Array
-  policy_logits: jax.Array
 
 @dataclasses.dataclass
 class Config(basics.Config):
@@ -115,12 +91,14 @@ class Config(basics.Config):
   min_replay_size: int = 1_000
   max_replay_size: int = 100_000
 
-  #Loss hps
-  num_bins: Optional[int] = None  # number of bins for two-hot rep
-  scalar_step_size: Optional[float] = .25  # step size between bins
-  max_scalar_value: float = 10.0  # number of bins for two-hot rep  max_scalar_value: float = 10.0  # number of bins for two-hot rep
-  value_target_source: str = 'reanalyze' # this interpolates between mcts output vs. observed return
-  reanalyze_ratio: float = 0.5 # percent of time to use mcts vs. observed return
+  # Loss hps
+  num_bins: Optional[int] = 81  # number of bins for two-hot rep
+  scalar_step_size: Optional[float] = None  # step size between bins
+  # number of bins for two-hot rep  max_scalar_value: float = 10.0  # number of bins for two-hot rep
+  max_scalar_value: float = 10.0
+  # this interpolates between mcts output vs. observed return
+  v_target_source: str = 'reanalyze'
+  reanalyze_ratio: float = 0.5  # percent of time to use mcts vs. observed return
   mask_model: bool = True
 
   # MCTS general hps
@@ -140,6 +118,21 @@ class Config(basics.Config):
   # MCTS gumble_muzero hps
   maxvisit_init: int = 50
   gumbel_scale: float = 1.0
+
+
+@chex.dataclass(frozen=True)
+class RootOutput:
+  state: jax.Array
+  value_logits: jax.Array
+  policy_logits: jax.Array
+
+
+@chex.dataclass(frozen=True)
+class ModelOutput:
+  new_state: jax.Array
+  reward_logits: jax.Array
+  value_logits: jax.Array
+  policy_logits: jax.Array
 
 
 def muzero_optimizer_constr(config, initial_params=None):
@@ -195,28 +188,12 @@ def muzero_optimizer_constr(config, initial_params=None):
   return optimizer
 
 
-@partial(jit, static_argnums=(1,))
-def rolling_window(a, size: int):
-    """Create rolling windows of a specified size from an input array.
-
-    This function takes an input array 'a' and a 'size' parameter and creates rolling windows of the specified size from the input array.
-
-    Args:
-        a (array-like): The input array.
-        size (int): The size of the rolling window.
-
-    Returns:
-        A new array containing rolling windows of 'a' with the specified size.
-    """
-    starts = jnp.arange(len(a) - size + 1)
-    return jax.vmap(lambda start: jax.lax.dynamic_slice(a, (start,), (size,)))(starts)
-
 def model_step(params: networks_lib.Params,
                rng_key: jax.Array,
                action: jax.Array,
                state: jax.Array,
                discount: jax.Array,
-               networks: MuZeroNetworks,
+               networks: MbrlNetworks,
                discretizer: utils.Discretizer):
   """One simulation step in MCTS."""
   rng_key, model_key = jax.random.split(rng_key)
@@ -269,7 +246,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
   simulation_steps : float = .5  # how many time-steps of simulation to learn model with
   reanalyze_ratio : float = .5  # how often to learn from MCTS data vs. experience
   mask_model: bool = True  # mask model outputs when out of bounds of data
-  value_target_source: str = 'reanalyze'
+  value_target_source: str = 'return'
 
   root_policy_coef: float = 1.0
   root_value_coef: float = 0.25
@@ -290,6 +267,20 @@ class MuZeroLossFn(basics.RecurrentLossFn):
       target_state,
       target_params,
       key_grad, **kwargs):
+
+      learning_model = (
+        self.model_policy_coef > 1e-8 or 
+        self.model_value_coef > 1e-8 or
+        self.model_reward_coef > 1e-8)
+
+      T, B = data.discount.shape[:2]
+      if learning_model:
+        effective_bs = B*T*self.simulation_steps
+        logging.warning(
+            f"Given S={self.simulation_steps} simultions, the effective batch size for muzero model learning when B={B}, T={T}, and S={self.simulation_steps} is {effective_bs}.")
+      else:
+        effective_bs = B*T
+        logging.warning(f"The effective batch size for muzero root learning when from MCTS when  B={B} and T={T} is {effective_bs}.")
 
       loss_fn = functools.partial(
         self.loss_fn,
@@ -363,7 +354,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
   def compute_target(self,
                      data: jax.Array,
                      is_terminal_mask: jax.Array,
-                     networks: MuZeroNetworks,
+                     networks: MbrlNetworks,
                      target_preds: RootOutput,
                      target_params: networks_lib.Params,
                      rng_key: networks_lib.PRNGKey,
@@ -390,41 +381,56 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         batch_size=target_values.shape[0])
 
     # 1 step of policy improvement
-    rng_key, improve_key = jax.random.split(rng_key)
-    mcts_outputs = self.mcts_policy(
-        params=target_params,
-        rng_key=improve_key,
-        root=roots,
-        invalid_actions=invalid_actions,
-        recurrent_fn=functools.partial(
-            model_step,
-            discount=jnp.full(target_values.shape, self.discount),
-            networks=networks,
-            discretizer=self.discretizer,
-        ))
+    policy_targets_from_mcts = self.root_policy_coef > 0 or self.model_policy_coef
+    targets_from_mcts = (self.value_target_source in ('mcts', 'reanalyze') or policy_targets_from_mcts)
+    if targets_from_mcts:
+      rng_key, improve_key = jax.random.split(rng_key)
+      mcts_outputs = self.mcts_policy(
+          params=target_params,
+          rng_key=improve_key,
+          root=roots,
+          invalid_actions=invalid_actions,
+          recurrent_fn=functools.partial(
+              model_step,
+              discount=jnp.full(target_values.shape, self.discount),
+              networks=networks,
+              discretizer=self.discretizer,
+          ))
 
     num_actions = target_preds.policy_logits.shape[-1]
-    policy_target = mcts_outputs.action_weights
+    uniform_policy = jnp.ones_like(target_preds.policy_logits) / num_actions
 
-    uniform_policy = jnp.ones_like(policy_target) / num_actions
-    if invalid_actions is not None:
-      valid_actions = 1 - invalid_actions
-      uniform_policy = valid_actions/valid_actions.sum(-1, keepdims=True)
+    #---------------------------
+    # if learning policy using MCTS, add uniform actions to end
+    # if not, just use uniform actions as targets
+    #---------------------------
+    if policy_targets_from_mcts:
+      policy_target = mcts_outputs.action_weights
 
-    random_policy_mask = jnp.broadcast_to(
-        is_terminal_mask[:, None], policy_target.shape
-    )
-    policy_probs_target = jax.lax.select(
-        random_policy_mask, uniform_policy, policy_target
-    )
-    policy_probs_target = jax.lax.stop_gradient(policy_probs_target)
+      if invalid_actions is not None:
+        valid_actions = 1 - invalid_actions
+        uniform_policy = valid_actions/valid_actions.sum(-1, keepdims=True)
+
+      random_policy_mask = jnp.broadcast_to(
+          is_terminal_mask[:, None], policy_target.shape
+      )
+      policy_probs_target = jax.lax.select(
+          random_policy_mask, uniform_policy, policy_target
+      )
+      policy_probs_target = jax.lax.stop_gradient(policy_probs_target)
+    else:
+      policy_probs_target = uniform_policy
 
     # ---------------
     # Values
     # ---------------
+    # if not using MCTS, populate with fake
     discounts = (data.discount[:-1] *
                  self.discount).astype(target_values.dtype)
-    mcts_values = mcts_outputs.search_tree.summary().value
+    if targets_from_mcts:
+      mcts_values = mcts_outputs.search_tree.summary().value
+    else:
+      mcts_values = jnp.zeros_like(discounts)
 
     reward_return_target = rlax.n_step_bootstrapped_returns(
         data.reward[:-1], discounts, target_values[1:], self.bootstrap_n)
@@ -475,7 +481,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     This function computes a loss using a combination of root losses
     and model losses. The steps are as follows:
     - compute losses for root predictions: value and policy
-    - then create targets for the model. for starting time-step t, we will get predictions for t+1, t+2, t+3, .... We repeat this for starting at t+1, t+2, etc. We try to do this as much as we can in parallel.
+    - then create targets for the model. for starting time-step t, we will get predictions for t+1, t+2, t+3, .... We repeat this for starting at t+1, t+2, etc. We try to do this as much as we can in parallel. leads to T*K number of predictions.
     - we then compute losses for model predictions: reward, value, policy.
 
     Args:
@@ -517,6 +523,28 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     # []
     raw_root_policy_loss = utils.episode_mean(root_policy_ce, in_episode)
     root_policy_loss = self.root_policy_coef*raw_root_policy_loss
+
+    # for TD-error
+    value_root_prediction = self.discretizer.logits_to_scalar(
+        online_preds.value_logits[:num_value_preds])
+
+    td_error = value_root_prediction - reward_return_target
+    mcts_error = mcts_values[:num_value_preds] - reward_return_target
+
+    # if not learning model
+    if (self.model_policy_coef < 1e-8 and 
+        self.model_value_coef < 1e-8 and
+        self.model_reward_coef < 1e-8):
+
+      total_loss = root_value_loss + root_policy_loss
+
+      metrics = {
+        "0.0.total_loss": total_loss,
+        "0.0.td-error": td_error,
+        '0.1.policy_root_loss': raw_root_policy_loss,
+        '0.3.value_root_loss': raw_root_value_loss,
+      }
+      return td_error, total_loss, metrics
 
     ###############################
     # Model losses
@@ -663,12 +691,6 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         root_value_loss + model_value_loss +
         root_policy_loss + model_policy_loss)
 
-    value_root_prediction = self.discretizer.logits_to_scalar(
-        online_preds.value_logits[:num_value_preds])
-
-    td_error = value_root_prediction - reward_return_target
-    mcts_error = mcts_values[:num_value_preds] - reward_return_target
-
     metrics = {
         "0.0.total_loss": total_loss,
         "0.0.td-error-value": jnp.abs(td_error),
@@ -693,50 +715,11 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     return self.invalid_actions
 
 
-def make_network(
-        environment_spec: specs.EnvironmentSpec,
-        make_core_module: Callable[[], hk.RNNCore]) -> MuZeroNetworks:
-  """Builds a MuZeroNetworks from a hk.Module factory."""
-
-  dummy_observation = jax_utils.zeros_like(environment_spec.observations)
-  dummy_action = jnp.array(0)
-
-  def make_unrollable_network_functions():
-    network = make_core_module()
-
-    def init() -> Tuple[networks_lib.NetworkOutput, State]:
-      out, _ = network(dummy_observation, network.initial_state(None))
-      return network.apply_model(out.state, dummy_action)
-
-    apply = network.__call__
-    return init, (apply,
-                  network.unroll,
-                  network.initial_state,
-                  network.apply_model,
-                  network.unroll_model)
-
-  # Transform and unpack pure functions
-  f = hk.multi_transform(make_unrollable_network_functions)
-  apply, unroll, initial_state_fn, apply_model, unroll_model = f.apply
-
-  def init_recurrent_state(key: jax_types.PRNGKey,
-                           batch_size: Optional[int] =  None) -> State:
-    no_params = None
-    return initial_state_fn(no_params, key, batch_size)
-
-  return MuZeroNetworks(
-      init=f.init,
-      apply=apply,
-      unroll=unroll,
-      apply_model=apply_model,
-      unroll_model=unroll_model,
-      init_recurrent_state=init_recurrent_state)
-
 def policy_select_action(
         params: networks_lib.Params,
         observation: networks_lib.Observation,
         state: basics.ActorState[actor_core_lib.RecurrentState],
-        networks: MuZeroNetworks,
+        networks: MbrlNetworks,
         evaluation: bool = True):
   rng, policy_rng = jax.random.split(state.rng)
 
@@ -753,6 +736,68 @@ def policy_select_action(
       recurrent_state=recurrent_state,
       prev_recurrent_state=state.recurrent_state)
 
+def value_select_action(
+        params: networks_lib.Params,
+        observation: networks_lib.Observation,
+        state: basics.ActorState[actor_core_lib.RecurrentState],
+        networks: MbrlNetworks,
+        discretizer: utils.Discretizer,
+        discount: float = .99,
+        epsilon: float = .99,
+        evaluation: bool = True):
+  rng, policy_rng = jax.random.split(state.rng)
+
+  preds, recurrent_state = networks.apply(
+      params, policy_rng, observation, state.recurrent_state)
+
+  #-----------------
+  # function for computing Q-values for 1 action
+  #-----------------
+  def compute_q(state, action):
+    """Q(s,a) = r(s,a) + \gamma* v(s')"""
+    model_preds, _ = networks.apply_model(
+        params, policy_rng, state, action)
+
+    reward = discretizer.logits_to_scalar(
+      model_preds.reward_logits)
+    value = discretizer.logits_to_scalar(
+      model_preds.value_logits)
+    q_values = reward + discount*value
+    return q_values
+
+  # jit to make faster
+  # vmap to do parallel over actions
+  compute_q = jax.jit(jax.vmap(compute_q, in_axes=(None, 0)))
+
+
+  #-----------------
+  # compute Q-values for all actions
+  #-----------------
+  # create "batch" of actions
+  nactions = preds.policy_logits.shape[-1]
+  all_actions = jnp.arange(nactions)  # [A]
+
+  # [A, 1]
+  q_values = compute_q(
+    recurrent_state.hidden, all_actions)
+  # [A]
+  q_values = jnp.squeeze(q_values, axis=-1)
+
+
+  #-----------------
+  # select action
+  #-----------------
+  if evaluation:
+    action = jnp.argmax(q_values, axis=-1)
+  else:
+    rng, policy_rng = jax.random.split(rng)
+    action = rlax.epsilon_greedy(epsilon).sample(policy_rng, q_values)
+
+  return action, basics.ActorState(
+      rng=rng,
+      recurrent_state=recurrent_state,
+      prev_recurrent_state=state.recurrent_state)
+
 def mcts_select_action(
     params: networks_lib.Params,
     observation: networks_lib.Observation,
@@ -760,7 +805,7 @@ def mcts_select_action(
     discretizer: utils.Discretizer,
     mcts_policy: Optional[
         Union[mctx.muzero_policy, mctx.gumbel_muzero_policy]],
-    networks: MuZeroNetworks,
+    networks: MbrlNetworks,
     discount: float = .99,
     evaluation: bool = True):
 
@@ -808,7 +853,7 @@ def mcts_select_action(
       prev_recurrent_state=state.recurrent_state)
 
 def get_actor_core(
-    networks: MuZeroNetworks,
+    networks: MbrlNetworks,
     config: Config,
     discretizer: Optional[utils.Discretizer] = None,
     mcts_policy: Optional[
@@ -817,28 +862,48 @@ def get_actor_core(
 ):
   """Returns ActorCore for MuZero."""
 
-  assert config.action_source in ['policy', 'mcts']
   if config.action_source == 'policy':
-    select_action = functools.partial(policy_select_action,
-                                      networks=networks,
-                                      evaluation=evaluation)
+    select_action = functools.partial(
+      policy_select_action,
+      networks=networks,
+      evaluation=evaluation)
+  elif config.action_source == 'value':
+    select_action = functools.partial(
+      value_select_action,
+      networks=networks,
+      evaluation=evaluation,
+      discretizer=discretizer,
+      discount=config.discount)
   elif config.action_source == 'mcts':
-    select_action = functools.partial(mcts_select_action,
-                                      networks=networks,
-                                      evaluation=evaluation,
-                                      mcts_policy=mcts_policy,
-                                      discretizer=discretizer,
-                                      discount=config.discount)
+    select_action = functools.partial(
+      mcts_select_action,
+      networks=networks,
+      evaluation=evaluation,
+      mcts_policy=mcts_policy,
+      discretizer=discretizer,
+      discount=config.discount)
+  else:
+    raise NotImplementedError(config.action_source)
 
   def init(
       rng: networks_lib.PRNGKey,
   ) -> basics.ActorState[actor_core_lib.RecurrentState]:
-    rng, state_rng = jax.random.split(rng, 2)
+    rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
     initial_core_state = networks.init_recurrent_state(
         state_rng)
-
+    if evaluation:
+      epsilon = config.evaluation_epsilon
+    else:
+      epsilon = jax.random.choice(
+        epsilon_rng,
+        np.logspace(
+          start=config.epsilon_min,
+          stop=config.epsilon_max,
+          num=config.num_epsilons,
+          base=config.epsilon_base))
     return basics.ActorState(
         rng=rng,
+        epsilon=epsilon,
         recurrent_state=initial_core_state,
         prev_recurrent_state=initial_core_state)
 
@@ -963,35 +1028,24 @@ class MuZeroArch(hk.RNNCore):
     # [T, D], [D]
     return model_output, new_state
 
-def scale_gradient(g: jax.Array, scale: float) -> jax.Array:
-    """Scale the gradient.
-
-    Args:
-        g (_type_): Parameters that contain gradients.
-        scale (float): Scale.
-
-    Returns:
-        Array: Parameters with scaled gradients.
-    """
-    return g * scale + jax.lax.stop_gradient(g) * (1.0 - scale)
-
 def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,
         config: Config,
         task_encoder: Callable[[jax.Array], jax.Array] = lambda obs: None,
-        **kwargs) -> MuZeroNetworks:
+        **kwargs) -> MbrlNetworks:
   """Builds default MuZero networks for BabyAI tasks."""
 
   num_actions = env_spec.actions.num_values
   state_dim = config.state_dim
 
-  def make_core_module() -> MuZeroNetworks:
+  def make_core_module() -> MbrlNetworks:
 
     ###########################
     # Setup observation and state functions
     ###########################
     vision_torso = neural_networks.BabyAIVisionTorso(
-      conv_dim=0, out_dim=config.state_dim)
+        conv_dim=config.out_conv_dim,
+        out_dim=config.state_dim)
     observation_fn = neural_networks.OarTorso(
         num_actions=num_actions,
         vision_torso=vision_torso,
@@ -1092,6 +1146,6 @@ def make_minigrid_networks(
         root_pred_fn=root_predictor,
         model_pred_fn=model_predictor)
 
-  return make_network(environment_spec=env_spec,
+  return make_mbrl_network(environment_spec=env_spec,
                       make_core_module=make_core_module,
                       **kwargs)

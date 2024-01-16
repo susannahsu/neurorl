@@ -1,5 +1,11 @@
 
-# Jan 3rd, 2024
+# Jan 4, 2024
+
+- I have added `contrastive_dyna` as an RL agent. Here we learn a k-step transition- and reward- model with contrastive learning. The loss function learns from both real data and simulated data.
+- I have added examples learning with these agents to `catch_trainer` and `minigrid_trainer`.
+- I did some refactoring of `muzero` to better use model-based pieces with `dyna`.
+
+# Jan 3, 2024
 
 I changed the install instructions for the FAS clusters. The main changes are:
 

@@ -72,8 +72,9 @@ import jax
 
 import minigrid
 
+from envs.minigrid_bot import GotoOptionsWrapper
+from envs.minigrid_wrappers import DictObservationSpaceWrapper
 from library.dm_env_wrappers import GymWrapper
-import library.env_wrappers as env_wrappers
 import library.experiment_builder as experiment_builder
 import library.parallel as parallel
 import library.utils as utils
@@ -271,10 +272,10 @@ def make_keyroom_object_test_env(seed: int,
   ####################################
   # Gym wrappers
   ####################################
-  gym_wrappers = [env_wrappers.DictObservationSpaceWrapper]
+  gym_wrappers = [DictObservationSpaceWrapper]
   if object_options:
     gym_wrappers.append(functools.partial(
-      env_wrappers.GotoOptionsWrapper, use_options=object_options))
+      GotoOptionsWrapper, use_options=object_options))
   
   # MUST GO LAST. GotoOptionsWrapper exploits symbolic obs
   gym_wrappers.append(functools.partial(
@@ -444,7 +445,7 @@ def setup_experiment_inputs(
         bootstrap_n=config.bootstrap_n,
       ))
     network_factory = functools.partial(
-      q_learning.make_minigrid_networks,
+      object_q_learning.make_minigrid_networks,
       config=config,
       task_encoder=lambda obs: hk.nets.MLP(
         (128, 128), activate_final=True)(obs))

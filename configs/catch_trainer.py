@@ -68,7 +68,7 @@ import jax
 import jax.numpy as jnp
 
 from envs import catch
-from td_agents import q_learning, basics, muzero
+from td_agents import contrastive_dyna, q_learning, basics, muzero
 from library import muzero_mlps
 
 import library.experiment_builder as experiment_builder
@@ -132,15 +132,84 @@ def make_qlearning_networks(
     env_spec, make_core_module)
 
 
-def make_muzero_networks(
-    env_spec: specs.EnvironmentSpec,
-    config: muzero.Config,
-    **kwargs) -> muzero.MuZeroNetworks:
-  """Builds default MuZero networks for BabyAI tasks."""
+def make_dyna_networks(
+        env_spec: specs.EnvironmentSpec,
+        config: contrastive_dyna.Config,
+        **kwargs) -> basics.MbrlNetworks:
+  """Builds default Dyna networks for Catch env."""
 
   num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum) + 1
 
-  def make_core_module() -> muzero.MuZeroNetworks:
+  def make_core_module() -> basics.MbrlNetworks:
+
+    ###########################
+    # Setup observation and state functions
+    ###########################
+    observation_fn = functools.partial(observation_encoder,
+                                       num_actions=num_actions)
+    observation_fn = hk.to_module(observation_fn)('obs_fn')
+    state_fn = networks.DummyRNN()
+
+    ###########################
+    # Setup transition function: ResNet
+    ###########################
+    def transition_fn(action: int, state: State):
+      action_onehot = jax.nn.one_hot(
+          action, num_classes=num_actions)
+      assert action_onehot.ndim in (1, 2), "should be [A] or [B, A]"
+
+      def _transition_fn(action_onehot, state):
+        """transition model that scales gradient."""
+        # action: [A]
+        # state: [D]
+        out = muzero_mlps.SimpleTransition(
+            num_blocks=2)(
+            action_onehot, state)
+        out = utils.scale_gradient(out, config.scale_grad)
+        return out, out
+
+      if action_onehot.ndim == 2:
+        _transition_fn = jax.vmap(_transition_fn)
+      return _transition_fn(action_onehot, state)
+    transition_fn = hk.to_module(transition_fn)('transition_fn')
+
+    ###########################
+    # Setup prediction functions for Q-values + rewards
+    ###########################
+    def prediction_fn(state):
+      q_values = duelling.DuellingMLP(
+          num_actions, hidden_sizes=[config.q_dim])(state)
+
+      rewards = hk.nets.MLP([config.q_dim, 1])(state)
+      rewards = jnp.squeeze(rewards, axis=-1)
+
+      return contrastive_dyna.Predictions(
+          state=state,
+          rewards=rewards,
+          q_values=q_values)
+    prediction_fn = hk.to_module(prediction_fn)('prediction_fn')
+
+    return contrastive_dyna.DynaArch(
+        observation_fn=observation_fn,
+        state_fn=state_fn,
+        transition_fn=transition_fn,
+        prediction_fn=prediction_fn)
+
+  return basics.make_mbrl_network(
+      environment_spec=env_spec,
+      make_core_module=make_core_module,
+      **kwargs)
+
+
+def make_muzero_networks(
+    env_spec: specs.EnvironmentSpec,
+    config: muzero.Config,
+    **kwargs) -> basics.MbrlNetworks:
+  """Builds default MuZero networks for Catch env."""
+
+  num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum) + 1
+
+  def make_core_module() -> basics.MbrlNetworks:
 
     ###########################
     # Setup observation and state functions
@@ -165,7 +234,7 @@ def make_muzero_networks(
         out = muzero_mlps.SimpleTransition(
             num_blocks=2)(
             action_onehot, state)
-        out = muzero.scale_gradient(out, config.scale_grad)
+        out = utils.scale_gradient(out, config.scale_grad)
         return out, out
 
       if action_onehot.ndim == 2:
@@ -235,7 +304,7 @@ def make_muzero_networks(
         root_pred_fn=root_predictor,
         model_pred_fn=model_predictor)
 
-  return muzero.make_network(
+  return basics.make_mbrl_network(
     environment_spec=env_spec,
     make_core_module=make_core_module,
     **kwargs)
@@ -289,6 +358,34 @@ def setup_experiment_inputs(
           bootstrap_n=config.bootstrap_n,
       ))
     network_factory = functools.partial(make_qlearning_networks, config=config)
+  elif agent == 'dyna':
+    config = contrastive_dyna.Config(**config_kwargs)
+    builder = basics.Builder(
+      config=config,
+      get_actor_core_fn=functools.partial(
+        basics.get_actor_core, 
+        extract_q_values=lambda preds: preds.q_values),
+      LossFn=contrastive_dyna.ContrastiveDynaLossFn(
+          discount=config.discount,
+          importance_sampling_exponent=config.importance_sampling_exponent,
+          burn_in_length=config.burn_in_length,
+          max_replay_size=config.max_replay_size,
+          max_priority_weight=config.max_priority_weight,
+          bootstrap_n=config.bootstrap_n,
+          # RL loss
+          rl_coeff=config.rl_coeff,
+          # contrastive model + reward loss
+          reward_coeff=config.reward_coeff,
+          model_coeff=config.model_coeff,
+          labels_from_target_params=config.labels_from_target_params,
+          num_negatives=config.num_negatives,
+          simulation_steps=config.simulation_steps,
+          temperature=config.temperature,
+          # dyna loss
+          dyna_coeff=config.dyna_coeff,
+
+      ))
+    network_factory = functools.partial(make_dyna_networks, config=config)
   elif agent == 'muzero':
     config = muzero.Config(**config_kwargs)
 
@@ -544,6 +641,17 @@ def sweep(search: str = 'default'):
             "group": tune.grid_search(['catch-run-3']),
             "num_steps": tune.grid_search([1e6]),
             "agent": tune.grid_search(['muzero']),
+            "seed": tune.grid_search([1]),
+            "env.rows": tune.grid_search([5]),
+        }
+    ]
+  elif search == 'dyna':
+    space = [
+        {
+            "group": tune.grid_search(['dyna-full-2']),
+            "num_steps": tune.grid_search([1e6]),
+            "min_replay_size": tune.grid_search([1_000]),
+            "agent": tune.grid_search(['dyna']),
             "seed": tune.grid_search([1]),
             "env.rows": tune.grid_search([5]),
         }

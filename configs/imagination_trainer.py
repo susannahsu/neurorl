@@ -72,7 +72,6 @@ from td_agents import q_learning, basics, muzero
 from library import muzero_mlps
 
 from library.dm_env_wrappers import GymWrapper
-import library.env_wrappers as env_wrappers
 import library.experiment_builder as experiment_builder
 import library.parallel as parallel
 import library.utils as utils
@@ -168,7 +167,7 @@ def make_muzero_networks(
         out = muzero_mlps.SimpleTransition(
             num_blocks=config.transition_blocks)(
             action_onehot, state)
-        out = muzero.scale_gradient(out, config.scale_grad)
+        out = utils.scale_gradient(out, config.scale_grad)
         return out, out
 
       if action_onehot.ndim == 2:

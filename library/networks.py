@@ -40,7 +40,7 @@ def concat(image: Image, task: Task, action: Action, reward: Reward):
 class AtariVisionTorso(hk.Module):
   """Simple convolutional stack commonly used for Atari."""
 
-  def __init__(self, flatten=True, conv_dim=16, out_dim=0):
+  def __init__(self, flatten=True, conv_dim=32, out_dim=0):
     super().__init__(name='atari_torso')
     layers = [
         hk.Conv2D(32, [8, 8], 4),
@@ -234,3 +234,15 @@ class DummyRNN(hk.RNNCore):
 
   def initial_state(self, batch_size: Optional[int]) -> hk.LSTMState:
     return jnp.zeros((batch_size, 1)) if batch_size else jnp.zeros((1))
+
+
+class LstmStateTransform(hk.LSTM):
+  def __init__(self, *args, transformation=None, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.transformation = transformation
+
+  def __call__(self, inputs: jax.Array, prev_state: hk.LSTMState
+               ) -> Tuple[jax.Array, hk.LSTMState]:
+    hidden, state = super().__call__(inputs, prev_state)
+    output = self.transformation(hidden)
+    return output, state

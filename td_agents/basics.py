@@ -25,7 +25,7 @@ from acme.agents.jax.dqn import learning_lib
 from acme.utils import async_utils
 from acme.utils import counting
 from acme.utils import loggers
-from acme.jax import utils
+from acme.jax import types as jax_types, utils, utils as jax_utils
 from acme.jax import networks as network_lib
 from acme.jax import variable_utils
 from acme.agents.jax import r2d2
@@ -40,23 +40,15 @@ from acme.utils import loggers
 
 
 
-
-
-import jax
-import optax
-import reverb
-import numpy as np
-
 import jax
 import jax.numpy as jnp
-from jax._src.lib import xla_bridge # for clearing cache
+import numpy as np
 import optax
+import tree
 import reverb
 import rlax
-import tree
 
 
-from library.utils import ActorObserver
 
 _PMAP_AXIS_NAME = 'data'
 
@@ -70,15 +62,16 @@ Policy = r2d2_actor.R2D2Policy
 
 # Only simple observations & discrete action spaces for now.
 Observation = jax.Array
+State = acme_types.NestedArray
 
 # initializations
-ValueInitFn = Callable[[networks_lib.PRNGKey, Observation, hk.LSTMState],
-                             networks_lib.Params]
+InitFn = Callable[[networks_lib.PRNGKey], networks_lib.Params]
 
 # calling networks
-RecurrentStateFn = Callable[[networks_lib.Params], hk.LSTMState]
-ValueFn = Callable[[networks_lib.Params, Observation, hk.LSTMState],
+RecurrentStateFn = Callable[[networks_lib.Params], State]
+ValueFn = Callable[[networks_lib.Params, Observation, State],
                          networks_lib.Value]
+ModelFn = Callable[[State], acme_types.NestedArray]
 
 @chex.dataclass(frozen=True, mappable_dataclass=False)
 class ActorState(Generic[actor_core_lib.RecurrentState]):
@@ -124,6 +117,7 @@ class Config(r2d2.R2D2Config):
 
   # Architecture
   state_dim: int = 256
+  out_conv_dim: int = 32
 
   #----------------
   # Epsilon schedule
@@ -184,11 +178,22 @@ class NetworkFn:
       observations, for learning.
     initial_state: Recurrent state at the beginning of an episode.
   """
-  init: ValueInitFn
+  init: InitFn
   forward: ValueFn
   unroll: ValueFn
   initial_state: RecurrentStateFn
   evaluation: Optional[ValueFn] = None
+
+
+@dataclasses.dataclass
+class MbrlNetworks:
+  """Network that can unroll state-fn and apply model over an input sequence."""
+  init: InitFn
+  apply: RecurrentStateFn
+  unroll: RecurrentStateFn
+  init_recurrent_state: RecurrentStateFn
+  apply_model: ModelFn
+  unroll_model: ModelFn
 
 @dataclasses.dataclass
 class RecurrentLossFn(learning_lib.LossFn):
@@ -260,6 +265,18 @@ class RecurrentLossFn(learning_lib.LossFn):
       _, batch_size = data.action.shape
       key_grad, key = jax.random.split(key_grad)
       online_state = network.init_recurrent_state(key, batch_size)
+
+    ############
+    # if we've stored every single RNN state, only use 0th time-step
+    # [B, T, D] --> [B, D]
+    ############
+    if ((isinstance(online_state, hk.LSTMState) and 
+        online_state.hidden.ndim > 2)
+        or
+        (isinstance(online_state, jnp.ndarray) and 
+          online_state.ndim > 2)):
+      online_state = jax.tree_map(lambda x: x[:,0], online_state)
+
     target_state = online_state
 
     # Convert sample data to sequence-major format [T, B, ...].
@@ -410,15 +427,16 @@ class SGDLearner(learning_lib.SGDLearner):
                loss_fn: LossFn,
                optimizer_cnstr: Callable[
                  [Config, networks_lib.Params], optax.GradientTransformation],
-               data_iterator: Iterator[reverb.ReplaySample],
                target_update_period: int,
-               random_key: networks_lib.PRNGKey,
+               data_iterator: Optional[Iterator[reverb.ReplaySample]]= None,
+               random_key: Optional[networks_lib.PRNGKey] = None,
                replay_client: Optional[reverb.Client] = None,
                replay_table_name: str = adders.reverb.DEFAULT_PRIORITY_TABLE,
                counter: Optional[counting.Counter] = None,
                logger: Optional[loggers.Logger] = None,
                num_sgd_steps_per_step: int = 1,
                grad_period: int = 0,
+               initialize: bool = True,
                ):
     """Initialize the SGD learner."""
     self._grad_period = grad_period*num_sgd_steps_per_step
@@ -440,13 +458,13 @@ class SGDLearner(learning_lib.SGDLearner):
       grads = jax.lax.pmean(grads, axis_name=_PMAP_AXIS_NAME)
 
       # Apply the optimizer updates
-      updates, new_opt_state = optimizer.update(grads, state.opt_state, state.params)
+      updates, new_opt_state = self._optimizer.update(grads, state.opt_state, state.params)
       new_params = optax.apply_updates(state.params, updates)
 
       # Periodically update target networks.
       steps = state.steps + 1
       if isinstance(target_update_period, float):
-        assert (target_update_period > 0.0 and 
+        assert (target_update_period >= 0.0 and 
                 target_update_period < 1.0), 'incorrect float'
         target_params = optax.incremental_update(new_params, state.target_params,
                                                  target_update_period)
@@ -495,53 +513,65 @@ class SGDLearner(learning_lib.SGDLearner):
     #####################################
     # Internalise agent components
     #####################################
-    self._data_iterator = data_iterator
-    self._replay_client = replay_client
-    self._counter = counter or counting.Counter()
-    # self._logger = logger or loggers.TerminalLogger('learner', time_delta=1.)
-    self._num_sgd_steps_per_step = num_sgd_steps_per_step
-    self._logger = logger or loggers.make_default_logger(
-        'learner',
-        asynchronous=True,
-        serialize_fn=utils.fetch_devicearray,
-        time_delta=1.,
-        steps_key=self._counter.get_steps_key())
-
-    if num_sgd_steps_per_step > 1:
-      raise RuntimeError("check")
-      # sgd_step = utils.process_multiple_batches(sgd_step, num_sgd_steps_per_step, postprocess_aux)
-
     self._sgd_step = jax.pmap(
       sgd_step, axis_name=_PMAP_AXIS_NAME)
 
     self._async_priority_updater = async_utils.AsyncExecutor(update_priorities)
-
-
+    self._counter = counter or counting.Counter()
+    self._optimizer_cnstr = optimizer_cnstr
+    self._replay_client = replay_client
     # Do not record timestamps until after the first learning step is done.
     # This is to avoid including the time it takes for actors to come online and
     # fill the replay buffer.
     self._timestamp = None
+    self._num_sgd_steps_per_step = num_sgd_steps_per_step
 
-    # Initialize the network parameters
-    key_params, key_state = jax.random.split(random_key, 2)
-    initial_params = network.init(key_params)
-    optimizer = optimizer_cnstr(initial_params=initial_params)
+    if initialize:
+      self._data_iterator = data_iterator
+      self._logger = logger or loggers.make_default_logger(
+          'learner',
+          asynchronous=True,
+          serialize_fn=utils.fetch_devicearray,
+          time_delta=1.,
+          steps_key=self._counter.get_steps_key())
 
-    state = TrainingState(
-        params=initial_params,
-        target_params=initial_params,
-        opt_state=optimizer.init(initial_params),
-        steps=jnp.array(0),
-        rng_key=key_state,
-    )
-    self._state = utils.replicate_in_all_devices(state)
-    self._current_step = 0
+      if num_sgd_steps_per_step > 1:
+        raise RuntimeError("check")
+        # sgd_step = utils.process_multiple_batches(sgd_step, num_sgd_steps_per_step, postprocess_aux)
 
-    # Log how many parameters the network has.
-    sizes = tree.map_structure(jnp.size, initial_params)
-    total_params =  sum(tree.flatten(sizes.values()))
-    logging.info('Total number of params: %.3g', total_params)
-    [logging.info(f"{k}: {v}") for k,v in param_sizes(initial_params).items()]
+
+      # Initialize the network parameters
+      self._state, self._optimizer = self.initialize(
+        network=network, random_key=random_key)
+      self._current_step = 0
+
+  def initialize(self, network, random_key):
+      key_params, key_state = jax.random.split(random_key, 2)
+      initial_params = network.init(key_params)
+      optimizer = self._optimizer_cnstr(initial_params=initial_params)
+
+      state = TrainingState(
+          params=initial_params,
+          target_params=initial_params,
+          opt_state=optimizer.init(initial_params),
+          steps=jnp.array(0),
+          rng_key=key_state,
+      )
+      state = utils.replicate_in_all_devices(state)
+
+      # Log how many parameters the network has.
+      sizes = tree.map_structure(jnp.size, initial_params)
+      total_params =  sum(tree.flatten(sizes.values()))
+      logging.info('Total number of params: %.3g', total_params)
+      [logging.info(f"{k}: {v}") for k,v in param_sizes(initial_params).items()]
+
+      return state, optimizer
+
+  def set_optimizer(self, optimizer): self._optimizer = optimizer
+
+  def set_state(self, state):
+    self._state = state
+    self._current_step = utils.get_from_first_device(self._state.steps)
 
   def step(self):
     """Takes one SGD step on the learner."""
@@ -551,19 +581,7 @@ class SGDLearner(learning_lib.SGDLearner):
       self._state, metrics = self.step_data(data, self._state)
       self._current_step = utils.get_from_first_device(self._state.steps)
 
-      # Compute elapsed time.
-      timestamp = time.time()
-      elapsed = timestamp - self._timestamp if self._timestamp else 0
-      self._timestamp = timestamp
-      steps_per_sec = (self._num_sgd_steps_per_step / elapsed) if elapsed else 0
-
-      # Update our counts and record it.
-      results = self._counter.increment(
-          steps=self._num_sgd_steps_per_step, walltime=elapsed)
-      results['steps_per_second'] = steps_per_sec
-      results.update(metrics)
-
-      self._logger.write(results)
+      self._logger.write(metrics)
 
   def step_data(self, prefetching_split, state: TrainingState):
     """Takes one SGD step on the learner."""
@@ -571,9 +589,11 @@ class SGDLearner(learning_lib.SGDLearner):
     # replay keys and the device property is the prefetched full original
     # sample. Key is on host since it's uint64 type.
     if hasattr(prefetching_split, 'host'):
+      # prioritized data
       reverb_keys = prefetching_split.host
       batch: reverb.ReplaySample = prefetching_split.device
     else:
+      # regular data
       batch: reverb.ReplaySample = prefetching_split
 
     state, extra = self._sgd_step(state, batch)
@@ -591,7 +611,19 @@ class SGDLearner(learning_lib.SGDLearner):
     else:
       metrics.pop('mean_grad', None)
 
-    return state, metrics
+    # Compute elapsed time.
+    timestamp = time.time()
+    elapsed = timestamp - self._timestamp if self._timestamp else 0
+    self._timestamp = timestamp
+    steps_per_sec = (self._num_sgd_steps_per_step / elapsed) if elapsed else 0
+
+    # Update our counts and record it.
+    results = self._counter.increment(
+        steps=self._num_sgd_steps_per_step, walltime=elapsed)
+    results['steps_per_second'] = steps_per_sec
+    results.update(metrics)
+
+    return state, results
 
   def get_state(self): return self._state
 
@@ -641,14 +673,10 @@ class ActorObserver(abc.ABC):
     Should be state after previous time-step along"""
 
   @abc.abstractmethod
-  def observe_timestep(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
+  def observe_timestep(self, timestep: dm_env.TimeStep) -> None:
     """Observe next.
     
     Should be state after previous time-step along"""
-
-  @abc.abstractmethod
-  def get_metrics(self) -> Dict[str, Number]:
-    """Returns metrics collected for the current episode."""
 
 
 class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras]):
@@ -710,7 +738,7 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
     self._state = self._init(key)
 
     for observer in self._observers:
-      observer.observe_first(timestep, self._state)
+      observer.observe_first(timestep=timestep, state=self._state)
 
     if self._adders:
       for adder in self._adders:
@@ -723,7 +751,7 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
     action, self._state = self._policy(self._params, observation, self._state)
 
     for observer in self._observers:
-      observer.observe_action(self._state, action)
+      observer.observe_action(state=self._state, action=action)
 
     return utils.to_numpy(action)
 
@@ -734,7 +762,7 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
             action, next_timestep, extras=self._get_extras(self._state))
 
     for observer in self._observers:
-      observer.observe_timestep(next_timestep)
+      observer.observe_timestep(timestep=next_timestep)
 
 
   def update(self, wait: bool = False):
@@ -914,4 +942,42 @@ def disable_insert_blocking(
             (rate_limiter_info.max_diff - rate_limiter_info.min_diff) / 2)))
   return modified_tables, sample_sizes
 
+def make_mbrl_network(
+        environment_spec: specs.EnvironmentSpec,
+        make_core_module: Callable[[], hk.RNNCore]) -> MbrlNetworks:
+  """Builds a MbrlNetworks from a hk.Module factory."""
+
+  dummy_observation = jax_utils.zeros_like(environment_spec.observations)
+  dummy_action = jnp.array(0)
+
+  def make_unrollable_network_functions():
+    network = make_core_module()
+
+    def init() -> Tuple[networks_lib.NetworkOutput, State]:
+      out, _ = network(dummy_observation, network.initial_state(None))
+      return network.apply_model(out.state, dummy_action)
+
+    apply = network.__call__
+    return init, (apply,
+                  network.unroll,
+                  network.initial_state,
+                  network.apply_model,
+                  network.unroll_model)
+
+  # Transform and unpack pure functions
+  f = hk.multi_transform(make_unrollable_network_functions)
+  apply, unroll, initial_state_fn, apply_model, unroll_model = f.apply
+
+  def init_recurrent_state(key: jax_types.PRNGKey,
+                           batch_size: Optional[int] =  None) -> State:
+    no_params = None
+    return initial_state_fn(no_params, key, batch_size)
+
+  return MbrlNetworks(
+      init=f.init,
+      apply=apply,
+      unroll=unroll,
+      apply_model=apply_model,
+      unroll_model=unroll_model,
+      init_recurrent_state=init_recurrent_state)
 
