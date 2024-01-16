@@ -85,7 +85,7 @@ class ObjectOrientedR2D2(hk.RNNCore):
     # convert everything to floats
     inputs = jax.tree_map(lambda x: x.astype(jnp.float32), inputs)
 
-    # objects_mask = inputs.observation['objects_mask']
+    objects_mask = inputs.observation['objects_mask']
     #----------------------------
     # process actions
     #----------------------------
@@ -124,7 +124,7 @@ class ObjectOrientedR2D2(hk.RNNCore):
     state_input = jnp.concatenate(
       (image, task, reward), axis=-1)
 
-    return state_input, objects
+    return state_input, objects, objects_mask
 
   def __call__(
       self,
@@ -132,10 +132,10 @@ class ObjectOrientedR2D2(hk.RNNCore):
       state: hk.LSTMState  # [B, ...]
   ) -> Tuple[base.QValues, hk.LSTMState]:
 
-    state_input, objects = self.process_inputs(inputs, state)
+    state_input, objects, objects_mask = self.process_inputs(inputs, state)
     core_outputs, new_state = self._memory(state_input, state)
     new_state = update_state(new_state, inputs.observation['objects'].astype(jnp.float32))
-    q_values = self._object_qhead(core_outputs, objects)
+    q_values = self._object_qhead(core_outputs, objects, objects_mask)
     return q_values, new_state
 
   def unroll(
@@ -145,7 +145,7 @@ class ObjectOrientedR2D2(hk.RNNCore):
   ) -> Tuple[base.QValues, hk.LSTMState]:
     """Efficient unroll that applies torso, core, and duelling mlp in one pass."""
 
-    state_input, objects = hk.BatchApply(
+    state_input, objects, objects_mask = hk.BatchApply(
       jax.vmap(self.process_inputs))(inputs, state)  # [T, B, D+A+1]
 
     core_outputs, new_states = hk.static_unroll(
@@ -153,7 +153,7 @@ class ObjectOrientedR2D2(hk.RNNCore):
 
     new_state = update_state(new_state, inputs.observation['objects'].astype(jnp.float32))
 
-    q_values = hk.BatchApply(jax.vmap(self._head))(core_outputs, objects)  # [T, B, A]
+    q_values = hk.BatchApply(jax.vmap(self._head))(core_outputs, objects, objects_mask)  # [T, B, A]
     return q_values, new_states
 
 def make_minigrid_networks(
@@ -167,7 +167,9 @@ def make_minigrid_networks(
   objects_spec = env_spec.observations.observation['objects'].shape
   def make_core_module() -> ObjectOrientedR2D2:
 
-    def object_qhead(state: jax.Array, objects: jax.Array):
+    def object_qhead(state: jax.Array,
+                     objects: jax.Array,
+                     objects_mask: jax.Array):
       #--------------
       # primitive actions
       #--------------
@@ -188,6 +190,9 @@ def make_minigrid_networks(
       object_qs = object_qhead(object_inputs)
       object_qs = jnp.squeeze(object_qs, axis=-1)
 
+      # whereover objects not available, but -inf
+      # important for learning
+      object_qs =  jnp.where(objects_mask, object_qs, -jnp.inf)
       qs = jnp.concatenate((primitive_qs, object_qs))
 
       return qs
@@ -231,17 +236,16 @@ def get_actor_core(
 
     def uniform(rng):
       logits = jnp.where(valid_actions, valid_actions, -jnp.inf)
+
       return jax.random.categorical(rng, logits)
 
     def exploit(rng):
-      q_values = jnp.where(valid_actions, q_values, -jnp.inf)
       return jnp.argmax(q_values)
 
     # Using jax.lax.cond for conditional execution
     rng, q_rng = jax.random.split(rng)
     # Generate a random number to decide explore or exploit
     explore = jax.random.uniform(q_rng) < state.epsilon
-    rng, q_rng = jax.random.split(rng)
     action = jax.lax.cond(explore, uniform, exploit, q_rng)
 
     return action, basics.ActorState(

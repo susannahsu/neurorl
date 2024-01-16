@@ -434,7 +434,7 @@ def setup_experiment_inputs(
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=functools.partial(
-        basics.get_actor_core,
+        object_q_learning.get_actor_core,
       ),
       LossFn=q_learning.R2D2LossFn(
         discount=config.discount,

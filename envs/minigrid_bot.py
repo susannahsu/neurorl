@@ -174,7 +174,7 @@ class GotoOptionsWrapper(Wrapper):
             env: The environment to apply the wrapper
         """
         super().__init__(env)
-        self.prior_primitive_action = None
+        self.prior_action = None
         self.use_options = use_options
         self.primitive_actions = [
           self.actions.left,
@@ -292,11 +292,11 @@ class GotoOptionsWrapper(Wrapper):
       #############
       # Update environment variables
       #############
-      self.prior_object = objects
+      self.prior_objects = objects
       self.prior_visible_objects = visible_objects
 
     def reset(self, *args, **kwargs):
-      self.prior_primitive_action = None
+      self.prior_action = None
 
       obs, info = self.env.reset(*args, **kwargs)
       self.post_env_iter_update(obs, info)
@@ -312,7 +312,7 @@ class GotoOptionsWrapper(Wrapper):
         global_pos = obj.global_pos
         if front_pos[0] == global_pos[0] and front_pos[1] == global_pos[1]:
           # don't update prior primitive action
-          # self.prior_primitive_action = action
+          # self.prior_action = action
           return self.env.step(self.actions.done)
 
         # otherwise, generate a trajectory to the goal position
@@ -323,12 +323,12 @@ class GotoOptionsWrapper(Wrapper):
         if len(actions) == 0:
            return self.env.step(self.actions.done)
 
-        self.prior_primitive_action = actions[-1]
+        self.prior_action = actions[-1]
 
         return (obss[-1],
                 sum(rewards),
                 sum(dones) > 0,
-                truncateds[-1],
+                sum(truncateds) > 0,
                 infos[-1])
 
     def step(self, action, *args, **kwargs):
@@ -336,7 +336,7 @@ class GotoOptionsWrapper(Wrapper):
 
         if action in self.primitive_actions:
           obs, reward, terminated, truncated, info = self.env.step(action, *args, **kwargs)
-          self.prior_primitive_action = action
+          self.prior_action = action
         else:
           if self.use_options:
             assert len(self.prior_visible_objects), "impossible"
@@ -344,7 +344,7 @@ class GotoOptionsWrapper(Wrapper):
           else:
             # ignore the action
             obs, reward, terminated, truncated, info = self.env.step(self.actions.done, *args, **kwargs)
-            self.prior_primitive_action = action
+            self.prior_action = action
 
         self.post_env_iter_update(obs, info)
         return obs, reward, terminated, truncated, info
