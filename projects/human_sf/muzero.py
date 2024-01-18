@@ -1,5 +1,11 @@
+"""
+Major changes from original MuZero:
+- state is a tuple that includes task
+  - this is useful for when you need to use the task for downstream processing. For example, if we assume reward is a dot-product between features and a task vector, you need access to that task vector in the model. One way we accomplish this is by having this be available in the "state" object.
+- model now also predicts intermediary state-features
+"""
 
-from typing import Optional, Tuple, Optional, Callable, Union, Any
+from typing import Optional, Tuple, Optional, Callable, Union, Any, Sequence
 from absl import logging
 
 import functools
@@ -28,6 +34,9 @@ from library.utils import scale_gradient
 from td_agents import basics
 from library import muzero_mlps
 from td_agents.basics import MbrlNetworks, make_mbrl_network
+from td_agents import muzero
+
+from projects.human_sf import utils as project_utils
 
 BatchSize = int
 PRNGKey = jax.random.KeyArray
@@ -45,6 +54,11 @@ StateFn = Callable[[Params, PRNGKey, Observation, State],
                    Tuple[NetworkOutput, State]]
 RootFn = Callable[[State], Tuple[State, PolicyLogits, ValueLogits]]
 ModelFn = Callable[[State], Tuple[State, RewardLogits, PolicyLogits, ValueLogits]]
+
+
+Config = muzero.Config
+MuZeroArch = muzero.MuZeroArch
+muzero_optimizer_constr = muzero.muzero_optimizer_constr
 
 
 @dataclasses.dataclass
@@ -66,6 +80,7 @@ class Config(basics.Config):
   action_source: str = 'policy'  # 'policy', 'mcts'
 
   # Learner options
+  scalar_coef: float = 1e3
   root_policy_coef: float = 1.0
   root_value_coef: float = 0.25
   model_policy_coef: float = 10.0
@@ -123,91 +138,38 @@ class Config(basics.Config):
 @chex.dataclass(frozen=True)
 class RootOutput:
   state: jax.Array
-  value_logits: jax.Array
+  value: jax.Array
   policy_logits: jax.Array
 
 
 @chex.dataclass(frozen=True)
 class ModelOutput:
   new_state: jax.Array
-  reward_logits: jax.Array
-  value_logits: jax.Array
+  state_features: jax.Array
+  reward: jax.Array
+  value: jax.Array
   policy_logits: jax.Array
 
 
-def muzero_optimizer_constr(config, initial_params=None):
-  """Creates the optimizer for muzero.
-  
-  This includes:
-  - a schedule where the learning rate goes up and then falls with an exponential decay
-  - weight decay on the parameters
-  - adam optimizer
-  - max grad norm
-  """
-
-  ##########################
-  # learning rate schedule
-  ##########################
-  if config.warmup_steps > 0:
-    learning_rate = optax.warmup_exponential_decay_schedule(
-        init_value=0.0,
-        peak_value=config.learning_rate,
-        warmup_steps=config.warmup_steps,
-        end_value=config.lr_end_value,
-        transition_steps=config.lr_transition_steps,
-        decay_rate=config.learning_rate_decay,
-        staircase=config.staircase_decay,
-    )
-  else:
-    learning_rate = config.learning_rate
-
-  ##########################
-  # weight decay on parameters
-  ##########################
-  if config.weight_decay > 0.0:
-    def decay_fn(module_name, name,
-                  value): return True if name == "w" else False
-
-    weight_decay_mask = hk.data_structures.map(decay_fn, initial_params)
-    optimizer = optax.adamw(
-        learning_rate=learning_rate,
-        eps=config.adam_eps,
-        weight_decay=config.weight_decay,
-        mask=weight_decay_mask,
-    )
-  else:
-    optimizer = optax.adam(
-        learning_rate=learning_rate, eps=config.adam_eps)
-
-  ##########################
-  # max grad norm
-  ##########################
-  if config.max_grad_norm:
-    optimizer = optax.chain(optax.clip_by_global_norm(
-        config.max_grad_norm), optimizer)
-  return optimizer
-
-
-def model_step(params: networks_lib.Params,
-               rng_key: jax.Array,
-               action: jax.Array,
-               state: jax.Array,
-               discount: jax.Array,
-               networks: MbrlNetworks,
-               discretizer: utils.Discretizer):
+def model_step(
+    params: networks_lib.Params,
+    rng_key: jax.Array,
+    action: jax.Array,
+    state: jax.Array,
+    discount: jax.Array,
+    networks: MbrlNetworks,
+    discretizer: utils.Discretizer):
   """One simulation step in MCTS."""
+  del discretizer
   rng_key, model_key = jax.random.split(rng_key)
   model_output, next_state = networks.apply_model(
       params, model_key, state, action,
   )
-  reward = discretizer.logits_to_scalar(model_output.reward_logits)
-  value = discretizer.logits_to_scalar(model_output.value_logits)
-
   recurrent_fn_output = mctx.RecurrentFnOutput(
-      reward=reward,
+      reward=model_output.reward,
       discount=discount,
       prior_logits=model_output.policy_logits,
-      value=value,
+      value=model_output.value,
   )
   return recurrent_fn_output, next_state
 
@@ -248,6 +210,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
   mask_model: bool = True  # mask model outputs when out of bounds of data
   value_target_source: str = 'return'
 
+  scalar_coef: float = 1.0
   root_policy_coef: float = 1.0
   root_value_coef: float = 0.25
   model_policy_coef: float = 10.0
@@ -324,7 +287,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
 
     # [T], [T/T-1], [T]
     key_grad, key = jax.random.split(key_grad)
-    policy_probs_target, value_probs_target, reward_probs_target, reward_return_target, mcts_values, value_target = self.compute_target(
+    policy_target, value_target, reward_target, reward_return_target, mcts_values, value_target = self.compute_target(
         data=data,
         networks=networks,
         is_terminal_mask=is_terminal_mask,
@@ -342,12 +305,11 @@ class MuZeroLossFn(basics.RecurrentLossFn):
       is_terminal_mask=is_terminal_mask,
       online_preds=online_preds,
       rng_key=key,
-      policy_probs_target=policy_probs_target,
-      value_probs_target=value_probs_target,
-      reward_probs_target=reward_probs_target,
+      policy_target=policy_target,
+      value_target=value_target,
+      reward_target=reward_target,
       reward_return_target=reward_return_target,
       mcts_values=mcts_values,
-      value_target=value_target,
       **kwargs,
   )
 
@@ -364,38 +326,33 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     # reward
     # ---------------
     reward_target = data.reward
-    reward_probs_target = self.discretizer.scalar_to_probs(reward_target)
-    reward_probs_target = jax.lax.stop_gradient(reward_probs_target)
     # ---------------
     # policy
     # ---------------
     # for policy, need initial policy + value estimates for each time-step
     # these will be used by MCTS
-    target_values = self.discretizer.logits_to_scalar(
-        target_preds.value_logits)
-    roots = mctx.RootFnOutput(prior_logits=target_preds.policy_logits,
-                              value=target_values,
-                              embedding=self.state_from_preds(target_preds))
+    target_values = target_preds.value
+    roots = mctx.RootFnOutput(
+      prior_logits=target_preds.policy_logits,
+      value=target_values,
+      embedding=self.state_from_preds(target_preds))
 
     invalid_actions = self.get_invalid_actions(
         batch_size=target_values.shape[0])
 
     # 1 step of policy improvement
-    policy_targets_from_mcts = self.root_policy_coef > 0 or self.model_policy_coef
-    targets_from_mcts = (self.value_target_source in ('mcts', 'reanalyze') or policy_targets_from_mcts)
-    if targets_from_mcts:
-      rng_key, improve_key = jax.random.split(rng_key)
-      mcts_outputs = self.mcts_policy(
-          params=target_params,
-          rng_key=improve_key,
-          root=roots,
-          invalid_actions=invalid_actions,
-          recurrent_fn=functools.partial(
-              model_step,
-              discount=jnp.full(target_values.shape, self.discount),
-              networks=networks,
-              discretizer=self.discretizer,
-          ))
+    rng_key, improve_key = jax.random.split(rng_key)
+    mcts_outputs = self.mcts_policy(
+        params=target_params,
+        rng_key=improve_key,
+        root=roots,
+        invalid_actions=invalid_actions,
+        recurrent_fn=functools.partial(
+            model_step,
+            discount=jnp.full(target_values.shape, self.discount),
+            networks=networks,
+            discretizer=self.discretizer,
+        ))
 
     num_actions = target_preds.policy_logits.shape[-1]
     uniform_policy = jnp.ones_like(target_preds.policy_logits) / num_actions
@@ -404,60 +361,25 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     # if learning policy using MCTS, add uniform actions to end
     # if not, just use uniform actions as targets
     #---------------------------
-    if policy_targets_from_mcts:
-      policy_target = mcts_outputs.action_weights
-
-      if invalid_actions is not None:
-        valid_actions = 1 - invalid_actions
-        uniform_policy = valid_actions/valid_actions.sum(-1, keepdims=True)
-
-      random_policy_mask = jnp.broadcast_to(
-          is_terminal_mask[:, None], policy_target.shape
-      )
-      policy_probs_target = jax.lax.select(
-          random_policy_mask, uniform_policy, policy_target
-      )
-      policy_probs_target = jax.lax.stop_gradient(policy_probs_target)
-    else:
-      policy_probs_target = uniform_policy
+    policy_target = mcts_outputs.action_weights
 
     # ---------------
     # Values
     # ---------------
-    # if not using MCTS, populate with fake
     discounts = (data.discount[:-1] *
                  self.discount).astype(target_values.dtype)
-    if targets_from_mcts:
-      mcts_values = mcts_outputs.search_tree.summary().value
-    else:
-      mcts_values = jnp.zeros_like(discounts)
+    mcts_values = mcts_outputs.search_tree.summary().value
 
     reward_return_target = rlax.n_step_bootstrapped_returns(
         data.reward[:-1], discounts, target_values[1:], self.bootstrap_n)
-
-    if self.value_target_source == 'mcts':
-      value_target = mcts_values
-    elif self.value_target_source == 'return':
-      value_target = reward_return_target
-    elif self.value_target_source == 'reanalyze':
-      num_value_preds = data.reward.shape[0] - 1
-      rng_key, sample_key = jax.random.split(rng_key)
-
-      reanalyze = distrax.Bernoulli(
-          probs=self.reanalyze_ratio).sample(seed=rng_key)
-      value_target = jax.lax.cond(
-          reanalyze > 0,
-          lambda: mcts_values[:num_value_preds],
-          lambda: reward_return_target)
+    value_target = reward_return_target
 
     # Value targets for the absorbing state and the states after are 0.
     num_value_preds = value_target.shape[0]
     value_target = jax.lax.select(
         is_terminal_mask[:num_value_preds], jnp.zeros_like(value_target), value_target)
-    value_probs_target = self.discretizer.scalar_to_probs(value_target)
-    value_probs_target = jax.lax.stop_gradient(value_probs_target)
 
-    return policy_probs_target, value_probs_target, reward_probs_target, reward_return_target, mcts_values, value_target
+    return policy_target, value_target, reward_target, reward_return_target, mcts_values, value_target
 
   def learn(self,
             data: reverb.ReplaySample,
@@ -467,12 +389,11 @@ class MuZeroLossFn(basics.RecurrentLossFn):
             is_terminal_mask: jax.Array,
             online_preds: RootOutput,
             rng_key: networks_lib.PRNGKey,
-            policy_probs_target: jax.Array,
-            value_probs_target: jax.Array,
-            reward_probs_target: jax.Array,
+            policy_target: jax.Array,
+            value_target: jax.Array,
+            reward_target: jax.Array,
             reward_return_target: jax.Array,
             mcts_values: jax.Array,
-            value_target: jax.Array,
             **kwargs,
             ):
     """
@@ -492,9 +413,9 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         online_preds (RootOutput): Model predictions for the current state.
         params (networks_lib.Params): Model parameters.
         rng_key (networks_lib.PRNGKey): Random number generator key.
-        policy_probs_target (jax.Array): Target policy probabilities.
-        value_probs_target (jax.Array): Target value probabilities.
-        reward_probs_target (jax.Array): Target reward probabilities.
+        policy_target (jax.Array): Target policy probabilities.
+        value_target (jax.Array): Target value probabilities.
+        reward_target (jax.Array): Target reward probabilities.
         returns (jax.Array): value targets.
 
     Returns:
@@ -506,28 +427,28 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     nsteps = data.reward.shape[0]  # [T]
 
     policy_loss_fn = jax.vmap(rlax.categorical_cross_entropy)
+
     ###############################
     # Root losses
     ###############################
     # [T/T-1]
-    num_value_preds = value_probs_target.shape[0]
-    root_value_ce = jax.vmap(rlax.categorical_cross_entropy)(
-        value_probs_target, online_preds.value_logits[:num_value_preds])
+    num_value_preds = value_target.shape[0]
+    value_root_prediction = online_preds.value[:num_value_preds]
+    root_value_l2 = rlax.l2_loss(value_root_prediction, value_target)
+
     # []
-    raw_root_value_loss = utils.episode_mean(root_value_ce, in_episode[:num_value_preds])
-    root_value_loss = self.root_value_coef*raw_root_value_loss
+    raw_root_value_loss = utils.episode_mean(root_value_l2, in_episode[:num_value_preds])
+    root_value_coef = self.root_value_coef*self.scalar_coef
+    root_value_loss = root_value_coef*raw_root_value_loss
 
     # [T]
     root_policy_ce = policy_loss_fn(
-        policy_probs_target, online_preds.policy_logits)
+        policy_target, online_preds.policy_logits)
     # []
     raw_root_policy_loss = utils.episode_mean(root_policy_ce, in_episode)
     root_policy_loss = self.root_policy_coef*raw_root_policy_loss
 
     # for TD-error
-    value_root_prediction = self.discretizer.logits_to_scalar(
-        online_preds.value_logits[:num_value_preds])
-
     td_error = value_root_prediction - reward_return_target
     mcts_error = mcts_values[:num_value_preds] - reward_return_target
 
@@ -563,27 +484,35 @@ class MuZeroLossFn(basics.RecurrentLossFn):
       valid_actions = 1 - invalid_actions
       uniform_policy = valid_actions/valid_actions.sum(-1, keepdims=True)
 
+    # POLICY
     policy_model_target = jnp.concatenate(
-        (policy_probs_target, uniform_policy))
+        (policy_target, uniform_policy))
 
-    dummy_zeros = self.discretizer.scalar_to_probs(
-        jnp.zeros(self.simulation_steps-1))
-    reward_model_target = jnp.concatenate((reward_probs_target, dummy_zeros))
+    # STATE FEATURES
+    state_features = data.observation.observation['state_features']
+    dummy_zeros = jnp.zeros((self.simulation_steps-1, state_features.shape[-1]))
+    state_features_target = jnp.concatenate((state_features, dummy_zeros))
 
+    # REWARD
+    dummy_zeros = jnp.zeros(self.simulation_steps-1)
+    reward_model_target = jnp.concatenate((reward_target, dummy_zeros))
+
+    # VALUE
     if num_value_preds < nsteps:
       nz = self.simulation_steps+1
     else:
       nz = self.simulation_steps
-    dummy_zeros = self.discretizer.scalar_to_probs(jnp.zeros(nz))
-    value_model_target = jnp.concatenate((value_probs_target, dummy_zeros))
+    dummy_zeros = jnp.zeros(nz)
+    value_model_target = jnp.concatenate((value_target, dummy_zeros))
 
     # for every timestep t=0,...T,  we have predictions for t+1, ..., t+k where k = simulation_steps
     # use rolling window to create T x k prediction targets
-    vmap_roll = jax.vmap(functools.partial(
-        rolling_window, size=self.simulation_steps), 1, 2)
+    roll = functools.partial(rolling_window, size=self.simulation_steps)
+    vmap_roll = jax.vmap(roll, 1, 2)
+    value_model_target = roll(value_model_target[1:])    # [T, k]
+    reward_model_target = roll(reward_model_target)      # [T, k]
+    state_features_target = vmap_roll(state_features_target)  # [T, k, features]
     policy_model_target = vmap_roll(policy_model_target[1:])  # [T, k, actions]
-    value_model_target = vmap_roll(value_model_target[1:])    # [T, k, bins]
-    reward_model_target = vmap_roll(reward_model_target)      # [T, k, bins]
 
     # ------------
     # get masks for losses
@@ -646,31 +575,35 @@ class MuZeroLossFn(basics.RecurrentLossFn):
 
     def compute_losses(
             model_outputs_,
-            reward_target_, value_target_, policy_target_,
+            reward_target_, state_features_target_, value_target_, policy_target_,
             reward_mask_, value_mask_, policy_mask_):
-      reward_ce = jax.vmap(rlax.categorical_cross_entropy)(
-          reward_target_, model_outputs_.reward_logits)
-      reward_loss = utils.episode_mean(reward_ce, reward_mask_)
 
-      value_ce = jax.vmap(rlax.categorical_cross_entropy)(
-          value_target_, model_outputs_.value_logits)
-      value_loss = utils.episode_mean(value_ce, value_mask_)
+      features_l2 = rlax.l2_loss(
+          state_features_target_, model_outputs_.state_features)
+      features_l2 = features_l2.mean(-1)
+      features_loss = utils.episode_mean(features_l2, reward_mask_)
+
+      reward_l2 = rlax.l2_loss(
+          reward_target_, model_outputs_.reward)
+      reward_loss = utils.episode_mean(reward_l2, reward_mask_)
+
+      value_l2 = rlax.l2_loss(
+          value_target_, model_outputs_.value)
+      value_loss = utils.episode_mean(value_l2, value_mask_)
 
       policy_ce = jax.vmap(rlax.categorical_cross_entropy)(
           policy_target_, model_outputs_.policy_logits)
       policy_loss = utils.episode_mean(policy_ce, policy_mask_)
 
-      return reward_ce, value_ce, policy_ce, reward_loss, value_loss, policy_loss
+      return reward_loss, value_loss, policy_loss, features_loss
 
     _ = [
-        reward_model_ce,
-        value_model_ce,
-        policy_model_ce,
         model_reward_loss,
         model_value_loss,
-        model_policy_loss] = jax.vmap(compute_losses)(
+        model_policy_loss,
+        model_features_loss] = jax.vmap(compute_losses)(
         model_outputs,
-        reward_model_target, value_model_target, policy_model_target,
+        reward_model_target, state_features_target, value_model_target, policy_model_target,
         reward_model_mask, value_model_mask, policy_model_mask)
 
     # all are []
@@ -680,14 +613,20 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         raw_model_policy_loss
     raw_model_value_loss = utils.episode_mean(model_value_loss, value_mask[:nsteps])
     model_value_loss = self.model_value_coef * \
-        raw_model_value_loss
+        self.scalar_coef* raw_model_value_loss
     raw_model_reward_loss = utils.episode_mean(
         model_reward_loss, reward_mask[:nsteps])
     reward_loss = self.model_reward_coef * \
-        raw_model_reward_loss
+        self.scalar_coef * raw_model_reward_loss
+
+    raw_model_features_loss = utils.episode_mean(
+        model_features_loss, reward_mask[:nsteps])
+    features_loss = self.scalar_coef* self.model_reward_coef * \
+        raw_model_features_loss
+
 
     total_loss = (
-        reward_loss +
+        reward_loss + features_loss + 
         root_value_loss + model_value_loss +
         root_policy_loss + model_policy_loss)
 
@@ -697,6 +636,7 @@ class MuZeroLossFn(basics.RecurrentLossFn):
         "0.0.td-error-mcts": jnp.abs(mcts_error),
         '0.1.policy_root_loss': raw_root_policy_loss,
         '0.1.policy_model_loss': raw_model_policy_loss,
+        '0.2.features_model_loss': raw_model_features_loss,  # T
         '0.2.reward_model_loss': raw_model_reward_loss,  # T
         '0.3.value_root_loss': raw_root_value_loss,
         '0.3.value_model_loss': raw_model_value_loss,  # T
@@ -736,68 +676,6 @@ def policy_select_action(
       recurrent_state=recurrent_state,
       prev_recurrent_state=state.recurrent_state)
 
-def value_select_action(
-        params: networks_lib.Params,
-        observation: networks_lib.Observation,
-        state: basics.ActorState[actor_core_lib.RecurrentState],
-        networks: MbrlNetworks,
-        discretizer: utils.Discretizer,
-        discount: float = .99,
-        epsilon: float = .99,
-        evaluation: bool = True):
-  rng, policy_rng = jax.random.split(state.rng)
-
-  preds, recurrent_state = networks.apply(
-      params, policy_rng, observation, state.recurrent_state)
-
-  #-----------------
-  # function for computing Q-values for 1 action
-  #-----------------
-  def compute_q(state, action):
-    """Q(s,a) = r(s,a) + \gamma* v(s')"""
-    model_preds, _ = networks.apply_model(
-        params, policy_rng, state, action)
-
-    reward = discretizer.logits_to_scalar(
-      model_preds.reward_logits)
-    value = discretizer.logits_to_scalar(
-      model_preds.value_logits)
-    q_values = reward + discount*value
-    return q_values
-
-  # jit to make faster
-  # vmap to do parallel over actions
-  compute_q = jax.jit(jax.vmap(compute_q, in_axes=(None, 0)))
-
-
-  #-----------------
-  # compute Q-values for all actions
-  #-----------------
-  # create "batch" of actions
-  nactions = preds.policy_logits.shape[-1]
-  all_actions = jnp.arange(nactions)  # [A]
-
-  # [A, 1]
-  q_values = compute_q(
-    recurrent_state.hidden, all_actions)
-  # [A]
-  q_values = jnp.squeeze(q_values, axis=-1)
-
-
-  #-----------------
-  # select action
-  #-----------------
-  if evaluation:
-    action = jnp.argmax(q_values, axis=-1)
-  else:
-    rng, policy_rng = jax.random.split(rng)
-    action = rlax.epsilon_greedy(epsilon).sample(policy_rng, q_values)
-
-  return action, basics.ActorState(
-      rng=rng,
-      recurrent_state=recurrent_state,
-      prev_recurrent_state=state.recurrent_state)
-
 def mcts_select_action(
     params: networks_lib.Params,
     observation: networks_lib.Observation,
@@ -814,17 +692,17 @@ def mcts_select_action(
   preds, recurrent_state = networks.apply(
     params, policy_rng, observation, state.recurrent_state)
 
-  value = discretizer.logits_to_scalar(preds.value_logits)
-
   # MCTX assumes the following shapes
   # policy_logits [B, A]
   # value [B]
   # embedding [B, D]
   # here, we have B = 1
   # i.e MCTX assumes that input has batch dimension. add fake one.
-  root = mctx.RootFnOutput(prior_logits=preds.policy_logits[None],
-                            value=value,
-                            embedding=preds.state[None])
+  value = preds.value[None]
+  root = mctx.RootFnOutput(
+    prior_logits=preds.policy_logits[None],
+    value=value,
+    embedding=jax.tree_map(lambda x: x[None], preds.state))
 
   # 1 step of policy improvement
   rng, improve_key = jax.random.split(rng)
@@ -852,63 +730,38 @@ def mcts_select_action(
       recurrent_state=recurrent_state,
       prev_recurrent_state=state.recurrent_state)
 
-def get_actor_core(
-    networks: MbrlNetworks,
-    config: Config,
-    discretizer: Optional[utils.Discretizer] = None,
-    mcts_policy: Optional[
-      Union[mctx.muzero_policy, mctx.gumbel_muzero_policy]] = None,
+def muzero_policy_act_mcts_eval(
+    networks,
+    config,
+    discretizer,
+    mcts_policy,
     evaluation: bool = True,
 ):
   """Returns ActorCore for MuZero."""
 
-  if config.action_source == 'policy':
-    select_action = functools.partial(
-      policy_select_action,
-      networks=networks,
-      evaluation=evaluation)
-  elif config.action_source == 'value':
-    select_action = functools.partial(
-      value_select_action,
-      networks=networks,
-      evaluation=evaluation,
-      discretizer=discretizer,
-      discount=config.discount)
-  elif config.action_source == 'mcts':
-    select_action = functools.partial(
-      mcts_select_action,
-      networks=networks,
-      evaluation=evaluation,
-      mcts_policy=mcts_policy,
-      discretizer=discretizer,
-      discount=config.discount)
+  if evaluation:
+    select_action = functools.partial(mcts_select_action,
+                                      networks=networks,
+                                      evaluation=evaluation,
+                                      mcts_policy=mcts_policy,
+                                      discretizer=discretizer,
+                                      discount=config.discount)
   else:
-    raise NotImplementedError(config.action_source)
+    select_action = functools.partial(policy_select_action,
+                                      networks=networks,
+                                      evaluation=evaluation)
 
-  def init(
-      rng: networks_lib.PRNGKey,
-  ) -> basics.ActorState[actor_core_lib.RecurrentState]:
-    rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
+  def init(rng):
+    rng, state_rng = jax.random.split(rng, 2)
     initial_core_state = networks.init_recurrent_state(
         state_rng)
-    if evaluation:
-      epsilon = config.evaluation_epsilon
-    else:
-      epsilon = jax.random.choice(
-        epsilon_rng,
-        np.logspace(
-          start=config.epsilon_min,
-          stop=config.epsilon_max,
-          num=config.num_epsilons,
-          base=config.epsilon_base))
+
     return basics.ActorState(
         rng=rng,
-        epsilon=epsilon,
         recurrent_state=initial_core_state,
         prev_recurrent_state=initial_core_state)
 
-  def get_extras(
-          state: basics.ActorState[actor_core_lib.RecurrentState]) -> actor_core_lib.Extras:
+  def get_extras(state):
     return {'core_state': state.prev_recurrent_state}
 
   return actor_core_lib.ActorCore(init=init,
@@ -956,7 +809,8 @@ class MuZeroArch(hk.RNNCore):
     """
 
     state_input = self._observation_fn(inputs)  # [D+A+1]
-    hidden, new_state = self._state_fn(state_input, state)
+    task = inputs.observation['task'].astype(state_input.dtype)
+    hidden, new_state = self._state_fn(state_input, state, task)
     root_outputs = self._root_pred_fn(hidden)
 
     return root_outputs, new_state
@@ -977,6 +831,10 @@ class MuZeroArch(hk.RNNCore):
     """
     # [T, B, D+A+1]
     state_input = hk.BatchApply(self._observation_fn)(inputs)
+    task = inputs.observation['task'].astype(state_input.dtype)
+
+    # at first step of unroll, place task into state
+    state = project_utils.add_task_to_lstm_state(state, task[0])
     all_hidden, new_state = hk.static_unroll(
         self._state_fn, state_input, state)
     root_output = hk.BatchApply(self._root_pred_fn)(all_hidden)
@@ -1028,6 +886,38 @@ class MuZeroArch(hk.RNNCore):
     # [T, D], [D]
     return model_output, new_state
 
+class DotTaskFn(hk.Module):
+  """A Dot-product Q-network."""
+
+  def __init__(
+      self,
+      task_dim: int,
+      hidden_sizes: Sequence[int],
+      w_init: Optional[hk.initializers.Initializer] = None,
+      name: str='dot_task'
+  ):
+    super().__init__(name=name)
+    self.task_dim = task_dim
+    self.mlp = muzero_mlps.PredictionMlp(
+          hidden_sizes, task_dim, name=f'{name}_mlp')
+
+  def __call__(self, state: jax.Array, task: jax.Array) -> jax.Array:
+    """Forward pass of the network.
+    
+    Args:
+        inputs (jnp.ndarray): Z
+        w (jnp.ndarray): W
+
+    Returns:
+        jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
+    """
+
+    # Compute value & advantage for duelling.
+    outputs = self.mlp(state)  # [C]
+    outputs = jnp.sum(outputs*task, axis=-1)
+
+    return outputs
+
 def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,
         config: Config,
@@ -1037,6 +927,7 @@ def make_minigrid_networks(
 
   num_actions = env_spec.actions.num_values
   state_dim = config.state_dim
+  task_dim = env_spec.observations.observation['task'].shape[-1]
 
   def make_core_module() -> MbrlNetworks:
 
@@ -1051,7 +942,10 @@ def make_minigrid_networks(
         vision_torso=vision_torso,
         task_encoder=task_encoder,
     )
-    state_fn = hk.LSTM(state_dim, name='state_lstm')
+
+    state_fn = project_utils.TaskAwareRecurrentFn(
+      core=hk.LSTM(state_dim, name='state_lstm'),
+      task_dim=task_dim)
 
     ###########################
     # Setup transition function: ResNet
@@ -1065,36 +959,49 @@ def make_minigrid_networks(
         """ResNet transition model that scales gradient."""
         # action: [A]
         # state: [D]
-        out = muzero_mlps.Transition(
+        new_hidden = muzero_mlps.Transition(
             channels=config.state_dim,
             num_blocks=config.transition_blocks)(
-            action_onehot, state)
-        out = scale_gradient(out, config.scale_grad)
-        return out, out
+            action_onehot, state.hidden)
+        new_hidden = scale_gradient(new_hidden, config.scale_grad)
+
+        state._replace(hidden=new_hidden)
+
+        return state, state
 
       if action_onehot.ndim == 2:
         _transition_fn = jax.vmap(_transition_fn)
       return _transition_fn(action_onehot, state)
-    transition_fn = hk.to_module(transition_fn)('transition_fn')
+
+    transition_fn = project_utils.TaskAwareRecurrentFn(
+      core=hk.to_module(transition_fn)('transition_fn'),
+      task_dim=task_dim)
 
     ###########################
     # Setup prediction functions: policy, value, reward
     ###########################
     root_base_transformation = muzero_mlps.ResMlp(
         config.prediction_blocks, name='pred_root_base')
-    root_value_fn = muzero_mlps.PredictionMlp(
-        config.value_layers, config.num_bins, name='pred_root_value')
+
+    def make_prediction_mlp(layers, name):
+        return DotTaskFn(
+          hidden_sizes=layers,
+          task_dim=task_dim,
+          name=name
+        )
+
     root_policy_fn = muzero_mlps.PredictionMlp(
         config.policy_layers, num_actions, name='pred_root_policy')
-    model_reward_fn = muzero_mlps.PredictionMlp(
-        config.reward_layers, config.num_bins, name='pred_model_reward')
+
+    root_value_fn = make_prediction_mlp(
+        config.value_layers, name='pred_root_value')
 
     if config.seperate_model_nets:
       # what is typically done
       model_base_transformation = muzero_mlps.ResMlp(
           config.prediction_blocks, name='root_model')
-      model_value_fn = muzero_mlps.PredictionMlp(
-          config.value_layers, config.num_bins, name='pred_model_value')
+      model_value_fn = make_prediction_mlp(
+          config.value_layers, name='pred_model_value')
       model_policy_fn = muzero_mlps.PredictionMlp(
           config.policy_layers, num_actions, name='pred_model_policy')
     else:
@@ -1103,39 +1010,47 @@ def make_minigrid_networks(
       model_base_transformation = root_base_transformation
 
     def root_predictor(state: State):
-      assert state.ndim in (1, 2), "should be [D] or [B, D]"
+      assert state.hidden.ndim in (1, 2), "should be [D] or [B, D]"
 
       def _root_predictor(state: State):
-        state = root_base_transformation(state)
-        policy_logits = root_policy_fn(state)
-        value_logits = root_value_fn(state)
+        state_rep = root_base_transformation(state.hidden)
+        policy_logits = root_policy_fn(state_rep)
+        value = root_value_fn(state_rep, state.task)
 
         return RootOutput(
             state=state,
-            value_logits=value_logits,
+            value=value,
             policy_logits=policy_logits,
         )
-      if state.ndim == 2:
+      if state.hidden.ndim == 2:
         _root_predictor = jax.vmap(_root_predictor)
       return _root_predictor(state)
 
     def model_predictor(state: State):
-      assert state.ndim in (1, 2), "should be [D] or [B, D]"
+      assert state.hidden.ndim in (1, 2), "should be [D] or [B, D]"
 
       def _model_predictor(state: State):
-        reward_logits = model_reward_fn(state)
 
-        state = model_base_transformation(state)
-        policy_logits = model_policy_fn(state)
-        value_logits = model_value_fn(state)
+        state_features = muzero_mlps.PredictionMlp(
+          config.reward_layers,
+          task_dim,
+          name='state_features')(state.hidden)
+
+        reward = (state_features*state.task).sum(-1)
+
+        state_rep = model_base_transformation(state.hidden)
+        policy_logits = model_policy_fn(state_rep)
+        value = model_value_fn(state_rep, state.task)
+
 
         return ModelOutput(
             new_state=state,
-            value_logits=value_logits,
+            state_features=state_features,
+            reward=reward,
+            value=value,
             policy_logits=policy_logits,
-            reward_logits=reward_logits,
         )
-      if state.ndim == 2:
+      if state.hidden.ndim == 2:
         _model_predictor = jax.vmap(_model_predictor)
       return _model_predictor(state)
 
@@ -1143,8 +1058,10 @@ def make_minigrid_networks(
         observation_fn=observation_fn,
         state_fn=state_fn,
         transition_fn=transition_fn,
-        root_pred_fn=root_predictor,
-        model_pred_fn=model_predictor)
+        root_pred_fn=hk.to_module(
+          root_predictor)("root_predictor"),
+        model_pred_fn=hk.to_module(
+          model_predictor)("model_predictor"))
 
   return make_mbrl_network(environment_spec=env_spec,
                       make_core_module=make_core_module,

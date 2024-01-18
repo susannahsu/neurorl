@@ -166,7 +166,7 @@ class GotoOptionsWrapper(Wrapper):
 
     def __init__(self,
                  env,
-                 max_options: int = 30,
+                 max_options: int = 5,
                  use_options: bool = True,
                  partial_obs: bool = True):
         """
@@ -185,6 +185,10 @@ class GotoOptionsWrapper(Wrapper):
           self.actions.toggle,
           self.actions.done,  # does nothing
         ]
+
+        env.reset()
+        max_options = max(max_options, len(env.all_objects))
+
         self.primitive_actions_arr = np.array(
            [int(a) for a in self.primitive_actions], dtype=np.uint8)
         self.max_options = max_options

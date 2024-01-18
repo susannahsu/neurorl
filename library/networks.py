@@ -90,7 +90,10 @@ class BabyAIVisionTorso(hk.Module):
         jax.nn.relu,
     ]
     if conv_dim > 0:
-      layers.append(hk.Conv2D(conv_dim, [1, 1], stride=1))
+      layers.extend([
+        hk.Conv2D(conv_dim, [1, 1], stride=1),
+        jax.nn.relu,
+      ])
     self._network = hk.Sequential(layers)
 
     self.flatten = flatten or out_dim > 0

@@ -80,10 +80,11 @@ import library.parallel as parallel
 import library.utils as utils
 
 from td_agents import basics
-from td_agents import q_learning
 from td_agents import usfa
-from td_agents import muzero
-from td_agents import object_q_learning
+
+from projects.human_sf import q_learning
+from projects.human_sf import object_q_learning
+from projects.human_sf import muzero
 
 from envs.key_room_objects_test import (
   ObjectTestTask,
@@ -111,7 +112,6 @@ class QlearningConfig(q_learning.Config):
 @dataclasses.dataclass
 class ObjectQlearningConfig(object_q_learning.Config):
   samples_per_insert: float = 0.0
-
 
 
 @dataclasses.dataclass
@@ -148,45 +148,6 @@ class TestOptions(Enum):
   shape = 0
   color = 1
   ambigious = 2
-
-
-def muzero_policy_act_mcts_eval(
-    networks,
-    config,
-    discretizer,
-    mcts_policy,
-    evaluation: bool = True,
-):
-  """Returns ActorCore for MuZero."""
-
-  if evaluation:
-    select_action = functools.partial(muzero.mcts_select_action,
-                                      networks=networks,
-                                      evaluation=evaluation,
-                                      mcts_policy=mcts_policy,
-                                      discretizer=discretizer,
-                                      discount=config.discount)
-  else:
-    select_action = functools.partial(muzero.policy_select_action,
-                                      networks=networks,
-                                      evaluation=evaluation)
-
-  def init(rng):
-    rng, state_rng = jax.random.split(rng, 2)
-    initial_core_state = networks.init_recurrent_state(
-        state_rng)
-
-    return basics.ActorState(
-        rng=rng,
-        recurrent_state=initial_core_state,
-        prev_recurrent_state=initial_core_state)
-
-  def get_extras(state):
-    return {'core_state': state.prev_recurrent_state}
-
-  return actor_core_lib.ActorCore(init=init,
-                                  select_action=select_action,
-                                  get_extras=get_extras)
 
 def make_keyroom_object_test_env(seed: int,
                      setting: TestOptions,
@@ -326,9 +287,7 @@ def setup_experiment_inputs(
     config = QlearningConfig(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      get_actor_core_fn=functools.partial(
-        basics.get_actor_core,
-      ),
+      get_actor_core_fn=basics.get_actor_core,
       LossFn=q_learning.R2D2LossFn(
         discount=config.discount,
         importance_sampling_exponent=config.importance_sampling_exponent,
@@ -383,19 +342,12 @@ def setup_experiment_inputs(
         num_simulations=config.num_simulations,
         gumbel_scale=config.gumbel_scale)
 
-    discretizer = utils.Discretizer(
-        num_bins=config.num_bins,
-        step_size=config.scalar_step_size,
-        max_value=config.max_scalar_value,
-        min_value=config.min_scalar_value,
-        tx_pair=config.tx_pair,
-    )
-    config.num_bins = discretizer.num_bins
+    discretizer = None
 
     builder = basics.Builder(
         config=config,
         get_actor_core_fn=functools.partial(
-            muzero_policy_act_mcts_eval,
+            muzero.muzero_policy_act_mcts_eval,
             mcts_policy=mcts_policy,
             discretizer=discretizer,
         ),
@@ -591,6 +543,9 @@ def run_single():
     agent_config_kwargs.update(dict(
       samples_per_insert=1,
       min_replay_size=100,
+      simulation_steps=2,
+      batch_size=3,
+      trace_length=4,
     ))
     env_kwargs.update(dict(
     ))
@@ -715,25 +670,38 @@ def sweep(search: str = 'default'):
             "env.task_features_cls": tune.grid_search(['ambiguous_flat']),
         },
     ]
-
+  elif search == 'flat_q':
+    space = [
+        {
+            "num_steps": tune.grid_search([30e6]),
+            "agent": tune.grid_search(['flat_q']),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['flat_q-3']),
+            "env.setting": tune.grid_search([2]),
+            "env.task_features_cls": tune.grid_search(['flat', 'ambiguous_flat']),
+        },
+    ]
+  elif search == 'flat_muzero':
+    space = [
+        {
+            "num_steps": tune.grid_search([30e6]),
+            "agent": tune.grid_search(['flat_muzero']),
+            "seed": tune.grid_search([5]),
+            "max_sim_depth": tune.grid_search([1]),
+            "group": tune.grid_search(['flat_muzero-new-1']),
+            "env.setting": tune.grid_search([2]),
+            "env.task_features_cls": tune.grid_search(['flat', 'ambiguous_flat']),
+        },
+    ]
   elif search == 'object_q':
     space = [
-        # {
-        #     "num_steps": tune.grid_search([30e6]),
-        #     "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
-        #     "seed": tune.grid_search([5]),
-        #     "group": tune.grid_search(['ambiguous-flat-1']),
-        #     "env.setting": tune.grid_search([0]),
-        #     "env.task_features_cls": tune.grid_search(['ambiguous_flat']),
-        # },
-
         {
             "num_steps": tune.grid_search([30e6]),
             "agent": tune.grid_search(['object_q']),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['object_q-1']),
-            "env.setting": tune.grid_search([0]),
-            "env.task_features_cls": tune.grid_search(['ambiguous_flat']),
+            "group": tune.grid_search(['object_q-3']),
+            "env.setting": tune.grid_search([2]),
+            "env.task_features_cls": tune.grid_search(['flat', 'ambiguous_flat']),
         },
     ]
 
