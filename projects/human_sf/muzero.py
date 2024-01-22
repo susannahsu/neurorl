@@ -150,7 +150,6 @@ class ModelOutput:
   value: jax.Array
   policy_logits: jax.Array
 
-
 def model_step(
     params: networks_lib.Params,
     rng_key: jax.Array,

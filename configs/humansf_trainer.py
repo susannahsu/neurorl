@@ -72,7 +72,7 @@ import jax
 
 import minigrid
 
-from envs.minigrid_bot import GotoOptionsWrapper
+from projects.human_sf.minigrid_goto_wrapper import GotoOptionsWrapper
 from envs.minigrid_wrappers import DictObservationSpaceWrapper
 from library.dm_env_wrappers import GymWrapper
 import library.experiment_builder as experiment_builder
@@ -80,8 +80,8 @@ import library.parallel as parallel
 import library.utils as utils
 
 from td_agents import basics
-from td_agents import usfa
 
+from td_agents import usfa
 from projects.human_sf import q_learning
 from projects.human_sf import object_q_learning
 from projects.human_sf import muzero
@@ -151,7 +151,7 @@ class TestOptions(Enum):
 
 def make_keyroom_object_test_env(seed: int,
                      setting: TestOptions,
-                     room_size: int = 6,
+                     room_size: int = 5,
                      evaluation: bool = False,
                      object_options: bool = True,
                      task_features_cls: str='flat',
@@ -543,9 +543,8 @@ def run_single():
     agent_config_kwargs.update(dict(
       samples_per_insert=1,
       min_replay_size=100,
-      simulation_steps=2,
       batch_size=3,
-      trace_length=4,
+      trace_length=7,
     ))
     env_kwargs.update(dict(
     ))
@@ -700,6 +699,7 @@ def sweep(search: str = 'default'):
             "agent": tune.grid_search(['object_q']),
             "seed": tune.grid_search([5]),
             "group": tune.grid_search(['object_q-3']),
+            "trace_length": tune.grid_search([10, 20]),
             "env.setting": tune.grid_search([2]),
             "env.task_features_cls": tune.grid_search(['flat', 'ambiguous_flat']),
         },

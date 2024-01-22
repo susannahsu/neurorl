@@ -189,6 +189,8 @@ class GotoOptionsWrapper(Wrapper):
         env.reset()
         max_options = max(max_options, len(env.all_objects))
 
+        self.object_types = [(o.type, o.color) for o in env.all_objects]
+
         self.primitive_actions_arr = np.array(
            [int(a) for a in self.primitive_actions], dtype=np.uint8)
         self.max_options = max_options
