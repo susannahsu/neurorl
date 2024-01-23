@@ -6,10 +6,10 @@ python -m ipdb -c continue configs/humansf_trainer.py \
   --parallel='none' \
   --run_distributed=False \
   --debug=True \
-  --use_wandb=False \
+  --use_wandb=True \
   --wandb_entity=wcarvalho92 \
   --wandb_project=human_objects_sf_debug \
-  --search='flat'
+  --search='flat_usfa'
 
 # DEBUGGING, without jit
 JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/humansf_trainer.py \
@@ -307,10 +307,13 @@ def setup_experiment_inputs(
     # has no mechanism to select from object options since dependent on what agent sees
     env_kwargs['object_options'] = False
 
-
     config = UsfaConfig(**config_kwargs)
     builder = basics.Builder(
       config=config,
+      ActorCls=functools.partial(
+        basics.BasicActor,
+        observers=[usfa.SFsObserver(period=1 if debug else 100)]
+      ),
       get_actor_core_fn=functools.partial(
         basics.get_actor_core,
         extract_q_values=lambda preds: preds.q_values,
@@ -323,6 +326,7 @@ def setup_experiment_inputs(
         max_priority_weight=config.max_priority_weight,
         bootstrap_n=config.bootstrap_n,
         sf_coeff=config.sf_coeff,
+        loss_fn=config.sf_loss,
         q_coeff=config.q_coeff,
       ))
     network_factory = functools.partial(
@@ -678,6 +682,30 @@ def sweep(search: str = 'default'):
             "group": tune.grid_search(['flat_q-3']),
             "env.setting": tune.grid_search([2]),
             "env.task_features_cls": tune.grid_search(['flat', 'ambiguous_flat']),
+        },
+    ]
+  elif search == 'flat_usfa':
+    space = [
+        {
+            "num_steps": tune.grid_search([20e6]),
+            "agent": tune.grid_search(['flat_usfa']),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['flat_usfa-4-reg']),
+            "env.setting": tune.grid_search([2]),
+            "env.task_features_cls": tune.grid_search(['flat']),
+        },
+        {
+            "num_steps": tune.grid_search([20e6]),
+            "agent": tune.grid_search(['flat_usfa']),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['flat_usfa-4']),
+            "env.setting": tune.grid_search([2]),
+            "env.task_features_cls": tune.grid_search(['flat']),
+            "q_coeff": tune.grid_search([0.0]),
+            "sf_coeff": tune.grid_search([1.0]),
+            "sf_loss": tune.grid_search(['qlambda', 'qlearning']),
+            "env.steps_per_room": tune.grid_search([25, 50]),
+            # "learning_rate": tune.grid_search([1e-1, 1e-2, 5e-3,  1e-3]),
         },
     ]
   elif search == 'flat_muzero':

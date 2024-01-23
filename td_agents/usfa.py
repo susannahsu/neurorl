@@ -1,13 +1,16 @@
 
-from typing import Callable, NamedTuple, Tuple, Optional
+from typing import Callable, Dict, NamedTuple, Tuple, Optional
 
 import dataclasses
+import dm_env
 import functools
 import jax
 import jax.numpy as jnp
 import haiku as hk
+import matplotlib.pyplot as plt
 import rlax
 import numpy as np
+import wandb
 
 from acme import specs
 from acme.agents.jax.r2d2 import actor as r2d2_actor
@@ -21,6 +24,7 @@ from library.utils import expand_tile_dim
 from td_agents import basics
 
 import library.networks as networks
+from td_agents.basics import ActorObserver, ActorState
 
 @dataclasses.dataclass
 class Config(basics.Config):
@@ -35,13 +39,14 @@ class Config(basics.Config):
 
   sf_coeff: float = 1.0
   q_coeff: float = 0.0
+  sf_loss: str = 'qlearning'
 
 def cumulants_from_env(data, online_preds, online_state, target_preds, target_state):
   # [T, B, C]
   cumulants = data.observation.observation['state_features']
 
   # ASSUMPTION: s' has cumulants for (s,a, r)
-  cumulants = cumulants[1:]
+  cumulants = cumulants[1:].astype(jnp.float32)
   return cumulants
 
 def cumulants_from_preds(
@@ -88,6 +93,8 @@ class UsfaLossFn(basics.RecurrentLossFn):
 
   sf_coeff: float = 1.0
   q_coeff: float = 0.0
+  loss_fn : str = 'qlearning'
+  lambda_: float  = .9
 
   def error(self, data, online_preds, online_state, target_preds, target_state, **kwargs):
     # ======================================================
@@ -115,18 +122,52 @@ class UsfaLossFn(basics.RecurrentLossFn):
     # ======================================================
     # Prepare loss (via vmaps)
     # ======================================================
-    td_error_fn = functools.partial(
-            rlax.transformed_n_step_q_learning,
-            n=self.bootstrap_n)
+    def td_error_fn(
+      online_sf_,
+      online_actions_,
+      target_sf_,
+      selector_actions_,
+      cumulants_,
+      discounts_,
+    ):
+      if self.loss_fn == 'qlearning':
+        error_fn = functools.partial(
+                rlax.transformed_n_step_q_learning,
+                n=self.bootstrap_n)
+        # vmap over cumulant dimension (C), return in dim=3
+        error_fn = jax.vmap(
+          error_fn,
+          in_axes=(2, None, 2, None, 1, None), out_axes=1)
+        return error_fn(
+          online_sf_,  # [T, A, C]
+          online_actions_,  # [T]         
+          target_sf_,  # [T, A, C]
+          selector_actions_,  # [T]      
+          cumulants_,  # [T, C]      
+          discounts_)  # [T]         
+
+      elif self.loss_fn == 'qlambda':
+        error_fn = jax.vmap(
+          functools.partial(
+              rlax.q_lambda,
+              lambda_=self.lambda_),
+          in_axes=(2, None, 1, None, 2), out_axes=1)
+
+        return error_fn(
+          online_sf_,       # [T, A, C] (vmap 2)
+          online_actions_,  # [T]       (vmap None)
+          cumulants_,       # [T, C]    (vmap 1)
+          discounts_,       # [T]       (vmap None)
+          target_sf_,        # [T, A, C] (vmap 2)
+        )
+      else:
+        raise NotImplementedError
 
     # vmap over batch dimension (B), return B in dim=1
     td_error_fn = jax.vmap(td_error_fn, in_axes=1, out_axes=1)
 
     # vmap over policy dimension (N), return N in dim=2
     td_error_fn = jax.vmap(td_error_fn, in_axes=(2, None, 2, 2, None, None), out_axes=2)
-
-    # vmap over cumulant dimension (C), return in dim=3
-    td_error_fn = jax.vmap(td_error_fn, in_axes=(4, None, 4, None, 2, None), out_axes=3)
 
     # output = [0=T, 1=B, 2=N, 3=C]
     sf_td_error = td_error_fn(
@@ -183,16 +224,152 @@ class UsfaLossFn(basics.RecurrentLossFn):
 
     metrics = {
       '0.total_loss': batch_loss,
-      '0.1.sf_loss': sf_loss,
+      '0.1.sf_loss_{self.loss_fn}': sf_loss,
       '0.1.q_loss': q_loss,
       '2.q_td_error': jnp.abs(value_td_error),
       '2.sf_td_error': jnp.abs(sf_td_error),
       '3.cumulants': cumulants,
       '3.sf_mean': online_sf,
-      '3.sf_var': online_sf.var(),
+      '3.q_mean': online_q,
+      # '3.sf_var': online_sf.var(),
       }
 
     return value_td_error, batch_loss, metrics # [T, B], [B]
+
+
+class SFsObserver(ActorObserver):
+  def __init__(self,
+               period=100,
+               prefix: str = 'SFsObserver'):
+    super(SFsObserver, self).__init__()
+    self.period = period
+    self.prefix = prefix
+    self.idx = -1
+
+  def observe_first(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
+    """Observes the initial state and initial time-step.
+
+    Usually state will be all zeros and time-step will be output of reset."""
+    self.idx += 1
+
+    # epsiode just ended, flush metrics if you want
+    if self.idx > 0:
+      self.flush_metrics()
+
+    # start collecting metrics again
+    self.actor_states = [state]
+    self.timesteps = [timestep]
+    self.actions = []
+
+  def observe_action(self, state: ActorState, action: jax.Array) -> None:
+    """Observe state and action that are due to observation of time-step.
+
+    Should be state after previous time-step along"""
+    self.actor_states.append(state)
+    self.actions.append(action)
+
+  def observe_timestep(self, timestep: dm_env.TimeStep) -> None:
+    """Observe next.
+
+    Should be time-step after selecting action"""
+    self.timesteps.append(timestep)
+
+  def flush_metrics(self) -> Dict[str, float]:
+    """Returns metrics collected for the current episode."""
+    if not self.idx % self.period == 0:
+      return
+    to_log = {}
+
+    tasks = [t.observation.observation['task'] for t in self.timesteps]
+    tasks = np.stack(tasks)
+    task = tasks[0]
+
+    def wandb_plot_lines(x, title: str, key: str):
+      # Create a figure and axis
+      fig, ax = plt.subplots()
+
+      # Plot each row as a separate line
+      for i in range(x.shape[1]):  # Iterate over columns
+          ax.plot(x[:, i], label=f'D-{i}')
+
+      # Add labels and title if necessary
+      ax.set_xlabel('time')
+      # ax.set_ylabel('}')
+      ax.set_title(title)
+      ax.legend()
+
+      # Log the plot to wandb
+      wandb.log({f"{self.prefix}/{key}": wandb.Image(fig)})
+
+      # Close the plot
+      plt.close(fig)
+    ##################################
+    # gather successor features
+    ##################################
+    # first prediction is empty (None)
+    predictions = [s.predictions for s in self.actor_states[1:]]
+    sfs = jnp.stack([p.sf for p in predictions])  # [T, N, A, C]
+    sfs = sfs[:, 0]  # [T, A, C]
+
+    npreds = len(predictions)
+    actions = jnp.stack(self.actions)[:npreds]
+
+    index = functools.partial(jnp.take_along_axis, axis=-1)
+    index = jax.vmap(index, in_axes=(2, None), out_axes=2)
+
+    sfs = index(sfs, actions[:, None])  # [T, 1, C]
+    sfs = jnp.squeeze(sfs, axis=-2)  # [T, C]
+
+    wandb_plot_lines(
+      x=sfs,
+      key='sfs',
+      title=f"Successor features for\n{task}",
+      )
+
+    #---------------
+    # q-values + reward
+    #---------------
+    q_values = (sfs*tasks[:-1]).sum(-1)
+    rewards = jnp.stack([t.reward for t in self.timesteps])[1:]
+    # Create a figure and axis
+    fig, ax = plt.subplots()
+    ax.plot(q_values, label='q_values')
+    ax.plot(rewards, label='rewards')
+
+    # Add labels and title if necessary
+    ax.set_xlabel('time')
+    # ax.set_ylabel('}')
+    ax.set_title("reward prediction")
+    ax.legend()
+
+    # Log the plot to wandb
+    wandb.log({f"{self.prefix}/reward_prediction": wandb.Image(fig)})
+
+    # Close the plot
+    plt.close(fig)
+    ##################################
+    # get images and cumulants
+    ##################################
+
+    # [T, H, W, C]
+    frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
+    frames = frames.transpose(0, 3, 1, 2)
+    to_log['episode'] = wandb.Video(frames, caption=f"Task: {task}", fps=.5)
+
+    # ignore 0th (reset) time-step w/ 0 reward and last (terminal) time-step
+    state_features = jnp.stack([t.observation.observation['state_features'] for t in self.timesteps])[1:-1]
+    wandb_plot_lines(
+      x=state_features,
+      key='state_features',
+      title=f"State features for\n{task}"
+      )
+    ##################################
+    # log
+    ##################################
+    try:
+      wandb.log({f'{self.prefix}/{k}': v for k,v in to_log.items()})
+    except wandb.errors.Error as e:
+      self.period = np.inf
 
 class USFAPreds(NamedTuple):
   q_values: jnp.ndarray  # q-value
@@ -382,13 +559,13 @@ class UsfaArch(hk.RNNCore):
       state: hk.LSTMState,  # [D]
       evaluation: bool = False,
   ) -> Tuple[USFAPreds, hk.LSTMState]:
-
     torso_outputs = self._torso(inputs)  # [D+A+1]
     memory_input = jnp.concatenate(
       (torso_outputs.image, torso_outputs.action), axis=-1)
 
     core_outputs, new_state = self._memory(memory_input, state)
 
+    # inputs = jax.tree_map(lambda x:x.astype(jnp.float32), inputs)
     if evaluation:
       predictions = self._head.evaluate(
         task=inputs.observation['task'],
@@ -421,7 +598,7 @@ class UsfaArch(hk.RNNCore):
       self._memory, memory_input, state)
 
     # treat T,B like this don't exist with vmap
-    predictions = jax.jit(hk.BatchApply(jax.vmap(self._head)))(
+    predictions = jax.vmap(jax.vmap(self._head))(
         task=inputs.observation['task'],  # [T, B, N]
         usfa_input=core_outputs,  # [T, B, D]
       )

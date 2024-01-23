@@ -344,7 +344,7 @@ class KeyRoomObjectTest(LevelGen):
       locations=False,
       unblocking=False,
       rooms_locked=True,
-      include_task_signals=True,
+      include_task_signals=False,
       max_steps_per_room: int = 100,
       implicit_unlock=True,
       room_colors: List[str] = ['blue', 'yellow', 'red', 'green'],

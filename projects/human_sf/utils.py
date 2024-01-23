@@ -4,8 +4,10 @@ import haiku as hk
 
 import jax
 import jax.numpy as jnp
+import rlax
 
 Array = jax.Array
+
 
 def add_batch(nest, batch_size: Optional[int]):
   """Adds a batch dimension at axis 0 to the leaves of a nested structure."""
@@ -140,3 +142,4 @@ class TaskAwareRecurrentFn(hk.RNNCore):
       state = add_task_to_lstm_state(state, task)
 
     return state, state
+
