@@ -1,37 +1,40 @@
 
+import abc
+import sys
 import functools
 import time
 from typing import Callable, Iterator, List, Optional, Union, Sequence, Generic
 from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
 from absl import logging
+from acme.tf import savers
 
 import chex
+import dm_env
 import dataclasses
 import haiku as hk
 import collections
-from acme import adders
+
+
+import acme
+from acme import adders, types
 from acme import core
 from acme import specs
 from acme import types as acme_types
 
-import acme
-from acme.adders import reverb as adders
 from acme.agents.jax.dqn import learning_lib
-from acme.jax import networks as networks_lib
-from acme.jax import utils
 from acme.utils import async_utils
 from acme.utils import counting
 from acme.utils import loggers
-from acme.agents.jax import r2d2
 from acme.jax import utils
+from acme.jax import networks as network_lib
+from acme.jax import variable_utils
+from acme.agents.jax import r2d2
 from acme.agents.jax import actor_core as actor_core_lib
-from acme.agents.jax.r2d2 import actor as r2d2_actor
 from acme.agents.jax.r2d2 import actor as r2d2_actor
 from acme.agents.jax.r2d2 import config as r2d2_config
 from acme.agents.jax.r2d2 import learning as r2d2_learning
 from acme.agents.jax.r2d2 import networks as r2d2_networks
 from acme.jax import networks as networks_lib
-from acme.jax import utils
 from acme.utils import counting
 from acme.utils import loggers
 
@@ -53,11 +56,17 @@ import rlax
 import tree
 
 
+from library.utils import ActorObserver
+
 _PMAP_AXIS_NAME = 'data'
+
+Number = Union[int, float, np.float32, jnp.float32]
+
 LossFn = learning_lib.LossFn
 TrainingState = learning_lib.TrainingState
 ReverbUpdate = learning_lib.ReverbUpdate
 LossExtra = learning_lib.LossExtra
+Policy = r2d2_actor.R2D2Policy
 
 # Only simple observations & discrete action spaces for now.
 Observation = jax.Array
@@ -76,6 +85,7 @@ class ActorState(Generic[actor_core_lib.RecurrentState]):
   rng: networks_lib.PRNGKey
   recurrent_state: actor_core_lib.RecurrentState
   prev_recurrent_state: actor_core_lib.RecurrentState
+  predictions: Optional[jax.Array] = None
   epsilon: Optional[jax.Array] = None
   step: Optional[jax.Array] = None
 
@@ -115,6 +125,9 @@ class Config(r2d2.R2D2Config):
   # Architecture
   state_dim: int = 512
 
+  #----------------
+  # Epsilon schedule
+  #----------------
   linear_epsilon: bool = False  # whether to use linear or sample from log space for all actors
   epsilon_begin: float = .9
   epsilon_end: float = 0.01
@@ -122,13 +135,18 @@ class Config(r2d2.R2D2Config):
 
   # value-based action-selection options (distributed)
   evaluation_epsilon: float = 0.01
-  num_epsilons: int = 10
-  epsilon_min: float = .01
-  epsilon_max: float = .9
+  # num_epsilons: int = 10
+  # epsilon_min: float = .01
+  # epsilon_max: float = .9
+  # epsilon_base: float = .1
+  num_epsilons: int = 256
+  epsilon_min: float = 1
+  epsilon_max: float = 3
   epsilon_base: float = .1
 
+  #----------------
   # # Learner options
-  # num_learner_steps: int = int(5e5)
+  #----------------
   variable_update_period: int = 400  # how often to update actor
   num_sgd_steps_per_step: int = 1
   seed: int = 1
@@ -150,7 +168,7 @@ class Config(r2d2.R2D2Config):
   num_parallel_calls: int = 1
 
   # Priority options
-  importance_sampling_exponent: float = 0.0
+  importance_sampling_exponent: float = 0.6
   priority_exponent: float = 0.9
   max_priority_weight: float = 0.9
 
@@ -396,7 +414,7 @@ class SGDLearner(learning_lib.SGDLearner):
                target_update_period: int,
                random_key: networks_lib.PRNGKey,
                replay_client: Optional[reverb.Client] = None,
-               replay_table_name: str = adders.DEFAULT_PRIORITY_TABLE,
+               replay_table_name: str = adders.reverb.DEFAULT_PRIORITY_TABLE,
                counter: Optional[counting.Counter] = None,
                logger: Optional[loggers.Logger] = None,
                num_sgd_steps_per_step: int = 1,
@@ -529,35 +547,15 @@ class SGDLearner(learning_lib.SGDLearner):
     """Takes one SGD step on the learner."""
     with jax.profiler.StepTraceAnnotation('step',
                                           step_num=self._current_step):
-      prefetching_split = next(self._data_iterator)
-      # In this case the host property of the prefetching split contains only
-      # replay keys and the device property is the prefetched full original
-      # sample. Key is on host since it's uint64 type.
-      reverb_keys = prefetching_split.host
-      batch: reverb.ReplaySample = prefetching_split.device
-
-      self._state, extra = self._sgd_step(self._state, batch)
+      data = next(self._data_iterator)
+      self._state, metrics = self.step_data(data, self._state)
+      self._current_step = utils.get_from_first_device(self._state.steps)
 
       # Compute elapsed time.
       timestamp = time.time()
       elapsed = timestamp - self._timestamp if self._timestamp else 0
       self._timestamp = timestamp
-
-      if self._replay_client and extra.reverb_priorities is not None:
-        reverb_priorities = ReverbUpdate(reverb_keys, extra.reverb_priorities)
-        self._async_priority_updater.put(reverb_priorities)
-
       steps_per_sec = (self._num_sgd_steps_per_step / elapsed) if elapsed else 0
-
-      self._current_step, metrics = utils.get_from_first_device(
-          (self._state.steps, extra.metrics))
-
-      if self._grad_period and self._state.steps % self._grad_period == 0:
-        for k, v in metrics['mean_grad'].items():
-          # first val
-          metrics['mean_grad'][k] = next(iter(v.values())) 
-      else:
-        metrics.pop('mean_grad', None)
 
       # Update our counts and record it.
       results = self._counter.increment(
@@ -567,12 +565,182 @@ class SGDLearner(learning_lib.SGDLearner):
 
       self._logger.write(results)
 
+  def step_data(self, prefetching_split, state: TrainingState):
+    """Takes one SGD step on the learner."""
+    # In this case the host property of the prefetching split contains only
+    # replay keys and the device property is the prefetched full original
+    # sample. Key is on host since it's uint64 type.
+    if hasattr(prefetching_split, 'host'):
+      reverb_keys = prefetching_split.host
+      batch: reverb.ReplaySample = prefetching_split.device
+    else:
+      batch: reverb.ReplaySample = prefetching_split
+
+    state, extra = self._sgd_step(state, batch)
+
+    if self._replay_client and extra.reverb_priorities is not None:
+      reverb_priorities = ReverbUpdate(reverb_keys, extra.reverb_priorities)
+      self._async_priority_updater.put(reverb_priorities)
+
+    metrics = utils.get_from_first_device(extra.metrics)
+
+    if self._grad_period and self._state.steps % self._grad_period == 0:
+      for k, v in metrics['mean_grad'].items():
+        # first val
+        metrics['mean_grad'][k] = next(iter(v.values())) 
+    else:
+      metrics.pop('mean_grad', None)
+
+    return state, metrics
+
+  def get_state(self): return self._state
+
 def default_adam_constr(config, **kwargs):
   optimizer_chain = [
       optax.clip_by_global_norm(config.max_grad_norm),
       optax.adam(config.learning_rate, eps=config.adam_eps),
     ]
   return optax.chain(*optimizer_chain)
+
+
+class ActorObserver(abc.ABC):
+  """An interface for collecting metrics/counters from actor.
+
+  # Note: agent.state has as a field, the agents predictions, e.g. Q-values.
+
+  Episode goes:
+    # observe initial
+    timestep = env.reset()
+    state = agent.init_state()
+
+    agent.observe_first(timestep)  # self.state is initialized
+    # inside, self.observer.observe_first(state, timestep) is called
+
+    while timestep.not_last():
+      action = agent.select_action(timestep)  # agent.state is updated
+      # inside, self.observer.observe_action(state, action) is called
+
+      next_timestep = env.step(action)
+      agent.observe(action, next_timestep)
+      # inside, self.observer.observe_timestep(next_timestep) is called
+      
+      timestep = next_timestep
+
+  """
+
+  @abc.abstractmethod
+  def observe_first(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
+    """Observes the initial state and initial time-step.
+    
+    Usually state will be all zeros and time-step will be output of reset."""
+
+  @abc.abstractmethod
+  def observe_action(self, state: ActorState, act: jax.Array) -> None:
+    """Observe state and action that are due to observation of time-step.
+    
+    Should be state after previous time-step along"""
+
+  @abc.abstractmethod
+  def observe_timestep(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
+    """Observe next.
+    
+    Should be state after previous time-step along"""
+
+  @abc.abstractmethod
+  def get_metrics(self) -> Dict[str, Number]:
+    """Returns metrics collected for the current episode."""
+
+
+class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras]):
+  """A generic actor implemented on top of ActorCore.
+
+  An actor based on a policy which takes observations and outputs actions. It
+  also adds experiences to replay and updates the actor weights from the policy
+  on the learner.
+  """
+
+  def __init__(
+      self,
+      actor: actor_core_lib.ActorCore[actor_core_lib.State, actor_core_lib.Extras],
+      random_key: network_lib.PRNGKey,
+      variable_client: Optional[variable_utils.VariableClient],
+      adders: Optional[Union[adders.Adder, List[adders.Adder]]] = None,
+      observers: Optional[List[ActorObserver]] = (),
+      jit: bool = True,
+      backend: Optional[str] = 'cpu',
+      per_episode_update: bool = False
+  ):
+    """Initializes a feed forward actor.
+
+    Args:
+      actor: actor core.
+      random_key: Random key.
+      variable_client: The variable client to get policy parameters from.
+      adder: An adder to add experiences to.
+      jit: Whether or not to jit the passed ActorCore's pure functions.
+      backend: Which backend to use when jitting the policy.
+      per_episode_update: if True, updates variable client params once at the
+        beginning of each episode
+    """
+    self._random_key = random_key
+    self._variable_client = variable_client
+    if adders and not (isinstance(adders, List) or isinstance(adders, Tuple)):
+      adders = [adders]
+
+    self._adders = adders
+    self._observers = observers
+    self._state = None
+
+    # Unpack ActorCore, jitting if requested.
+    if jit:
+      self._init = jax.jit(actor.init, backend=backend)
+      self._policy = jax.jit(actor.select_action, backend=backend)
+    else:
+      self._init = actor.init
+      self._policy = actor.select_action
+    self._get_extras = actor.get_extras
+    self._per_episode_update = per_episode_update
+
+  @property
+  def _params(self):
+    return self._variable_client.params if self._variable_client else []
+
+  def observe_first(self, timestep: dm_env.TimeStep):
+    self._random_key, key = jax.random.split(self._random_key)
+    self._state = self._init(key)
+
+    for observer in self._observers:
+      observer.observe_first(timestep, self._state)
+
+    if self._adders:
+      for adder in self._adders:
+        adder.add_first(timestep)
+    if self._variable_client and self._per_episode_update:
+      self._variable_client.update_and_wait()
+
+  def select_action(self,
+                    observation: network_lib.Observation) -> types.NestedArray:
+    action, self._state = self._policy(self._params, observation, self._state)
+
+    for observer in self._observers:
+      observer.observe_action(self._state, action)
+
+    return utils.to_numpy(action)
+
+  def observe(self, action: network_lib.Action, next_timestep: dm_env.TimeStep):
+    if self._adders:
+      for adder in self._adders:
+        adder.add(
+            action, next_timestep, extras=self._get_extras(self._state))
+
+    for observer in self._observers:
+      observer.observe_timestep(next_timestep)
+
+
+  def update(self, wait: bool = False):
+    if self._variable_client and not self._per_episode_update:
+      self._variable_client.update(wait)
+
 
 class Builder(r2d2.R2D2Builder):
   """TD agent Builder. Agent is derivative of R2D2 but may use different network/loss function
@@ -581,6 +749,7 @@ class Builder(r2d2.R2D2Builder):
               #  networks: r2d2_networks.R2D2Networks,
                config: r2d2_config.R2D2Config,
                LossFn: learning_lib.LossFn=RecurrentLossFn,
+               ActorCls: BasicActor = BasicActor,
                optimizer_cnstr = None,
                get_actor_core_fn = None,
                learner_kwargs=None):
@@ -591,6 +760,7 @@ class Builder(r2d2.R2D2Builder):
     if optimizer_cnstr is None:
       optimizer_cnstr = default_adam_constr
     self.optimizer_cnstr = optimizer_cnstr
+    self.ActorCls = ActorCls
 
     if get_actor_core_fn is None:
       get_actor_core_fn = get_actor_core
@@ -638,6 +808,24 @@ class Builder(r2d2.R2D2Builder):
       evaluation=evaluation,
       config=self._config)
 
+  def make_actor(
+      self,
+      random_key: networks_lib.PRNGKey,
+      policy: r2d2_actor.R2D2Policy,
+      environment_spec: specs.EnvironmentSpec,
+      variable_source: Optional[core.VariableSource] = None,
+      adder: Optional[adders.Adder] = None,
+  ) -> acme.Actor:
+    del environment_spec
+    # Create variable client.
+    variable_client = variable_utils.VariableClient(
+        variable_source,
+        key='actor_variables',
+        update_period=self._config.variable_update_period)
+
+    return self.ActorCls(
+        policy, random_key, variable_client, adder, backend='cpu')
+
 def get_actor_core(
     networks: r2d2_networks.R2D2Networks,
     config: Config,
@@ -670,6 +858,7 @@ def get_actor_core(
         rng=rng,
         epsilon=state.epsilon,
         step=state.step + 1,
+        predictions=preds,
         recurrent_state=recurrent_state,
         prev_recurrent_state=state.recurrent_state)
 
@@ -704,3 +893,25 @@ def get_actor_core(
 
   return actor_core_lib.ActorCore(init=init, select_action=select_action,
                                   get_extras=get_extras)
+
+def disable_insert_blocking(
+    tables: Sequence[reverb.Table]
+) -> Tuple[Sequence[reverb.Table], Sequence[int]]:
+  """Disables blocking of insert operations for a given collection of tables."""
+  modified_tables = []
+  sample_sizes = []
+  for table in tables:
+    rate_limiter_info = table.info.rate_limiter_info
+    rate_limiter = reverb.rate_limiters.RateLimiter(
+        samples_per_insert=rate_limiter_info.samples_per_insert,
+        min_size_to_sample=rate_limiter_info.min_size_to_sample,
+        min_diff=rate_limiter_info.min_diff,
+        max_diff=sys.float_info.max)
+    modified_tables.append(table.replace(rate_limiter=rate_limiter))
+    # Target the middle of the rate limiter's insert-sample balance window.
+    sample_sizes.append(
+        max(1, int(
+            (rate_limiter_info.max_diff - rate_limiter_info.min_diff) / 2)))
+  return modified_tables, sample_sizes
+
+

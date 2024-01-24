@@ -3,47 +3,47 @@ Running experiments:
 --------------------
 
 # DEBUGGING, single stream
-python -m ipdb -c continue configs/imagination_trainer.py \
-  --search='initial' \
+python -m ipdb -c continue configs/catch_trainer.py \
   --parallel='none' \
   --run_distributed=False \
   --debug=True \
   --use_wandb=False \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=imagination_debug
+  --wandb_project=catch_debug \
+  --search='baselines'
 
-# DEBUGGING, turn off JIT
-JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/imagination_trainer.py \
-  --search='initial' \
+# DEBUGGING, single stream, disable just-in-time compilation
+JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/catch_trainer.py \
   --parallel='none' \
   --run_distributed=False \
   --debug=True \
   --use_wandb=False \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=imagination_debug
+  --wandb_project=catch_debug \
+  --search='baselines'
 
 
-# DEBUGGING, parallel
-python -m ipdb -c continue configs/imagination_trainer.py \
-  --search='initial' \
+# DEBUGGING, launching jobs on slurm: see `sweep` fn
+python -m ipdb -c continue configs/catch_trainer.py \
   --parallel='sbatch' \
   --debug_parallel=True \
   --run_distributed=False \
   --use_wandb=True \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=imagination_debug \
+  --wandb_project=catch_debug \
+  --search='baselines'
 
 
-# launching jobs on slurm
-python configs/imagination_trainer.py \
-  --search='initial' \
+# launching jobs on slurm: see `sweep` fn
+python configs/catch_trainer.py \
   --parallel='sbatch' \
   --run_distributed=True \
   --use_wandb=True \
   --partition=kempner \
   --account=kempner_fellows \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=imagination
+  --wandb_project=catch \
+  --search='baselines'
 
 """
 import functools 
@@ -62,23 +62,19 @@ from acme.jax.networks import duelling
 from acme import wrappers as acme_wrappers
 from acme import specs
 from acme.jax import experiments
-import gymnasium
 import dm_env
 import haiku as hk
 import jax
 import jax.numpy as jnp
 
+from envs import catch
 from td_agents import q_learning, basics, muzero
 from library import muzero_mlps
 
-from library.dm_env_wrappers import GymWrapper
-import library.env_wrappers as env_wrappers
 import library.experiment_builder as experiment_builder
 import library.parallel as parallel
 import library.utils as utils
 import library.networks as networks
-
-from envs import mental_blocks
 
 flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')
@@ -104,7 +100,8 @@ def observation_encoder(
       x.observation.reshape(-1),  #[N*D]
       jnp.expand_dims(jnp.tanh(x.reward), 0),   # [1]
       jax.nn.one_hot(x.action, num_actions)))  # [A]
-    return hk.Linear(512)(x)
+    z = hk.nets.MLP((50, 50))(x)
+    return jax.nn.relu(x)
 
   has_batch_dim = inputs.reward.ndim > 0
   if has_batch_dim:
@@ -141,7 +138,7 @@ def make_muzero_networks(
     **kwargs) -> muzero.MuZeroNetworks:
   """Builds default MuZero networks for BabyAI tasks."""
 
-  num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum)
+  num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum) + 1
 
   def make_core_module() -> muzero.MuZeroNetworks:
 
@@ -166,7 +163,7 @@ def make_muzero_networks(
         # action: [A]
         # state: [D]
         out = muzero_mlps.SimpleTransition(
-            num_blocks=config.transition_blocks)(
+            num_blocks=2)(
             action_onehot, state)
         out = muzero.scale_gradient(out, config.scale_grad)
         return out, out
@@ -243,23 +240,15 @@ def make_muzero_networks(
     make_core_module=make_core_module,
     **kwargs)
 
-
 def make_environment(seed: int,
-                     difficulty: int= 1,
+                     rows: int = 10, columns: int = 5,
                      evaluation: bool = False,
                      **kwargs) -> dm_env.Environment:
   """Loads environments. 
   """
-  del seed
-  del evaluation
 
-  _, input_stacks, goal_stacks = mental_blocks.create_random_problem(difficulty=difficulty)
+  env = catch.Catch(rows=rows, columns=columns, seed=seed)
 
-  # create simulator
-  environment = mental_blocks.Simulator(input_stacks=input_stacks, goal_stacks=goal_stacks)
-  
-  # dm_env
-  env =  mental_blocks.EnvWrapper(environment)
 
   # add acme wrappers
   wrapper_list = [
@@ -270,6 +259,7 @@ def make_environment(seed: int,
   ]
 
   return acme_wrappers.wrap_all(env, wrapper_list)
+
 
 def setup_experiment_inputs(
     agent_config_kwargs: dict=None,
@@ -313,8 +303,10 @@ def setup_experiment_inputs(
     discretizer = utils.Discretizer(
                   num_bins=config.num_bins,
                   max_value=config.max_scalar_value,
+                  step_size=config.scalar_step_size,
                   tx_pair=config.tx_pair,
               )
+    config.num_bins = discretizer.num_bins
 
     builder = basics.Builder(
       config=config,
@@ -546,22 +538,14 @@ def run_many():
       num_actors=FLAGS.num_actors)
 
 def sweep(search: str = 'default'):
-  if search == 'initial':
+  if search == 'baselines':
     space = [
         {
-            "group": tune.grid_search(['run-2']),
-            "agent": tune.grid_search(['qlearning', 'muzero']),
-            "seed": tune.grid_search([1]),
-            "env.difficulty": tune.grid_search([2]),
-        }
-    ]
-  elif search == 'muzero':
-    space = [
-        {
+            "group": tune.grid_search(['catch-run-3']),
+            "num_steps": tune.grid_search([1e6]),
             "agent": tune.grid_search(['muzero']),
             "seed": tune.grid_search([1]),
-            "seed": tune.grid_search([1]),
-            "env.difficulty": tune.grid_search([7]),
+            "env.rows": tune.grid_search([5]),
         }
     ]
 

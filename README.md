@@ -1,38 +1,43 @@
-# FAS install
-
-## load modules
-```
-module load cuda/11.3.1-fasrc01
-module load cudnn/8.9.2.26_cuda11-fasrc01
-module load gcc/9.5.0-fasrc01
-```
-
-
-find `cudnn_version.h `. Mine was at 
-```
-cudnn_version_path=/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/include/cudnn_version.h
-```
-cat $cudnn_version_path | grep CUDNN_MAJOR -A 2
-
-Make sure `LD_LIBRARY_PATH` properly links by setting
-```
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/path/to/cudnn/lib
-# mine
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/
-```
-
 # Install
 
-Add the cudnn path to `LD_LIBRARY_PATH` and run `install-fas.sh`. Example:
+[FAS Install and Setup](install-fas.md)
+
+## Setup conda activate/deactivate
+
+**ONE TIME CHANGE TO MAKE YOUR LIFE EASIER**. if you want to avoid having to load modules and set environment variables each time you load this environment, you can add loading things to the activation file. Below is how.
+
 ```
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/
-chmod u+x install-fas.sh
-./install-fas.sh
+# first activate env
+source activate neurorl
+
+# make activation/deactivation directories
+activation_dir=$CONDA_PREFIX/etc/conda/activate.d
+mkdir -p $activation_dir
+mkdir -p $CONDA_PREFIX/etc/conda/deactivate.d
+
+# module loading added to activation
+echo 'module load cuda/11.8.0-fasrc01  ' > $activation_dir/env_vars.sh
+echo 'module load cudnn/8.9.2.26_cuda11-fasrc01' >> $activation_dir/env_vars.sh
+
+# setting PYTHONPATH added to activation
+echo 'export PYTHONPATH=$PYTHONPATH:.' >> $activation_dir/env_vars.sh
+
+# setting LD_LIBRARY_PATH added to activation
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib/' >> $activation_dir/env_vars.sh
+
+# undoing LD_LIBRARY_PATH added to deactivation
+echo 'unset LD_LIBRARY_PATH' >> $CONDA_PREFIX/etc/conda/deactivate.d/env_vars.sh
 ```
 
-**how does install work?**
+For automatically setting the LD library path to point to the current cudnn directory do the following
+```
+# general
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/path/to/cudnn/lib' >> $activation_dir/env_vars.sh
+# mine
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/' >> $activation_dir/env_vars.sh
+```
 
-[TODO]
+
 
 ## (Optionally) permanently set the results directory
 ```
@@ -66,11 +71,11 @@ source activate neurorl
 
 **how do experiments work?**
 
-Experiments are defined by configs. To make your own experiment, copy one of the configs (e.g. [biorl_trainer.py](configs/biorl_trainer.py)). You will need to change two functions:
+Experiments are defined by configs. To make your own experiment, copy one of the configs (e.g. [catch_trainer.py](configs/catch_trainer.py)). You will need to change two functions:
 1. `make_environment`: this function specifies how environments are constructed. This codebase assumes `dm_env` environments so make sure to convert `gym` environments to `dm_env`.
 2. `setup_experiment_inputs`: this function specifies how agents are loaded. In the example given, a q-learning agent is loaded.
 
-Agents are defined with 3 things (e.g. [biorl_trainer.py](configs/biorl_trainer.py#L124)):
+Agents are defined with 3 things (e.g. [catch_trainer.py](configs/catch_trainer.py#L124)):
 1. a config ([example](td_agents/q_learning.py#L27)), which specified default values
 2. a builder ([example](td_agents/q_learning.py#L30)), which specifies how the learner/replay buffer/actor will be created. you mainly change this object in order to change something about learning.
 3. a network_factory ([example](td_agents/q_learning.py#L11)), which creates the neural networks that define the agnet.
@@ -82,4 +87,4 @@ Agents are defined with 3 things (e.g. [biorl_trainer.py](configs/biorl_trainer.
 
 1. [Q-learning](td_agents/q_learning.py)
 2. [Successor Features](td_agents/usfa.py)
-<!-- 2. Object-oriented Successor Features -->
+3. [MuZero](td_agents/muzero.py)

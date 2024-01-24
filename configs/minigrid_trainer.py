@@ -3,26 +3,47 @@ Running experiments:
 --------------------
 
 # DEBUGGING, single stream
-python -m ipdb -c continue configs/biorl_trainer.py \
-  --search='qlearning' \
+python -m ipdb -c continue configs/minigrid_trainer.py \
   --parallel='none' \
   --run_distributed=False \
   --debug=True \
   --use_wandb=False \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=neurorl_debug
+  --wandb_project=minigrid_debug \
+  --search='baselines'
 
-# running a search, single-stream
-python configs/biorl_trainer.py \
-  --search='qlearning' \
-  --parallel='sbatch' \
+# DEBUGGING, single stream, disable just-in-time compilation
+JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/minigrid_trainer.py \
+  --parallel='none' \
   --run_distributed=False \
+  --debug=True \
+  --use_wandb=False \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=minigrid_debug \
+  --search='baselines'
+
+
+# DEBUGGING, launching jobs on slurm: see `sweep` fn
+python -m ipdb -c continue configs/minigrid_trainer.py \
+  --parallel='sbatch' \
+  --debug_parallel=True \
+  --run_distributed=False \
+  --use_wandb=True \
+  --wandb_entity=wcarvalho92 \
+  --wandb_project=minigrid_debug \
+  --search='baselines'
+
+
+# launching jobs on slurm: see `sweep` fn
+python configs/minigrid_trainer.py \
+  --parallel='sbatch' \
+  --run_distributed=True \
   --use_wandb=True \
   --partition=kempner \
   --account=kempner_fellows \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=neurorl
-
+  --wandb_project=minigrid \
+  --search='muzero'
 
 """
 import functools 
@@ -42,14 +63,13 @@ import gymnasium
 import dm_env
 import minigrid
 
-from td_agents import q_learning
+from td_agents import basics
 
-from lib.dm_env_wrappers import GymWrapper
-import lib.env_wrappers as env_wrappers
-import lib.experiment_builder as experiment_builder
-import lib.parallel as parallel
-import lib.utils as utils
-from lib.single_thread_experiment import run_experiment
+from library.dm_env_wrappers import GymWrapper
+import library.env_wrappers as env_wrappers
+import library.experiment_builder as experiment_builder
+import library.parallel as parallel
+import library.utils as utils
 
 flags.DEFINE_string('config_file', '', 'config file')
 flags.DEFINE_string('search', 'default', 'which search to use.')
@@ -61,13 +81,6 @@ flags.DEFINE_bool(
     'make_path', True, 'Create a path under `FLAGS>folder` for the experiment')
 
 FLAGS = flags.FLAGS
-
-@dataclasses.dataclass
-class QlearningConfig(q_learning.Config):
-  q_dim: int = 512
-
-  eval_every: int = 100
-  num_eval_episodes: int = 10
 
 def make_environment(seed: int,
                      level="BabyAI-GoToRedBallNoDists-v0",
@@ -122,10 +135,76 @@ def setup_experiment_inputs(
   assert agent != '', 'please set agent'
 
   if agent == 'qlearning':
-    config = QlearningConfig(**config_kwargs)
-    builder = q_learning.R2D2Builder(config=config)
+    from td_agents import q_learning
+    import haiku as hk
+    config = q_learning.Config(**config_kwargs)
+    builder = basics.Builder(
+      config=config,
+      get_actor_core_fn=functools.partial(
+        basics.get_actor_core,
+        linear_epsilon=config.linear_epsilon,
+      ),
+      LossFn=q_learning.R2D2LossFn(
+        discount=config.discount,
+        
+        importance_sampling_exponent=config.importance_sampling_exponent,
+        burn_in_length=config.burn_in_length,
+        max_replay_size=config.max_replay_size,
+        max_priority_weight=config.max_priority_weight,
+        bootstrap_n=config.bootstrap_n,
+      ))
+    # NOTE: main differences below
     network_factory = functools.partial(
-            q_learning.make_minigrid_networks, config=config)
+            q_learning.make_minigrid_networks,
+            config=config)
+
+  elif agent == 'muzero':
+    from td_agents import muzero
+
+    config = muzero.Config(**config_kwargs)
+
+    import mctx
+    # currently using same policy in learning and acting
+    mcts_policy = functools.partial(
+      mctx.gumbel_muzero_policy,
+      max_depth=config.max_sim_depth,
+      num_simulations=config.num_simulations,
+      gumbel_scale=config.gumbel_scale)
+
+    discretizer = utils.Discretizer(
+                  num_bins=config.num_bins,
+                  step_size=config.scalar_step_size,
+                  max_value=config.max_scalar_value,
+                  tx_pair=config.tx_pair,
+              )
+    config.num_bins = discretizer.num_bins
+
+    builder = basics.Builder(
+      config=config,
+      get_actor_core_fn=functools.partial(
+          muzero.get_actor_core,
+          mcts_policy=mcts_policy,
+          discretizer=discretizer,
+      ),
+      optimizer_cnstr=muzero.muzero_optimizer_constr,
+      LossFn=muzero.MuZeroLossFn(
+          discount=config.discount,
+          importance_sampling_exponent=config.importance_sampling_exponent,
+          burn_in_length=config.burn_in_length,
+          max_replay_size=config.max_replay_size,
+          max_priority_weight=config.max_priority_weight,
+          bootstrap_n=config.bootstrap_n,
+          discretizer=discretizer,
+          mcts_policy=mcts_policy,
+          simulation_steps=config.simulation_steps,
+          reanalyze_ratio=config.reanalyze_ratio,
+          root_policy_coef=config.root_policy_coef,
+          root_value_coef=config.root_value_coef,
+          model_policy_coef=config.model_policy_coef,
+          model_value_coef=config.model_value_coef,
+          model_reward_coef=config.model_reward_coef,
+      ))
+    network_factory = functools.partial(muzero.make_minigrid_networks, config=config)
   else:
     raise NotImplementedError(agent)
 
@@ -165,7 +244,6 @@ def train_single(
     num_actors: int = 1,
     run_distributed: bool = False,
 ):
-  del num_actors
   debug = FLAGS.debug
 
   experiment_config_inputs = setup_experiment_inputs(
@@ -187,15 +265,27 @@ def train_single(
     debug=debug
   )
 
-
-  config = experiment_config_inputs.agent_config
   if run_distributed:
-    raise NotImplementedError('distributed not implemented')
+    program = experiments.make_distributed_experiment(
+        experiment=experiment,
+        num_actors=num_actors)
+
+    local_resources = {
+        "actor": PythonProcess(env={"CUDA_VISIBLE_DEVICES": ""}),
+        "evaluator": PythonProcess(env={"CUDA_VISIBLE_DEVICES": ""}),
+        "counter": PythonProcess(env={"CUDA_VISIBLE_DEVICES": ""}),
+        "replay": PythonProcess(env={"CUDA_VISIBLE_DEVICES": ""}),
+        "coordinator": PythonProcess(env={"CUDA_VISIBLE_DEVICES": ""}),
+    }
+    controller = lp.launch(program,
+              lp.LaunchType.LOCAL_MULTI_PROCESSING,
+              terminal='current_terminal',
+              local_resources=local_resources)
+    controller.wait(return_on_first_completed=True)
+    controller._kill()
+
   else:
-    run_experiment(
-      experiment=experiment,
-      eval_every=config.eval_every,
-      num_eval_episodes=config.num_eval_episodes)
+    experiments.run_experiment(experiment=experiment)
 
 def setup_wandb_init_kwargs():
   if not FLAGS.use_wandb:
@@ -222,6 +312,8 @@ def run_single():
   wandb_init_kwargs = setup_wandb_init_kwargs()
   if FLAGS.debug:
     agent_config_kwargs.update(dict(
+      samples_per_insert=4.0,
+      min_replay_size=1_000,
     ))
     env_kwargs.update(dict(
     ))
@@ -269,6 +361,9 @@ def run_single():
       agent_config_kwargs.update(first_agent_config)
       env_kwargs.update(first_env_config)
 
+  if not run_distributed:
+    assert agent_config_kwargs['samples_per_insert'] > 0
+
   train_single(
     wandb_init_kwargs=wandb_init_kwargs,
     env_kwargs=env_kwargs,
@@ -313,14 +408,38 @@ def run_many():
       num_actors=FLAGS.num_actors)
 
 def sweep(search: str = 'default'):
-  if search == 'qlearning':
+  if search == 'baselines':
     space = [
         {
-            "agent": tune.grid_search(['qlearning']),
+            "group": tune.grid_search(['run-3-babyai-torso']),
+            "agent": tune.grid_search(['muzero']),
             "seed": tune.grid_search([1]),
             "env.level": tune.grid_search([
                 "BabyAI-GoToRedBallNoDists-v0",
                 "BabyAI-GoToObjS6-v1",
+            ]),
+        }
+    ]
+  elif search == 'muzero':
+    space = [
+        # {
+        #     "group": tune.grid_search(['muzero-run-2']),
+        #     "agent": tune.grid_search(['muzero']),
+        #     "seed": tune.grid_search([1]),
+        #     "warmup_steps": tune.grid_search([1_000]),
+        #     "lr_transition_steps": tune.grid_search([1_000, 100_000]),
+        #     "env.level": tune.grid_search([
+        #         "BabyAI-GoToRedBallNoDists-v0",
+        #     ]),
+        # },
+        {
+            "group": tune.grid_search(['muzero-run-6']),
+            "agent": tune.grid_search(['muzero']),
+            "seed": tune.grid_search([1]),
+            # "samples_per_insert_tolerance_rate": tune.grid_search([.5, 1., 10.]),
+            "samples_per_insert": tune.grid_search([50., 25.]),
+            "env.level": tune.grid_search([
+                "BabyAI-GoToRedBallNoDists-v0",
             ]),
         }
     ]

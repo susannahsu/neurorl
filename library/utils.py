@@ -1,3 +1,4 @@
+import abc
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import collections
@@ -17,6 +18,8 @@ import rlax
 
 import matplotlib.pyplot as plt
 from acme.utils.observers import EnvLoopObserver
+
+from library.basics import ActorObserver, ActorState
 
 Number = Union[int, float, np.float32, jnp.float32]
 
@@ -128,7 +131,7 @@ class LevelAvgReturnObserver(LevelAvgObserver):
     self._episode_return = tree.map_structure(
       operator.iadd,
       self._episode_return,
-      timestep.reward)
+      timestep.reward if timestep.reward else 0.0)
 
     if timestep.last():
       self.results[self.task_name].append(self._episode_return)
@@ -149,6 +152,45 @@ class LevelAvgReturnObserver(LevelAvgObserver):
 
     return result
 
+class AvgStateTDObserver(ActorObserver):
+  def __init__(self, period=100, prefix: str = '0.state', get_task_name=None):
+    super(AvgStateTDObserver, self).__init__()
+    self.results = collections.defaultdict(list)
+    self.task_name = None
+    self.period = period
+    self.prefix = prefix
+    self.idx = 0
+    self.logging = True
+    if get_task_name is None:
+      def get_task_name(env): return "Episode"
+      logging.info(
+          "WARNING: if multi-task, suggest setting `get_task_name` in `LevelAvgReturnObserver`. This will log separate statistics for each task.")
+    self._get_task_name = get_task_name
+
+  def observe_first(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
+    """Observes the initial state and initial time-step.
+    
+    Usually state will be all zeros and time-step will be output of reset."""
+    import ipdb; ipdb.set_trace()
+
+  def observe_action(self, state: ActorState, act: jax.Array) -> None:
+    """Observe state and action that are due to observation of time-step.
+    
+    Should be state after previous time-step along"""
+    import ipdb; ipdb.set_trace()
+
+  def observe_timestep(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
+    """Observe next.
+    
+    Should be state after previous time-step along"""
+    import ipdb; ipdb.set_trace()
+
+  def get_metrics(self) -> Dict[str, Number]:
+    """Returns metrics collected for the current episode."""
+    import ipdb; ipdb.set_trace()
+
+    if self.idx % self.period == 0:
+      import ipdb; ipdb.set_trace()
 
 def episode_mean(x, mask):
   if len(mask.shape) < len(x.shape):
@@ -156,10 +198,10 @@ def episode_mean(x, mask):
     nd = len(mask.shape)
     extra = nx - nd
     dims = list(range(nd, nd+extra))
-    batch_loss = jnp.multiply(x, jnp.expand_dims(mask, dims))
+    z = jnp.multiply(x, jnp.expand_dims(mask, dims))
   else:
-    batch_loss = jnp.multiply(x, mask)
-  return (batch_loss.sum(0))/(mask.sum(0)+1e-5)
+    z = jnp.multiply(x, mask)
+  return (z.sum(0))/(mask.sum(0)+1e-5)
 
 
 def make_episode_mask(data= None, include_final=False, **kwargs):
@@ -216,7 +258,7 @@ def array_from_fig(fig):
 
 class Discretizer:
   def __init__(self,
-               max_value,
+               max_value: Union[float, int],
                num_bins: Optional[int] = None,
                step_size: Optional[int] = None,
                min_value: Optional[int] = None,
@@ -230,8 +272,12 @@ class Discretizer:
     else:
       num_bins = math.ceil((self._max_value-self._min_value)/step_size)+1
 
-    self._num_bins = num_bins
+    self._num_bins = int(num_bins)
     self._tx_pair = tx_pair
+
+  @property
+  def num_bins(self):
+    return self._num_bins
 
   def logits_to_scalar(self, logits):
      return self.probs_to_scalar(jax.nn.softmax(logits))

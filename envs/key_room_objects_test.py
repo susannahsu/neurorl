@@ -18,7 +18,7 @@ from minigrid.core.world_object import Ball, Box, Key, Floor
 from minigrid.envs.babyai.core.roomgrid_level import RoomGridLevel, RejectSampling
 from minigrid.envs.babyai.core.verifier import Instr
 
-from lib.utils import LevelAvgObserver, array_from_fig
+from library.utils import LevelAvgObserver, array_from_fig
 
 Number = Union[int, float, np.float32]
 
