@@ -36,6 +36,7 @@ class Config(basics.Config):
   conv_flat_dim: Optional[int] = 0
   sf_layers : Tuple[int]=(128, 128)
   policy_layers : Tuple[int]=(32,)
+  combine_policy: str = 'concat'
 
   sf_coeff: float = 1.0
   q_coeff: float = 0.0
@@ -224,7 +225,7 @@ class UsfaLossFn(basics.RecurrentLossFn):
 
     metrics = {
       '0.total_loss': batch_loss,
-      '0.1.sf_loss_{self.loss_fn}': sf_loss,
+      f'0.1.sf_loss_{self.loss_fn}': sf_loss,
       '0.1.q_loss': q_loss,
       '2.q_td_error': jnp.abs(value_td_error),
       '2.sf_td_error': jnp.abs(sf_td_error),
@@ -234,8 +235,7 @@ class UsfaLossFn(basics.RecurrentLossFn):
       # '3.sf_var': online_sf.var(),
       }
 
-    return value_td_error, batch_loss, metrics # [T, B], [B]
-
+    return sf_td_error, batch_loss, metrics # [T, B], [B]
 
 class SFsObserver(ActorObserver):
   def __init__(self,
@@ -284,27 +284,8 @@ class SFsObserver(ActorObserver):
     tasks = np.stack(tasks)
     task = tasks[0]
 
-    def wandb_plot_lines(x, title: str, key: str):
-      # Create a figure and axis
-      fig, ax = plt.subplots()
-
-      # Plot each row as a separate line
-      for i in range(x.shape[1]):  # Iterate over columns
-          ax.plot(x[:, i], label=f'D-{i}')
-
-      # Add labels and title if necessary
-      ax.set_xlabel('time')
-      # ax.set_ylabel('}')
-      ax.set_title(title)
-      ax.legend()
-
-      # Log the plot to wandb
-      wandb.log({f"{self.prefix}/{key}": wandb.Image(fig)})
-
-      # Close the plot
-      plt.close(fig)
     ##################################
-    # gather successor features
+    # successor features
     ##################################
     # first prediction is empty (None)
     predictions = [s.predictions for s in self.actor_states[1:]]
@@ -320,15 +301,32 @@ class SFsObserver(ActorObserver):
     sfs = index(sfs, actions[:, None])  # [T, 1, C]
     sfs = jnp.squeeze(sfs, axis=-2)  # [T, C]
 
-    wandb_plot_lines(
-      x=sfs,
-      key='sfs',
-      title=f"Successor features for\n{task}",
-      )
+    # ignore 0th (reset) time-step w/ 0 reward and last (terminal) time-step
+    state_features = jnp.stack([t.observation.observation['state_features'] for t in self.timesteps])[1:-1]
 
-    #---------------
-    # q-values + reward
-    #---------------
+    ndims = sfs.shape[1]
+    for i in range(ndims):
+      # Create a figure and axis
+      fig, ax = plt.subplots()
+      # Plot each row as a separate line
+      ax.plot(state_features[:, i], label=f'$\\phi$')
+      ax.plot(sfs[:, i], label=f'$\\psi$')
+
+      # Add labels and title if necessary
+      ax.set_xlabel('time')
+      # ax.set_ylabel('}')
+      ax.set_title(f"Successor feature prediction {i}")
+      ax.legend()
+
+      # Log the plot to wandb
+      wandb.log({f"{self.prefix}/sf-prediction-{i}": wandb.Image(fig)})
+
+      # Close the plot
+      plt.close(fig)
+
+    ##################################
+    # q-values
+    ##################################
     q_values = (sfs*tasks[:-1]).sum(-1)
     rewards = jnp.stack([t.reward for t in self.timesteps])[1:]
     # Create a figure and axis
@@ -347,22 +345,16 @@ class SFsObserver(ActorObserver):
 
     # Close the plot
     plt.close(fig)
-    ##################################
-    # get images and cumulants
-    ##################################
 
+    ##################################
+    # get images
+    ##################################
     # [T, H, W, C]
     frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
     frames = frames.transpose(0, 3, 1, 2)
     to_log['episode'] = wandb.Video(frames, caption=f"Task: {task}", fps=.5)
 
-    # ignore 0th (reset) time-step w/ 0 reward and last (terminal) time-step
-    state_features = jnp.stack([t.observation.observation['state_features'] for t in self.timesteps])[1:-1]
-    wandb_plot_lines(
-      x=state_features,
-      key='state_features',
-      title=f"State features for\n{task}"
-      )
+
     ##################################
     # log
     ##################################
@@ -378,11 +370,80 @@ class USFAPreds(NamedTuple):
   task: jnp.ndarray  # task vector (potentially embedded)
 
 class MonolithicSfHead(hk.Module):
-  def __init__(self, layers: int, num_actions: int, state_features_dim: int,
+  def __init__(self,
+               layers: int,
+               num_actions: int,
+               state_features_dim: int,
+               combine_policy: str = 'concat',
+               policy_layers : Tuple[int]=(32,),
                name: Optional[str] = None):
     super(MonolithicSfHead, self).__init__(name=name)
-    self.net = hk.nets.MLP(
+
+    if policy_layers:
+      self.policy_net = hk.nets.MLP(policy_layers)
+    else:
+      self.policy_net = lambda x: x
+
+    self.sf_net = hk.nets.MLP(
         tuple(layers)+(num_actions * state_features_dim,))
+
+    self.num_actions = num_actions
+    self.state_features_dim = state_features_dim
+    self.combine_policy = combine_policy
+
+  def __call__(self,
+               sf_input: jnp.ndarray,
+               policy: jnp.ndarray,
+               task: jnp.ndarray) -> jnp.ndarray:
+    """Compute successor features and q-valuesu
+    
+    Args:
+        sf_input (jnp.ndarray): D_1
+        policy (jnp.ndarray): C_2
+        task (jnp.ndarray): D
+    
+    Returns:
+        jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
+    """
+    dim = sf_input.shape[-1]
+    linear = lambda x: hk.Linear(dim, with_bias=False)(x)
+    if self.combine_policy == 'concat':
+      sf_input = jnp.concatenate((sf_input, policy))  # 2D
+    elif self.combine_policy == 'product':
+      sf_input = linear(jax.nn.relu(sf_input))*linear(policy)
+    elif self.combine_policy == 'sum':
+      sf_input = linear(jax.nn.relu(sf_input))+linear(policy)
+    else:
+      raise NotImplementedError
+
+    # [A * C]
+    sf = self.sf_net(sf_input)
+    # [A, C]
+    sf = jnp.reshape(sf, (self.num_actions, self.state_features_dim))
+
+    def dot(a, b): return jnp.sum(a*b).sum()
+
+    # dot-product: A
+    q_values = jax.vmap(
+        dot, in_axes=(0, None), out_axes=0)(sf, task)
+
+    assert q_values.shape[0] == self.num_actions, 'wrong shape'
+    return sf, q_values
+
+class IndependentSfHead(hk.Module):
+  def __init__(
+      self,
+      layers: int,
+      num_actions: int,
+      state_features_dim: int,
+      policy_layers : Tuple[int]=(32,),
+      name: Optional[str] = None):
+    super(IndependentSfHead, self).__init__(name=name)
+    del policy_layers
+
+    self.sf_net_factory = lambda: hk.nets.MLP(
+        tuple(layers)+(num_actions,))
+
     self.num_actions = num_actions
     self.state_features_dim = state_features_dim
 
@@ -393,19 +454,27 @@ class MonolithicSfHead(hk.Module):
     """Compute successor features and q-valuesu
     
     Args:
-        inputs (jnp.ndarray): D_1
-        policy (jnp.ndarray): D_2
-        task (jnp.ndarray): D_1
+        sf_input (jnp.ndarray): D
+        policy (jnp.ndarray): C
+        task (jnp.ndarray): D
     
     Returns:
         jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
     """
-    sf_input = jnp.concatenate((sf_input, policy))  # 2D
+    assert policy.shape[0] == self.state_features_dim
+    # Below, we make C copies of sf_input, break policy into C vectors of dimension 1,
+    # and then concatenate each break policy unit to each sf_input copy.
+    concat = lambda a, b: jnp.concatenate((a, b))
+    concat = jax.vmap(concat, in_axes=(None, 0), out_axes=0)
 
-    # [A * C]
-    sf = self.net(sf_input)
+    policy = jnp.expand_dims(policy, axis=1)  # [C, 1]
+    sf_inputs = concat(sf_input, policy)  # [C, D+1]
+    import ipdb; ipdb.set_trace()
+    # now we get sf-estimates for each policy dimension
+    # [[A], ..., [A]]
+    sf = [self.sf_net_factory()(sf_inputs[idx]) for idx in range(self.state_features_dim)]
     # [A, C]
-    sf = jnp.reshape(sf, (self.num_actions, self.state_features_dim))
+    sf = jnp.stack(sf, axis=1)
 
     def dot(a, b): return jnp.sum(a*b).sum()
 
@@ -422,11 +491,9 @@ class SfGpiHead(hk.Module):
     num_actions: int,
     state_features_dim: int,
     sf_net : hk.Module,
-    policy_layers : Tuple[int]=(32,),
     nsamples: int=10,
     variance: Optional[float]=0.5,
     eval_task_support: str = 'train', 
-    **kwargs,
     ):
     """Summary
     
@@ -446,12 +513,6 @@ class SfGpiHead(hk.Module):
     self.var = variance
     self.nsamples = nsamples
     self.eval_task_support = eval_task_support
-
-    if policy_layers:
-      self.policy_net = hk.nets.MLP(policy_layers)
-    else:
-      self.policy_net = lambda x: x
-
     self.sf_net = sf_net
 
   def __call__(self,
@@ -520,11 +581,10 @@ class SfGpiHead(hk.Module):
         USFAPreds: Description
     """
 
-    policy_embeddings = self.policy_net(policies)
     sfs, q_values = jax.vmap(
       self.sf_net, in_axes=(None, 0, None), out_axes=0)(
         usfa_input,
-        policy_embeddings,
+        policies,
         task)
 
     # GPI
@@ -624,10 +684,14 @@ def make_minigrid_networks(
       output_fn=networks.TorsoOutput,
     )
 
-    sf_net = MonolithicSfHead(
+    sf_net = IndependentSfHead(
       layers=config.sf_layers,
       state_features_dim=state_features_dim,
-      num_actions=num_actions)
+      num_actions=num_actions,
+      policy_layers=config.policy_layers,
+      # combine_policy=config.combine_policy,
+      )
+    
 
     usfa_head = SfGpiHead(
       num_actions=num_actions,
@@ -635,7 +699,6 @@ def make_minigrid_networks(
       nsamples=config.nsamples,
       variance=config.variance,
       sf_net=sf_net,
-      policy_layers=config.policy_layers,
       eval_task_support=config.eval_task_support)
 
     return UsfaArch(
