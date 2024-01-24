@@ -356,7 +356,7 @@ class GotoOptionsWrapper(Wrapper):
         return obs, reward, terminated, truncated, info
 
 def main():
-  from envs.key_room import KeyRoom
+  from projects.human_sf.key_room import KeyRoom
   import minigrid
   import random
   from pprint import pprint
