@@ -2,7 +2,7 @@
 Running experiments:
 
 # DEBUGGING, single stream
-python -m ipdb -c continue projects/human_sf/ambiguous_trainer.py \
+python -m ipdb -c continue projects/human_sf/trainer_v2.py \
   --parallel='none' \
   --run_distributed=False \
   --debug=True \
@@ -12,7 +12,7 @@ python -m ipdb -c continue projects/human_sf/ambiguous_trainer.py \
   --search='flat_usfa'
 
 # DEBUGGING, without jit
-JAX_DISABLE_JIT=1 python -m ipdb -c continue projects/human_sf/ambiguous_trainer.py \
+JAX_DISABLE_JIT=1 python -m ipdb -c continue projects/human_sf/trainer_v2.py \
   --parallel='none' \
   --run_distributed=False \
   --debug=True \
@@ -23,7 +23,7 @@ JAX_DISABLE_JIT=1 python -m ipdb -c continue projects/human_sf/ambiguous_trainer
 
 
 # DEBUGGING, parallel
-python -m ipdb -c continue projects/human_sf/ambiguous_trainer.py \
+python -m ipdb -c continue projects/human_sf/trainer_v2.py \
   --parallel='sbatch' \
   --debug_parallel=True \
   --run_distributed=False \
@@ -34,7 +34,7 @@ python -m ipdb -c continue projects/human_sf/ambiguous_trainer.py \
 
 
 # running, parallel
-python projects/human_sf/ambiguous_trainer.py \
+python projects/human_sf/trainer_v2.py \
   --parallel='sbatch' \
   --run_distributed=True \
   --use_wandb=True \
@@ -86,11 +86,7 @@ from projects.human_sf import q_learning
 from projects.human_sf import object_q_learning
 from projects.human_sf import muzero
 
-from envs.key_room_objects_test import (
-  ObjectTestTask,
-  KeyRoomObjectTest,
-  ObjectCountObserver,
-)
+from projects.human_sf import key_room_v3 as key_room
 
 
 flags.DEFINE_string('config_file', '', 'config file')
@@ -144,18 +140,14 @@ class MuZeroConfig(muzero.Config):
   value_layers: Tuple[int] = (512, 512)
   reward_layers: Tuple[int] = (128,)
 
-class TestOptions(Enum):
-  shape = 0
-  color = 1
-  ambigious = 2
-
 def make_keyroom_object_test_env(seed: int,
-                     setting: TestOptions,
-                     room_size: int = 5,
+                     room_size: int = 7,
                      evaluation: bool = False,
-                     object_options: bool = True,
-                     task_features_cls: str='flat',
+                     object_options: bool = False,
+                     flat_task: bool = True,
                      steps_per_room: int=100,
+                     swap_episodes: int = 100_000,
+                     color_rooms: bool = True,
                      **kwargs) -> dm_env.Environment:
   """Loads environments.
   
@@ -166,70 +158,16 @@ def make_keyroom_object_test_env(seed: int,
       dm_env.Environment: Multitask environment is returned.
   """
   del seed
-  TaskCls = functools.partial(
-    ObjectTestTask, task_features_cls=task_features_cls)
 
-  if setting == TestOptions.shape.value:
-    # in this setting, the initial shape indicates the task color
-    train_tasks = []
-    test_tasks = []
-    for c in ['blue', 'yellow']:
-      train_tasks.append(
-        TaskCls(source='shape', init='ball', floor=c, w='box'))
-      test_tasks.append(
-        TaskCls(source='shape', init='ball', floor=c, w='ball'))
-
-      train_tasks.append(
-        TaskCls(source='shape', init='box', floor=c, w='ball'))
-      test_tasks.append(
-        TaskCls(source='shape', init='box', floor=c, w='box'))
-
-  elif setting == TestOptions.color.value:
-    # in this setting, the floor color indicates the task color
-    train_tasks = [
-      TaskCls(floor='blue', init='ball', w='box'),
-      TaskCls(floor='blue', init='box', w='box'),
-      TaskCls(floor='yellow', init='ball', w='ball'),
-      TaskCls(floor='yellow', init='box', w='ball'),
-    ]
-
-    test_tasks = [
-      TaskCls(floor='blue', init='ball', w='ball'),
-      TaskCls(floor='blue', init='box', w='ball'),
-      TaskCls(floor='yellow', init='ball', w='box'),
-      TaskCls(floor='yellow', init='box', w='box'),
-    ]
-
-  elif setting == TestOptions.ambigious.value:
-    # in this setting, it's not clear whether floor color or initial shape indicates the task color
-    floor2task_color = {
-        'red': 'blue',
-        'green': 'yellow',
-    }
-
-    train_tasks = [
-        TaskCls(floor='red', init='ball', w='box', floor2task_color=floor2task_color),
-        TaskCls(floor='green', init='box', w='ball', floor2task_color=floor2task_color),
-    ]
-
-    test_tasks = [
-        TaskCls(floor='red', init='ball', w='ball', floor2task_color=floor2task_color),
-        TaskCls(floor='red', init='box', w='ball', floor2task_color=floor2task_color),
-        TaskCls(floor='green', init='box', w='box', floor2task_color=floor2task_color),
-        TaskCls(floor='green', init='ball', w='box', floor2task_color=floor2task_color),
-    ]
-
-  else:
-    raise NotImplementedError(setting)
-
-  room_colors = list(set([t.goal_color() for t in train_tasks]))
 
   # create gymnasium.Gym environment
-  env = KeyRoomObjectTest(
+  env = key_room.KeyRoom(
     room_size=room_size,
-    tasks=test_tasks if evaluation else train_tasks,
-    room_colors=room_colors,
     max_steps_per_room=steps_per_room,
+    flat_task=flat_task,
+    swap_episodes=swap_episodes,
+    color_rooms=color_rooms,
+    training= not evaluation,
     **kwargs)
 
   ####################################
@@ -443,16 +381,15 @@ def setup_experiment_inputs(
   # -----------------------
   # setup observer factory for environment
   # -----------------------
-  test_setting = TestOptions(env_kwargs['setting']).name
   observers = [
     # this logs the average every reset=50 episodes (instead of every episode)
     utils.LevelAvgReturnObserver(
       reset=50 if not debug else 5,
       get_task_name=env_get_task_name,
       ),
-    ObjectCountObserver(
+    key_room.ObjectCountObserver(
       reset=1000 if not debug else 5,
-      prefix=f'Images-{test_setting}',
+      prefix=f'Images',
       agent_name=agent,
       get_task_name=env_get_task_name),
   ]
