@@ -246,7 +246,7 @@ ObjectNames = List[List[str]]
 def swap_test_pairs(maze_config):
   maze_config = copy.deepcopy(maze_config)
   maze_config['pairs'][0][1], maze_config['pairs'][1][1] = maze_config['pairs'][1][1], maze_config['pairs'][0][1]
-  maze_config['pairs'][2][1], maze_config['pairs'][3][1] = maze_config['pairs'][3][1], maze_config['pairs'][2][1]
+  # maze_config['pairs'][2][1], maze_config['pairs'][3][1] = maze_config['pairs'][3][1], maze_config['pairs'][2][1]
   return maze_config
 
 
@@ -287,6 +287,7 @@ class KeyRoom(LevelGen):
       rooms_locked=True,
       flat_task: bool = True,
       swap_episodes: int = 100_000,
+      num_task_rooms: int = 2,
       color_rooms: bool = True,
       training=True,
       # include_task_signals=False,
@@ -319,6 +320,9 @@ class KeyRoom(LevelGen):
           include_task_signals (bool): Whether to include task-specific signals (i.e. room color, indicator object).
       """
 
+      maze_config['keys'] = maze_config['keys'][:num_task_rooms]
+      maze_config['pairs'] = maze_config['pairs'][:num_task_rooms]
+
       self.maze_config = maze_config
       self.maze_swap_config = swap_test_pairs(maze_config)
       self.flat_task = flat_task
@@ -338,6 +342,7 @@ class KeyRoom(LevelGen):
       self.potential_distractors = [pair for pair in all_pairs if pair not in self.all_possible_objects]
 
       self.color_rooms = color_rooms
+      self.num_task_rooms = num_task_rooms
       self.types = set(['key', 'room'])
       self.colors = set(['start'])
       for key in maze_config['keys']:
