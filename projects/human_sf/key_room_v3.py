@@ -246,7 +246,10 @@ ObjectNames = List[List[str]]
 def swap_test_pairs(maze_config):
   maze_config = copy.deepcopy(maze_config)
   maze_config['pairs'][0][1], maze_config['pairs'][1][1] = maze_config['pairs'][1][1], maze_config['pairs'][0][1]
-  # maze_config['pairs'][2][1], maze_config['pairs'][3][1] = maze_config['pairs'][3][1], maze_config['pairs'][2][1]
+  try:
+    maze_config['pairs'][2][1], maze_config['pairs'][3][1] = maze_config['pairs'][3][1], maze_config['pairs'][2][1]
+  except:
+     pass
   return maze_config
 
 
