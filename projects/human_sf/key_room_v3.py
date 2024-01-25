@@ -278,7 +278,6 @@ class KeyRoom(LevelGen):
     def __init__(
       self,
       maze_config: Dict[str:ObjectNames],
-      flat_task: bool = True,
       room_size=7,
       num_rows=3,
       num_cols=3,
@@ -286,6 +285,7 @@ class KeyRoom(LevelGen):
       locations=False,
       unblocking=False,
       rooms_locked=True,
+      flat_task: bool = True,
       swap_episodes: int = 100_000,
       color_rooms: bool = True,
       training=True,
@@ -325,9 +325,18 @@ class KeyRoom(LevelGen):
       self.swap_episodes = swap_episodes
       self.training = training
       self.room_size = room_size
+      self.num_dists = num_dists
       self.train_objects = [p[0] for p in maze_config['pairs']]
       self.test_objects = [p[1] for p in maze_config['pairs']]
       self.all_final_objects = self.train_objects + self.test_objects
+
+      self.all_possible_objects = self.all_final_objects + maze_config['keys']
+      colors = ["red", "green", "blue", "purple", "yellow", "grey"]
+      object_types = ["key", "ball", "box"]
+      all_pairs = [(obj_type, color) for obj_type in object_types for color in colors]
+
+      self.potential_distractors = [pair for pair in all_pairs if pair not in self.all_possible_objects]
+
       self.color_rooms = color_rooms
       self.types = set(['key', 'room'])
       self.colors = set(['start'])
@@ -515,6 +524,15 @@ class KeyRoom(LevelGen):
           if self.color_rooms:
             for _ in range(width*width):
               self.place_in_room(*room, init_floor)
+
+          if self.num_dists and not self.training:
+            # Place distractors in the room
+            for _ in range(self.num_dists):
+                # Assuming you have a method 'construct_distractor' to create a distractor
+                distractor_type, distractor_color = random.choice(self.potential_distractors)
+                distractor = construct(distractor_type, distractor_color)
+                self.all_objects.append(distractor)
+                self.place_in_room(*room, distractor)
 
       task_idx = random.sample(indices, 1)[0]
       if self.training:
