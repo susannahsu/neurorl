@@ -49,7 +49,7 @@ Change "search" to what you want to search over.
 
 """
 import functools 
-
+import json
 from typing import Callable, Optional, Tuple
 
 from enum import Enum
@@ -140,13 +140,14 @@ class MuZeroConfig(muzero.Config):
   value_layers: Tuple[int] = (512, 512)
   reward_layers: Tuple[int] = (128,)
 
-def make_keyroom_object_test_env(seed: int,
+def make_keyroom_env(seed: int,
                      room_size: int = 7,
                      evaluation: bool = False,
                      object_options: bool = False,
                      flat_task: bool = True,
                      steps_per_room: int=100,
                      swap_episodes: int = 100_000,
+                     maze_idx: int = 0,
                      color_rooms: bool = True,
                      **kwargs) -> dm_env.Environment:
   """Loads environments.
@@ -159,10 +160,15 @@ def make_keyroom_object_test_env(seed: int,
   """
   del seed
 
+  json_file = 'maze_pairs.json'
+  with open(json_file, 'r') as file:
+      maze_dicts = json.load(file)
+  maze_dict = maze_dicts[maze_idx]
 
   # create gymnasium.Gym environment
   env = key_room.KeyRoom(
     room_size=room_size,
+    maze_dict=maze_dict,
     max_steps_per_room=steps_per_room,
     flat_task=flat_task,
     swap_episodes=swap_episodes,
@@ -416,7 +422,7 @@ def train_single(
   debug = FLAGS.debug
 
   experiment_config_inputs = setup_experiment_inputs(
-    make_environment_fn=make_keyroom_object_test_env,
+    make_environment_fn=make_keyroom_env,
     env_get_task_name= lambda env: env.unwrapped.task.goal_name(),
     agent_config_kwargs=agent_config_kwargs,
     env_kwargs=env_kwargs,
