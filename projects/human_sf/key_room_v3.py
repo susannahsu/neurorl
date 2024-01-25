@@ -347,20 +347,16 @@ class KeyRoom(LevelGen):
       all_tasks = []
       train_tasks = []
       for idx, (type, color) in enumerate(maze_config['keys']):
-        if self.flat_task:
-          TskCls = FlatTaskRep
-        else:
-          TskCls = StructuredTaskRep
         train_object, test_object = maze_config['pairs'][idx]
 
-        train_task = TskCls(
+        train_task = self.task_class(
             types=self.types,
             colors=self.colors,
             target=train_object)
         train_tasks.append(train_task)
         all_tasks.append(train_task)
 
-        test_task = TskCls(
+        test_task = self.task_class(
             types=self.types,
             colors=self.colors,
             target=test_object)
@@ -410,6 +406,13 @@ class KeyRoom(LevelGen):
            }
       )
 
+    @property
+    def task_class(self):
+      if self.flat_task:
+          return FlatTaskRep
+      else:
+          return StructuredTaskRep
+
     def gen_mission(self):
       """_summary_
 
@@ -454,14 +457,8 @@ class KeyRoom(LevelGen):
       all_choices = self.train_objects + self.test_objects
       task_object = random.choice(all_choices)
 
-      # Create task representation
-      if self.flat_task:
-          TskCls = FlatTaskRep
-      else:
-          TskCls = StructuredTaskRep
-
       # Assuming 'colors_to_room' is defined elsewhere or is not needed for flat tasks
-      self.task = TskCls(
+      self.task = self.task_class(
           types=self.types,
           colors=self.colors,
           target=task_object,
@@ -525,13 +522,8 @@ class KeyRoom(LevelGen):
       else:
          task_object = self.test_objects[task_idx]
 
-      if self.flat_task:
-         TskCls = FlatTaskRep
-      else:
-         TskCls = StructuredTaskRep
-
       target_room_color = room_colors[task_idx] if self.training else None
-      self.task = TskCls(
+      self.task = self.task_class(
           types=self.types,
           colors=self.colors,
           target=task_object,
