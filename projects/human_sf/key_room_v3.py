@@ -114,11 +114,11 @@ class BaseTaskRep:
     self.feature_counts += positive_difference
 
     if self.first_instance:
-      # in 1 setting, state-feature is only active the 1st time the count goes  0 -> 1
+      # in 1 setting, state-feature is only active the 1st time the count goes  0 -> +
       first = (self.feature_counts == 1).astype(np.float32)
       state_features = first*positive_difference
     else:
-      # in this setting, whenever goes 0 -> 1
+      # in this setting, whenever goes 0 -> +
       state_features = positive_difference
 
 
