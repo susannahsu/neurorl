@@ -114,8 +114,9 @@ class ObjectQlearningConfig(object_q_learning.Config):
 class UsfaConfig(usfa.Config):
 
   # arch
-  final_conv_dim: int = 16
-  conv_flat_dim: Optional[int] = 0
+  state_dim: int = 512
+  final_conv_dim: int = 0
+  conv_flat_dim: Optional[int] = 512
   sf_layers : Tuple[int]=(1024,)
   policy_layers : Tuple[int]=()
 

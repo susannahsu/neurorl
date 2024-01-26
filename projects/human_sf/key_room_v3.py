@@ -101,7 +101,7 @@ class BaseTaskRep:
   def reset(self):
      self._task_array = self.make_task_array()
      self._state_features = self.empty_array()
-     self._prior_raw_features = self.empty_array()
+     self._prior_features = self.empty_array()
      self.feature_counts = self.empty_array()
      self.prior_feature_counts = self.empty_array()
 
@@ -109,18 +109,20 @@ class BaseTaskRep:
     # any features that changed, add them to feature counts
     current_features = self.current_state(env)
     difference = (current_features -
-                  self._prior_raw_features).astype(np.float32)
-    self.feature_counts += difference
+                  self._prior_features).astype(np.float32)
+    positive_difference = difference*(difference > 0).astype(np.float32)
+    self.feature_counts += positive_difference
 
     if self.first_instance:
-      # in 1 setting, state-feature is only active the 1st time the count goes to 1
+      # in 1 setting, state-feature is only active the 1st time the count goes  0 -> +
       first = (self.feature_counts == 1).astype(np.float32)
-      state_features = first*difference
+      state_features = first*positive_difference
     else:
-      # in this setting, the feature difference
-      state_features = difference
+      # in this setting, whenever goes 0 -> +
+      state_features = positive_difference
 
-    self._prior_raw_features = current_features
+
+    self._prior_features = current_features
     self._state_features = state_features
 
   def empty_array(self):
@@ -291,6 +293,7 @@ class KeyRoom(LevelGen):
       locations=False,
       unblocking=False,
       rooms_locked=True,
+      basic_only: bool = False,
       flat_task: bool = True,
       swap_episodes: int = 100_000,
       num_task_rooms: int = 2,
@@ -363,6 +366,7 @@ class KeyRoom(LevelGen):
 
       self.rooms_locked = rooms_locked
       self.room_colors = room_colors
+      self.basic_only = basic_only
 
       all_tasks = []
       train_tasks = []
@@ -440,18 +444,20 @@ class KeyRoom(LevelGen):
       # Returns:
       #     _type_: _description_
       # """
+      if self.basic_only:
+         return self.single_room_placement()
       if self.training:
         choice = random.choice([0, 1, 2])
         if choice == 0:
-           self.single_room_placement()
+          return self.single_room_placement()
         else:
-           self.multi_room_placement()
+          return self.multi_room_placement()
       else:
         if self.episodes >= self.swap_episodes:
-           self.multi_room_placement(
-              maze_config=self.maze_swap_config)
+          return self.multi_room_placement(
+            maze_config=self.maze_swap_config)
         else:
-          self.multi_room_placement()
+          return self.multi_room_placement()
 
     def single_room_placement(self):
       self.instrs = DummyInstr()
