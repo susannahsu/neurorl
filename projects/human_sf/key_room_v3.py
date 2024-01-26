@@ -101,17 +101,16 @@ class BaseTaskRep:
   def reset(self):
      self._task_array = self.make_task_array()
      self._state_features = self.empty_array()
+     self._prior_raw_features = self.empty_array()
      self.feature_counts = self.empty_array()
      self.prior_feature_counts = self.empty_array()
 
   def step(self, env):
-    current_counts = self.current_state(env)
-    difference = (current_counts - 
-                 self.prior_feature_counts).astype(np.float32)
-    different = (difference > 0.0).astype(np.float32)
-
-    # whichever state-features have changed, add them to the counts
-    self.feature_counts += difference*different
+    # any features that changed, add them to feature counts
+    current_features = self.current_state(env)
+    difference = (current_features -
+                  self._prior_raw_features).astype(np.float32)
+    self.feature_counts += difference
 
     if self.first_instance:
       # in 1 setting, state-feature is only active the 1st time the count goes to 1
@@ -121,7 +120,7 @@ class BaseTaskRep:
       # in this setting, the feature difference
       state_features = difference
 
-    self.prior_feature_counts = self.feature_counts
+    self._prior_raw_features = current_features
     self._state_features = state_features
 
   def empty_array(self):
@@ -597,10 +596,10 @@ class KeyRoom(LevelGen):
 
       terminated = False
       if self.carrying:
-         # if carrying and one of the "final" objects, terminate
-         shape, color = self.carrying.type, self.carrying.color
-         if [shape, color] in self.all_final_objects:
-            terminated = True
+        # if carrying and one of the "final" objects, terminate
+        shape, color = self.carrying.type, self.carrying.color
+        if [shape, color] in self.all_final_objects:
+          terminated = True
 
       truncated = False
       if self.step_count >= self._max_steps:
