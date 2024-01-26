@@ -260,7 +260,7 @@ def setup_experiment_inputs(
       config=config,
       ActorCls=functools.partial(
         basics.BasicActor,
-        observers=[usfa.SFsObserver(period=1 if debug else 500)]
+        observers=[usfa.SFsObserver(period=1 if debug else 2000)]
       ),
       get_actor_core_fn=functools.partial(
         basics.get_actor_core,
@@ -634,11 +634,11 @@ def sweep(search: str = 'default'):
             "num_steps": tune.grid_search([20e6]),
             "agent": tune.grid_search(['flat_usfa']),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['flat_usfa-6']),
+            "group": tune.grid_search(['flat_usfa-8']),
             "q_coeff": tune.grid_search([0.0]),
             "sf_coeff": tune.grid_search([1.0]),
             "sf_loss": tune.grid_search(['qlearning', 'qlambda']),
-            # "env.steps_per_room": tune.grid_search([25, 50]),
+            "env.basic_only": tune.grid_search([True]),
             # "learning_rate": tune.grid_search([1e-1, 1e-2, 5e-3,  1e-3]),
             # "combine_policy": tune.grid_search(['product', 'sum']),
         },
