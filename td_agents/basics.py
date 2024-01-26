@@ -678,7 +678,6 @@ class ActorObserver(abc.ABC):
     
     Should be state after previous time-step along"""
 
-
 class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras]):
   """A generic actor implemented on top of ActorCore.
 

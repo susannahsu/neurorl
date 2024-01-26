@@ -6,9 +6,9 @@ python -m ipdb -c continue projects/human_sf/trainer_v2.py \
   --parallel='none' \
   --run_distributed=False \
   --debug=True \
-  --use_wandb=True \
+  --use_wandb=False \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=human_objects_sf_debug \
+  --wandb_project=human_sf_v2_debug \
   --search='flat_usfa'
 
 # DEBUGGING, without jit
@@ -18,8 +18,8 @@ JAX_DISABLE_JIT=1 python -m ipdb -c continue projects/human_sf/trainer_v2.py \
   --debug=True \
   --use_wandb=False \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=human_objects_sf_debug \
-  --search='flat'
+  --wandb_project=human_sf_v2_debug \
+  --search='flat_usfa'
 
 
 # DEBUGGING, parallel
@@ -29,8 +29,8 @@ python -m ipdb -c continue projects/human_sf/trainer_v2.py \
   --run_distributed=False \
   --use_wandb=True \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=human_objects_sf_debug \
-  --search='default'
+  --wandb_project=human_sf_v2_debug \
+  --search='flat_usfa'
 
 
 # running, parallel
@@ -41,9 +41,9 @@ python projects/human_sf/trainer_v2.py \
   --partition=kempner \
   --account=kempner_fellows \
   --wandb_entity=wcarvalho92 \
-  --wandb_project=human_objects_sf \
+  --wandb_project=human_sf_v2 \
   --max_concurrent=12 \
-  --search='ambiguous_flat'
+  --search='flat_usfa'
 
 Change "search" to what you want to search over.
 
@@ -148,6 +148,7 @@ def make_keyroom_env(seed: int,
                      steps_per_room: int=100,
                      swap_episodes: int = 100_000,
                      maze_idx: int = 0,
+                     num_task_rooms: int = 2,
                      color_rooms: bool = True,
                      **kwargs) -> dm_env.Environment:
   """Loads environments.
@@ -160,17 +161,18 @@ def make_keyroom_env(seed: int,
   """
   del seed
 
-  json_file = 'maze_pairs.json'
+  json_file = 'projects/human_sf/maze_pairs.json'
   with open(json_file, 'r') as file:
-      maze_dicts = json.load(file)
-  maze_dict = maze_dicts[maze_idx]
+      maze_configs = json.load(file)
+  maze_config = maze_configs[maze_idx]
 
   # create gymnasium.Gym environment
   env = key_room.KeyRoom(
     room_size=room_size,
-    maze_dict=maze_dict,
+    maze_config=maze_config,
     max_steps_per_room=steps_per_room,
     flat_task=flat_task,
+    num_task_rooms=num_task_rooms,
     swap_episodes=swap_episodes,
     color_rooms=color_rooms,
     training= not evaluation,
@@ -423,16 +425,14 @@ def train_single(
 
   experiment_config_inputs = setup_experiment_inputs(
     make_environment_fn=make_keyroom_env,
-    env_get_task_name= lambda env: env.unwrapped.task.goal_name(),
+    env_get_task_name= lambda env: env.unwrapped.task.task_name,
     agent_config_kwargs=agent_config_kwargs,
     env_kwargs=env_kwargs,
     debug=debug)
 
-  env_setting = experiment_config_inputs.final_env_kwargs['setting']
-  test_setting = TestOptions(env_setting).name
   logger_factory_kwargs = dict(
-    actor_label=f"actor-{test_setting}",
-    evaluator_label=f"evaluator-{test_setting}",
+    actor_label=f"actor",
+    evaluator_label=f"evaluator",
     learner_label=f"learner",
   )
 
@@ -595,7 +595,6 @@ def sweep(search: str = 'default'):
             "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
             "seed": tune.grid_search([4]),
             "group": tune.grid_search(['baselines-8']),
-            "env.setting": tune.grid_search([0,1,2]),
         },
     ]
   elif search == 'ambiguous_flat':
@@ -605,8 +604,6 @@ def sweep(search: str = 'default'):
         #     "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
         #     "seed": tune.grid_search([5]),
         #     "group": tune.grid_search(['ambiguous-flat-1']),
-        #     "env.setting": tune.grid_search([0]),
-        #     "env.task_features_cls": tune.grid_search(['ambiguous_flat']),
         # },
 
         {
@@ -614,8 +611,6 @@ def sweep(search: str = 'default'):
             "agent": tune.grid_search(['flat_q']),
             "seed": tune.grid_search([5]),
             "group": tune.grid_search(['ambiguous-flat-1']),
-            "env.setting": tune.grid_search([0]),
-            "env.task_features_cls": tune.grid_search(['ambiguous_flat']),
         },
     ]
   elif search == 'flat_q':
@@ -625,8 +620,6 @@ def sweep(search: str = 'default'):
             "agent": tune.grid_search(['flat_q']),
             "seed": tune.grid_search([5]),
             "group": tune.grid_search(['flat_q-3']),
-            "env.setting": tune.grid_search([2]),
-            "env.task_features_cls": tune.grid_search(['flat', 'ambiguous_flat']),
         },
     ]
   elif search == 'flat_usfa':
@@ -636,19 +629,15 @@ def sweep(search: str = 'default'):
         #     "agent": tune.grid_search(['flat_usfa']),
         #     "seed": tune.grid_search([5]),
         #     "group": tune.grid_search(['flat_usfa-4-reg']),
-        #     "env.setting": tune.grid_search([2]),
-        #     "env.task_features_cls": tune.grid_search(['flat']),
         # },
         {
             "num_steps": tune.grid_search([20e6]),
             "agent": tune.grid_search(['flat_usfa']),
             "seed": tune.grid_search([5]),
             "group": tune.grid_search(['flat_usfa-6']),
-            "env.setting": tune.grid_search([2]),
-            "env.task_features_cls": tune.grid_search(['flat']),
             "q_coeff": tune.grid_search([0.0]),
             "sf_coeff": tune.grid_search([1.0]),
-            "sf_loss": tune.grid_search(['qlambda', 'qlearning']),
+            "sf_loss": tune.grid_search(['qlearning', 'qlambda']),
             # "env.steps_per_room": tune.grid_search([25, 50]),
             # "learning_rate": tune.grid_search([1e-1, 1e-2, 5e-3,  1e-3]),
             # "combine_policy": tune.grid_search(['product', 'sum']),
@@ -662,8 +651,6 @@ def sweep(search: str = 'default'):
             "seed": tune.grid_search([5]),
             "max_sim_depth": tune.grid_search([1]),
             "group": tune.grid_search(['flat_muzero-new-1']),
-            "env.setting": tune.grid_search([2]),
-            "env.task_features_cls": tune.grid_search(['flat', 'ambiguous_flat']),
         },
     ]
   elif search == 'object_q':
@@ -674,8 +661,6 @@ def sweep(search: str = 'default'):
             "seed": tune.grid_search([5]),
             "group": tune.grid_search(['object_q-3']),
             "trace_length": tune.grid_search([10, 20]),
-            "env.setting": tune.grid_search([2]),
-            "env.task_features_cls": tune.grid_search(['flat', 'ambiguous_flat']),
         },
     ]
 

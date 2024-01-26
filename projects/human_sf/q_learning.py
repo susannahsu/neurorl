@@ -37,15 +37,16 @@ class DotQMlp(hk.Module):
   def __init__(
       self,
       num_actions: int,
-      task_dim: int,
       hidden_sizes: Sequence[int],
+      out_dim: int = 128,
       w_init: Optional[hk.initializers.Initializer] = None,
   ):
     super().__init__(name='dot_qhead')
     self.num_actions = num_actions
-    self.task_dim = task_dim
+    self.out_dim = out_dim
 
-    self.mlp = hk.nets.MLP([*hidden_sizes, num_actions*task_dim], w_init=w_init)
+    self.q_mlp = hk.nets.MLP([*hidden_sizes, num_actions*out_dim], w_init=w_init)
+    self.task_linear = hk.Linear(out_dim=out_dim, with_bias=False)
 
 
   def __call__(self, state: jax.Array, task: jax.Array) -> jax.Array:
@@ -59,10 +60,10 @@ class DotQMlp(hk.Module):
         jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
     """
 
-    # Compute value & advantage for duelling.
-    outputs = self.mlp(state)  # [A*C]
+    task = self.task_linear(task)
+    outputs = self.q_mlp(state)  # [A*C]
     # [A, C]
-    outputs = jnp.reshape(outputs, [self.num_actions, self.task_dim])
+    outputs = jnp.reshape(outputs, [self.num_actions, self.out_dim])
 
     q_vals = jax.vmap(jnp.multiply, in_axes=(0, None), out_axes=0)(outputs, task)
 
@@ -146,7 +147,6 @@ def make_minigrid_networks(
       memory=hk.LSTM(config.state_dim),
       head=DotQMlp(
         num_actions=num_actions,
-        task_dim=task_dim,
         hidden_sizes=[config.q_dim],
       ))
 

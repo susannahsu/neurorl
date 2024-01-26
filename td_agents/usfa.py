@@ -237,6 +237,7 @@ class UsfaLossFn(basics.RecurrentLossFn):
 
     return sf_td_error, batch_loss, metrics # [T, B], [B]
 
+
 class SFsObserver(ActorObserver):
   def __init__(self,
                period=100,
@@ -245,6 +246,15 @@ class SFsObserver(ActorObserver):
     self.period = period
     self.prefix = prefix
     self.idx = -1
+    self.logging = True
+
+  def wandb_log(self, d: dict):
+    if self.logging:
+      try:
+        wandb.log(d)
+      except wandb.errors.Error as e:
+        self.logging = False
+        self.period = np.inf
 
   def observe_first(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
     """Observes the initial state and initial time-step.
@@ -319,7 +329,7 @@ class SFsObserver(ActorObserver):
       ax.legend()
 
       # Log the plot to wandb
-      wandb.log({f"{self.prefix}/sf-prediction-{i}": wandb.Image(fig)})
+      self.wandb_log({f"{self.prefix}/sf-prediction-{i}": wandb.Image(fig)})
 
       # Close the plot
       plt.close(fig)
@@ -341,7 +351,7 @@ class SFsObserver(ActorObserver):
     ax.legend()
 
     # Log the plot to wandb
-    wandb.log({f"{self.prefix}/reward_prediction": wandb.Image(fig)})
+    self.wandb_log({f"{self.prefix}/reward_prediction": wandb.Image(fig)})
 
     # Close the plot
     plt.close(fig)
@@ -358,10 +368,7 @@ class SFsObserver(ActorObserver):
     ##################################
     # log
     ##################################
-    try:
-      wandb.log({f'{self.prefix}/{k}': v for k,v in to_log.items()})
-    except wandb.errors.Error as e:
-      self.period = np.inf
+    self.wandb_log({f'{self.prefix}/{k}': v for k,v in to_log.items()})
 
 class USFAPreds(NamedTuple):
   q_values: jnp.ndarray  # q-value
@@ -431,6 +438,14 @@ class MonolithicSfHead(hk.Module):
     return sf, q_values
 
 class IndependentSfHead(hk.Module):
+  """
+  Independent SF heads help with optimization.
+
+  Inspired by 
+  1. https://arxiv.org/abs/2301.12305
+  2. https://arxiv.org/abs/2310.15940
+
+  """
   def __init__(
       self,
       layers: int,
@@ -469,7 +484,7 @@ class IndependentSfHead(hk.Module):
 
     policy = jnp.expand_dims(policy, axis=1)  # [C, 1]
     sf_inputs = concat(sf_input, policy)  # [C, D+1]
-    import ipdb; ipdb.set_trace()
+
     # now we get sf-estimates for each policy dimension
     # [[A], ..., [A]]
     sf = [self.sf_net_factory()(sf_inputs[idx]) for idx in range(self.state_features_dim)]

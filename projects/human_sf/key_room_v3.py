@@ -69,6 +69,7 @@ class BaseTaskRep:
       self.types = types
       self.colors = colors
       self.target_type, self.target_color  = target
+      self._task_name = f"{self.target_color} {self.target_type}"
       self.target_room_color = target_room_color
 
       colors_to_room = colors_to_room or dict()
@@ -87,6 +88,9 @@ class BaseTaskRep:
   def current_room(self, env):
     agent_room = env.room_from_pos(*env.agent_pos)
     return self.room_to_color[agent_room]
+
+  @property
+  def task_name(self): return self._task_name
 
   @property
   def task_array(self): return self._task_array
@@ -118,7 +122,7 @@ class BaseTaskRep:
       state_features = difference
 
     self.prior_feature_counts = self.feature_counts
-    self.state_features = state_features
+    self._state_features = state_features
 
   def empty_array(self):
     raise NotImplementedError
@@ -459,6 +463,11 @@ class KeyRoom(LevelGen):
       self.place_agent(*center_room_coords)
       _ = self.room_from_pos(*self.agent_pos)
 
+      colors_to_room = {}
+      start_room_color = 'start'
+      center_room = self.get_room(*center_room_coords)
+      colors_to_room[start_room_color] = center_room
+
       ###########################################
       # Place objects
       ###########################################
@@ -479,6 +488,7 @@ class KeyRoom(LevelGen):
           types=self.types,
           colors=self.colors,
           target=task_object,
+          colors_to_room=colors_to_room,
       )
 
     def multi_room_placement(self, maze_config=None):
@@ -585,6 +595,7 @@ class KeyRoom(LevelGen):
          # first time, log it
          self.object_counts[name(self.carrying)] += 1
 
+      terminated = False
       if self.carrying:
          # if carrying and one of the "final" objects, terminate
          shape, color = self.carrying.type, self.carrying.color
