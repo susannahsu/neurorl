@@ -38,6 +38,7 @@ class Config(basics.Config):
   policy_layers : Tuple[int]=(32,)
   combine_policy: str = 'concat'
 
+  head: str = 'independent'
   sf_coeff: float = 1.0
   q_coeff: float = 0.0
   sf_loss: str = 'qlearning'
@@ -293,47 +294,65 @@ class Observer(ActorObserver):
     tasks = np.stack(tasks)
     task = tasks[0]
 
+    # NOTES:
+    # Actor states: T, starting at 0
+    # timesteps: T, starting at 0
+    # action: T-1, starting at 0
+
     ##################################
     # successor features
     ##################################
     # first prediction is empty (None)
+    # [T, N, A, C]
     predictions = [s.predictions for s in self.actor_states[1:]]
-    sfs = jnp.stack([p.sf for p in predictions])  # [T, N, A, C]
-    sfs = sfs[:, 0]  # [T, A, C]
+    sfs = jnp.stack([p.sf for p in predictions])
+    sfs = sfs[:, 0]  # [T-1, A, C]
 
-    npreds = len(predictions)
+    npreds = len(sfs)
     actions = jnp.stack(self.actions)[:npreds]
 
     index = functools.partial(jnp.take_along_axis, axis=-1)
     index = jax.vmap(index, in_axes=(2, None), out_axes=2)
 
-    sfs = index(sfs, actions[:, None])  # [T, 1, C]
-    sfs = jnp.squeeze(sfs, axis=-2)  # [T, C]
+    sfs = index(sfs, actions[:, None])  # [T-1, 1, C]
+    sfs = jnp.squeeze(sfs, axis=-2)  # [T-1, C]
 
     # ignore 0th (reset) time-step w/ 0 reward and last (terminal) time-step
-    state_features = jnp.stack([t.observation.observation['state_features'] for t in self.timesteps])[1:-1]
+    state_features = jnp.stack([t.observation.observation['state_features'] for t in self.timesteps])[1:]
 
     ndims = sfs.shape[1]
-    for i in range(0, ndims, 4):
+    group_size = 5
+    for i in range(0, ndims, group_size):
         # Create a figure and axis
         fig, ax = plt.subplots()
 
         # Determine the end of the current group
-        end = min(i + 4, ndims)
+        end = min(i + group_size, ndims)
 
         # Plot each dimension in the group
+        nplotted = 0
+        default_cycler = iter(plt.rcParams['axes.prop_cycle'])
         for j in range(i, end):
-            ax.plot(state_features[:, j], label=f'$\\phi_{j}$')
-            ax.plot(sfs[:, j], label=f'$\\psi_{j}$')
+          # Define a color for this pair of lines
+          color = next(default_cycler)['color']
+
+          # Plot state_features with a dashed line style
+          if state_features[:, j].sum() > 0:
+            nplotted += 1
+            ax.plot(state_features[:, j], label=f'$\\phi {j}$', linestyle='--', color=color)
+            
+            # Plot sfs with the same color
+            ax.plot(sfs[:, j], label=f'$\\psi {j}$', color=color)
 
         # Add labels and title
         ax.set_xlabel('Time')
         # ax.set_ylabel('Value')
         ax.set_title(f"Successor Feature Prediction (Dimensions {i} to {end-1})")
-        ax.legend()
 
         # Log the plot to wandb
-        self.wandb_log({f"{self.prefix}/sf-group-prediction-{i//4}": wandb.Image(fig)})
+        if nplotted > 0:
+          ax.legend()
+          self.wandb_log({f"{self.prefix}/sf-group-prediction-{i//group_size}": wandb.Image(fig)})
 
         # Close the plot
         plt.close(fig)
@@ -341,40 +360,33 @@ class Observer(ActorObserver):
     ##################################
     # q-values
     ##################################
-    q_values = (sfs*tasks[:-1]).sum(-1)
     rewards = jnp.stack([t.reward for t in self.timesteps])[1:]
-    # Create a figure and axis
-    fig, ax = plt.subplots()
-    ax.plot(q_values, label='q_values')
-    ax.plot(rewards, label='rewards')
+    total_reward = rewards.sum()
+    if total_reward.sum():
+      q_values = (sfs*tasks[:-1]).sum(-1)
+      # Create a figure and axis
+      fig, ax = plt.subplots()
+      ax.plot(q_values, label='q_values')
+      ax.plot(rewards, label='rewards')
 
-    # Add labels and title if necessary
-    ax.set_xlabel('time')
-    # ax.set_ylabel('}')
-    ax.set_title("reward prediction")
-    ax.legend()
+      # Add labels and title if necessary
+      ax.set_xlabel('time')
+      ax.set_title(f"reward prediction: {task}\nR={total_reward}")
+      ax.legend()
 
-    # Log the plot to wandb
-    self.wandb_log({f"{self.prefix}/reward_prediction": wandb.Image(fig)})
+      # Log the plot to wandb
+      self.wandb_log({f"{self.prefix}/reward_prediction": wandb.Image(fig)})
 
-    # Close the plot
-    plt.close(fig)
+      # Close the plot
+      plt.close(fig)
 
     ##################################
     # get images
     ##################################
     # [T, H, W, C]
     frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
-
-    figs = []
-    for frame in frames:
-        fig, ax = plt.subplots()
-        ax.imshow(frame)
-        ax.axis('off')
-        figs.append(fig)
     self.wandb_log({
-      f'{self.prefix}/episode-{task}': [wandb.Image(fig) for fig in figs]})
-    [plt.close(fig) for fig in figs]
+      f'{self.prefix}/episode-{task}': [wandb.Image(frame) for frame in frames]})
 
 class USFAPreds(NamedTuple):
   q_values: jnp.ndarray  # q-value
@@ -398,8 +410,7 @@ class MonolithicSfHead(hk.Module):
       self.policy_net = lambda x: x
 
     self.sf_net = hk.nets.MLP(
-        tuple(layers)+(num_actions * state_features_dim,),
-        w_init=jnp.zeros)
+        tuple(layers)+(num_actions * state_features_dim,))
 
     self.num_actions = num_actions
     self.state_features_dim = state_features_dim
@@ -463,8 +474,7 @@ class IndependentSfHead(hk.Module):
     super(IndependentSfHead, self).__init__(name=name)
 
     self.sf_net_factory = lambda: hk.nets.MLP(
-        tuple(layers)+(num_actions,),
-        w_init=jnp.zeros)
+        tuple(layers)+(num_actions,))
 
     self.policy_layers = policy_layers
     if policy_layers:
@@ -721,7 +731,14 @@ def make_minigrid_networks(
       output_fn=networks.TorsoOutput,
     )
 
-    sf_net = IndependentSfHead(
+    if config.head == 'independent':
+      SfNetCls = IndependentSfHead
+    elif config.head == 'monolithic':
+      SfNetCls = MonolithicSfHead
+    else:
+      raise NotImplementedError
+
+    sf_net = SfNetCls(
       layers=config.sf_layers,
       state_features_dim=state_features_dim,
       num_actions=num_actions,

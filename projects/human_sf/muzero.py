@@ -210,11 +210,11 @@ class MuZeroLossFn(basics.RecurrentLossFn):
   value_target_source: str = 'return'
 
   scalar_coef: float = 1.0
-  root_policy_coef: float = 1.0
-  root_value_coef: float = 0.25
-  model_policy_coef: float = 10.0
-  model_value_coef: float = 2.5
-  model_reward_coef: float = 1.0
+  root_policy_coef: float = 1.0      # categorical
+  model_policy_coef: float = 10.0    # categorical
+  root_value_coef: float = 0.25e3    # scalar
+  model_value_coef: float = 2.5e3    # scalar
+  model_reward_coef: float = 1.0e3   # scalar
 
   state_from_preds: Callable[
     [RootOutput], jax.Array] = lambda preds: preds.state

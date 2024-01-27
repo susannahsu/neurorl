@@ -213,7 +213,6 @@ class Observer(basics.ActorObserver):
 
     # Add labels and title if necessary
     ax.set_xlabel('time')
-    # ax.set_ylabel('}')
     total_reward = rewards.sum()
     ax.set_title(f"reward prediction: {task}\nR={total_reward}")
     ax.legend()
@@ -229,16 +228,8 @@ class Observer(basics.ActorObserver):
     ##################################
     # [T, H, W, C]
     frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
-
-    figs = []
-    for frame in frames:
-        fig, ax = plt.subplots()
-        ax.imshow(frame)
-        ax.axis('off')
-        figs.append(fig)
     self.wandb_log({
-      f'{self.prefix}/episode-{task}': [wandb.Image(fig) for fig in figs]})
-    [plt.close(fig) for fig in figs]
+      f'{self.prefix}/episode-{task}': [wandb.Image(frame) for frame in frames]})
 
 def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,

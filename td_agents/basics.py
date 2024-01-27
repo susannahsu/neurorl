@@ -639,6 +639,17 @@ class ActorObserver(abc.ABC):
   """An interface for collecting metrics/counters from actor.
 
   # Note: agent.state has as a field, the agents predictions, e.g. Q-values.
+  In the end you'll hace access to:
+           p1  p{T-1}
+           ^      ^
+     s0 -> s1 ... s_{T-1}
+           ^      ^
+           x1     x_{T-1}  x_{T}
+
+    Legend:
+        p: predictions
+        s: state
+        x: timestep, including observation + reward.
 
   Episode goes:
     # observe initial
