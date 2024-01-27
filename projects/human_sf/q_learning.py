@@ -13,16 +13,19 @@ from acme.jax import networks as networks_lib
 from acme.wrappers import observation_action_reward
 from acme import types as acme_types
 
+import dataclasses
 import haiku as hk
 import jax
 import jax.numpy as jnp
 
 import library.networks as networks
 
+from td_agents import basics
 from td_agents import q_learning as q_basic
 
 Array = acme_types.NestedArray
 
+Observer = q_basic.Observer
 R2D2LossFn = q_basic.R2D2LossFn
 
 @dataclasses.dataclass
@@ -80,7 +83,6 @@ class DotQMlp(hk.Module):
       # [A]
       q_vals = q_vals.sum(-1)
     else:
-      import ipdb; ipdb.set_trace()
       q_vals = outputs
 
     return q_vals

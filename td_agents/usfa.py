@@ -238,11 +238,11 @@ class UsfaLossFn(basics.RecurrentLossFn):
     return sf_td_error, batch_loss, metrics # [T, B], [B]
 
 
-class SFsObserver(ActorObserver):
+class Observer(ActorObserver):
   def __init__(self,
                period=100,
                prefix: str = 'SFsObserver'):
-    super(SFsObserver, self).__init__()
+    super(Observer, self).__init__()
     self.period = period
     self.prefix = prefix
     self.idx = -1

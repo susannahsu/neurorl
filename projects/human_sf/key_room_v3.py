@@ -93,10 +93,12 @@ class BaseTaskRep:
   def task_name(self): return self._task_name
 
   @property
-  def task_array(self): return self._task_array
+  def task_array(self):
+     return np.array(self._task_array)
 
   @property
-  def state_features(self): return self._state_features
+  def state_features(self):
+     return np.array(self._state_features)
 
   def reset(self):
      self._task_array = self.make_task_array()
@@ -295,7 +297,7 @@ class KeyRoom(LevelGen):
       rooms_locked=True,
       basic_only: int = 0,
       flat_task: bool = True,
-      swap_episodes: int = 100_000,
+      swap_episodes: int = 0,
       num_task_rooms: int = 2,
       color_rooms: bool = True,
       training=True,
@@ -454,11 +456,22 @@ class KeyRoom(LevelGen):
         else:
           return self.multi_room_placement()
       else:
-        if self.episodes >= self.swap_episodes:
+        if self.swapped:
           return self.multi_room_placement(
             maze_config=self.maze_swap_config)
         else:
           return self.multi_room_placement()
+
+    @property
+    def task_name(self):
+      name = self.task.task_name
+      if self.swapped:
+        name += " - swapped"
+      return name
+
+    @property
+    def swapped(self):
+      return self.swap_episodes and self.episodes >= self.swap_episodes
 
     def single_room_placement(self):
       self.instrs = DummyInstr()
@@ -489,8 +502,7 @@ class KeyRoom(LevelGen):
         self.place_in_room(*center_room_coords, obj)
 
       # Sample random task object
-      all_choices = self.train_objects + self.test_objects
-      task_object = random.choice(all_choices)
+      task_object = random.choice(potential_objects)
 
       # Assuming 'colors_to_room' is defined elsewhere or is not needed for flat tasks
       self.task = self.task_class(

@@ -1,5 +1,5 @@
 
-from typing import Optional, Tuple, Optional, Callable
+from typing import Optional, Tuple, Optional, Callable, Dict
 
 import functools
 
@@ -12,15 +12,20 @@ from acme.jax.networks import duelling
 from acme import types as acme_types
 
 import dataclasses
+import dm_env
 import haiku as hk
 import jax
 import jax.numpy as jnp
 import rlax
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 
 import library.networks as networks
 
 from library import utils 
 from td_agents import basics
+import wandb
 
 Array = acme_types.NestedArray
 
@@ -132,6 +137,108 @@ class R2D2Arch(hk.RNNCore):
       self._memory, embeddings, state)
     q_values = hk.BatchApply(self._head)(core_outputs)  # [T, B, A]
     return q_values, new_states
+
+class Observer(basics.ActorObserver):
+  def __init__(self,
+               period=100,
+               prefix: str = 'QObserver'):
+    super(Observer, self).__init__()
+    self.period = period
+    self.prefix = prefix
+    self.idx = -1
+    self.logging = True
+
+  def wandb_log(self, d: dict):
+    if self.logging:
+      try:
+        wandb.log(d)
+      except wandb.errors.Error as e:
+        self.logging = False
+        self.period = np.inf
+
+  def observe_first(self, state: basics.ActorState, timestep: dm_env.TimeStep) -> None:
+    """Observes the initial state and initial time-step.
+
+    Usually state will be all zeros and time-step will be output of reset."""
+    self.idx += 1
+
+    # epsiode just ended, flush metrics if you want
+    if self.idx > 0:
+      self.flush_metrics()
+
+    # start collecting metrics again
+    self.actor_states = [state]
+    self.timesteps = [timestep]
+    self.actions = []
+
+  def observe_action(self, state: basics.ActorState, action: jax.Array) -> None:
+    """Observe state and action that are due to observation of time-step.
+
+    Should be state after previous time-step along"""
+    self.actor_states.append(state)
+    self.actions.append(action)
+
+  def observe_timestep(self, timestep: dm_env.TimeStep) -> None:
+    """Observe next.
+
+    Should be time-step after selecting action"""
+    self.timesteps.append(timestep)
+
+  def flush_metrics(self) -> Dict[str, float]:
+    """Returns metrics collected for the current episode."""
+    if not self.idx % self.period == 0:
+      return
+    to_log = {}
+
+    tasks = [t.observation.observation['task'] for t in self.timesteps]
+    tasks = np.stack(tasks)
+    task = tasks[0]
+
+    ##################################
+    # successor features
+    ##################################
+    # first prediction is empty (None)
+    q_values = [s.predictions for s in self.actor_states[1:]]
+    q_values = jnp.stack(q_values)
+    npreds = len(q_values)
+    actions = jnp.stack(self.actions)[:npreds]
+    q_values = rlax.batched_index(q_values, actions)
+
+    rewards = jnp.stack([t.reward for t in self.timesteps])[1:]
+    # Create a figure and axis
+    fig, ax = plt.subplots()
+    ax.plot(q_values, label='q_values')
+    ax.plot(rewards, label='rewards')
+
+    # Add labels and title if necessary
+    ax.set_xlabel('time')
+    # ax.set_ylabel('}')
+    total_reward = rewards.sum()
+    ax.set_title(f"reward prediction: {task}\nR={total_reward}")
+    ax.legend()
+
+    # Log the plot to wandb
+    self.wandb_log({f"{self.prefix}/reward_prediction": wandb.Image(fig)})
+
+    # Close the plot
+    plt.close(fig)
+
+    ##################################
+    # get images
+    ##################################
+    # [T, H, W, C]
+    frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
+
+    figs = []
+    for frame in frames:
+        fig, ax = plt.subplots()
+        ax.imshow(frame)
+        ax.axis('off')
+        figs.append(fig)
+    wandb.log({
+      f'{self.prefix}/episode': [wandb.Image(fig) for fig in figs]})
+    [plt.close(fig) for fig in figs]
+
 
 def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,

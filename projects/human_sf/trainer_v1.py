@@ -314,7 +314,7 @@ def setup_experiment_inputs(
       config=config,
       ActorCls=functools.partial(
         basics.BasicActor,
-        observers=[usfa.SFsObserver(period=1 if debug else 500)]
+        observers=[usfa.Observer(period=1 if debug else 500)]
       ),
       get_actor_core_fn=functools.partial(
         basics.get_actor_core,

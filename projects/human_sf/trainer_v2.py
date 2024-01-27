@@ -43,6 +43,7 @@ python projects/human_sf/trainer_v2.py \
   --wandb_entity=wcarvalho92 \
   --wandb_project=human_sf_v2 \
   --max_concurrent=12 \
+  --time='0-02:00:00' \
   --search='flat_usfa'
 
 Change "search" to what you want to search over.
@@ -143,17 +144,18 @@ class MuZeroConfig(muzero.Config):
   value_layers: Tuple[int] = (512, 512)
   reward_layers: Tuple[int] = (128,)
 
-def make_keyroom_env(seed: int,
-                     room_size: int = 7,
-                     evaluation: bool = False,
-                     object_options: bool = False,
-                     flat_task: bool = True,
-                     steps_per_room: int=100,
-                     swap_episodes: int = 100_000,
-                     maze_idx: int = 0,
-                     num_task_rooms: int = 2,
-                     color_rooms: bool = True,
-                     **kwargs) -> dm_env.Environment:
+def make_keyroom_env(
+    seed: int,
+    room_size: int = 7,
+    evaluation: bool = False,
+    object_options: bool = False,
+    flat_task: bool = True,
+    steps_per_room: int = 100,
+    swap_episodes: int = 0,
+    maze_idx: int = 0,
+    num_task_rooms: int = 2,
+    color_rooms: bool = True,
+    **kwargs) -> dm_env.Environment:
   """Loads environments.
   
   Args:
@@ -239,6 +241,10 @@ def setup_experiment_inputs(
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=basics.get_actor_core,
+      ActorCls=functools.partial(
+        basics.BasicActor,
+        observers=[q_learning.Observer(period=1 if debug else 500)]
+      ),
       LossFn=q_learning.R2D2LossFn(
         discount=config.discount,
         importance_sampling_exponent=config.importance_sampling_exponent,
@@ -263,7 +269,7 @@ def setup_experiment_inputs(
       config=config,
       ActorCls=functools.partial(
         basics.BasicActor,
-        observers=[usfa.SFsObserver(period=1 if debug else 2000)]
+        observers=[usfa.Observer(period=1 if debug else 500)]
       ),
       get_actor_core_fn=functools.partial(
         basics.get_actor_core,
@@ -428,7 +434,7 @@ def train_single(
 
   experiment_config_inputs = setup_experiment_inputs(
     make_environment_fn=make_keyroom_env,
-    env_get_task_name= lambda env: env.unwrapped.task.task_name,
+    env_get_task_name= lambda env: env.unwrapped.task_name,
     agent_config_kwargs=agent_config_kwargs,
     env_kwargs=env_kwargs,
     debug=debug)
@@ -591,60 +597,35 @@ def run_many():
       num_actors=FLAGS.num_actors)
 
 def sweep(search: str = 'default'):
-  if search == 'flat':
+  if search == 'flat_q':
     space = [
         {
-            "num_steps": tune.grid_search([40e6]),
-            "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
-            "seed": tune.grid_search([4]),
-            "group": tune.grid_search(['baselines-8']),
-        },
-    ]
-  elif search == 'ambiguous_flat':
-    space = [
-        # {
-        #     "num_steps": tune.grid_search([30e6]),
-        #     "agent": tune.grid_search(['flat_muzero', 'flat_q', 'flat_usfa']),
-        #     "seed": tune.grid_search([5]),
-        #     "group": tune.grid_search(['ambiguous-flat-1']),
-        # },
-
-        {
-            "num_steps": tune.grid_search([30e6]),
-            "agent": tune.grid_search(['flat_q']),
-            "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['ambiguous-flat-1']),
-        },
-    ]
-  elif search == 'flat_q':
-    space = [
-        {
-            "num_steps": tune.grid_search([20e6]),
+            "num_steps": tune.grid_search([5e6]),
             "agent": tune.grid_search(['flat_q']),
             "seed": tune.grid_search([5]),
             "group": tune.grid_search(['flat_q-2']),
             "dot": tune.grid_search([False, True]),
-            "env.basic_only": tune.grid_search([True]),
+            "env.basic_only": tune.grid_search([2,1]),
         },
     ]
   elif search == 'flat_usfa':
     space = [
         # {
-        #     "num_steps": tune.grid_search([20e6]),
+        #     "num_steps": tune.grid_search([5e6]),
         #     "agent": tune.grid_search(['flat_usfa']),
         #     "seed": tune.grid_search([5]),
         #     "group": tune.grid_search(['flat_usfa-4-reg']),
         # },
         {
-            "num_steps": tune.grid_search([20e6]),
+            "num_steps": tune.grid_search([5e6]),
             "agent": tune.grid_search(['flat_usfa']),
             "seed": tune.grid_search([6]),
-            "group": tune.grid_search(['flat_usfa-10']),
+            "group": tune.grid_search(['flat_usfa-11']),
             "q_coeff": tune.grid_search([0.0]),
-            "sf_coeff": tune.grid_search([1e5, 1e6, 1e7]),
+            "sf_coeff": tune.grid_search([1e1, 1e2, 1e3, 1e4, 1e5]),
             # "sf_coeff": tune.grid_search([1, 10, 100, 1e4]),
             "sf_loss": tune.grid_search(['qlearning']),
-            "env.basic_only": tune.grid_search([True]),
+            "env.basic_only": tune.grid_search([2]),
             # "state_dim": tune.grid_search([256, 512]),
             # "sf_layers": tune.grid_search([[256], [256, 256]]),
             "sf_layers": tune.grid_search([[256]]),
