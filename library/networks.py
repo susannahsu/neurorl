@@ -92,7 +92,6 @@ class BabyAIVisionTorso(hk.Module):
     if conv_dim > 0:
       layers.extend([
         hk.Conv2D(conv_dim, [1, 1], stride=1),
-        jax.nn.relu,
       ])
     self._network = hk.Sequential(layers)
 
