@@ -3,22 +3,42 @@
         "keys": [
             [
                 "key",
-                "purple"
-            ],
-            [
-                "key",
-                "yellow"
-            ],
-            [
-                "key",
                 "grey"
             ],
             [
                 "key",
                 "red"
+            ],
+            [
+                "key",
+                "purple"
+            ],
+            [
+                "key",
+                "yellow"
             ]
         ],
         "pairs": [
+            [
+                [
+                    "box",
+                    "blue"
+                ],
+                [
+                    "ball",
+                    "blue"
+                ]
+            ],
+            [
+                [
+                    "box",
+                    "purple"
+                ],
+                [
+                    "box",
+                    "green"
+                ]
+            ],
             [
                 [
                     "ball",
@@ -26,7 +46,49 @@
                 ],
                 [
                     "box",
+                    "yellow"
+                ]
+            ],
+            [
+                [
+                    "key",
                     "blue"
+                ],
+                [
+                    "key",
+                    "green"
+                ]
+            ]
+        ]
+    },
+    {
+        "keys": [
+            [
+                "key",
+                "green"
+            ],
+            [
+                "key",
+                "blue"
+            ],
+            [
+                "key",
+                "yellow"
+            ],
+            [
+                "key",
+                "purple"
+            ]
+        ],
+        "pairs": [
+            [
+                [
+                    "box",
+                    "yellow"
+                ],
+                [
+                    "box",
+                    "red"
                 ]
             ],
             [
@@ -36,27 +98,27 @@
                 ],
                 [
                     "box",
-                    "green"
+                    "grey"
                 ]
             ],
             [
                 [
                     "ball",
-                    "grey"
+                    "blue"
                 ],
                 [
-                    "key",
-                    "green"
+                    "ball",
+                    "red"
                 ]
             ],
             [
                 [
                     "box",
-                    "red"
+                    "green"
                 ],
                 [
-                    "ball",
-                    "purple"
+                    "box",
+                    "blue"
                 ]
             ]
         ]
@@ -65,7 +127,7 @@
         "keys": [
             [
                 "key",
-                "purple"
+                "grey"
             ],
             [
                 "key",
@@ -77,152 +139,38 @@
             ],
             [
                 "key",
-                "grey"
+                "blue"
             ]
         ],
         "pairs": [
             [
                 [
                     "box",
-                    "yellow"
+                    "green"
                 ],
-                [
-                    "ball",
-                    "blue"
-                ]
-            ],
-            [
                 [
                     "ball",
                     "yellow"
-                ],
-                [
-                    "box",
-                    "red"
                 ]
             ],
             [
-                [
-                    "ball",
-                    "grey"
-                ],
                 [
                     "box",
                     "purple"
-                ]
-            ],
-            [
-                [
-                    "key",
-                    "red"
                 ],
-                [
-                    "box",
-                    "green"
-                ]
-            ]
-        ]
-    },
-    {
-        "keys": [
-            [
-                "key",
-                "grey"
-            ],
-            [
-                "key",
-                "yellow"
-            ],
-            [
-                "key",
-                "purple"
-            ],
-            [
-                "key",
-                "red"
-            ]
-        ],
-        "pairs": [
-            [
                 [
                     "ball",
                     "grey"
-                ],
-                [
-                    "box",
-                    "yellow"
                 ]
             ],
             [
                 [
-                    "ball",
+                    "box",
                     "red"
                 ],
-                [
-                    "box",
-                    "green"
-                ]
-            ],
-            [
                 [
                     "box",
                     "grey"
-                ],
-                [
-                    "box",
-                    "blue"
-                ]
-            ],
-            [
-                [
-                    "ball",
-                    "yellow"
-                ],
-                [
-                    "box",
-                    "red"
-                ]
-            ]
-        ]
-    },
-    {
-        "keys": [
-            [
-                "key",
-                "yellow"
-            ],
-            [
-                "key",
-                "green"
-            ],
-            [
-                "key",
-                "purple"
-            ],
-            [
-                "key",
-                "grey"
-            ]
-        ],
-        "pairs": [
-            [
-                [
-                    "ball",
-                    "blue"
-                ],
-                [
-                    "key",
-                    "red"
-                ]
-            ],
-            [
-                [
-                    "ball",
-                    "yellow"
-                ],
-                [
-                    "box",
-                    "green"
                 ]
             ],
             [
@@ -232,17 +180,7 @@
                 ],
                 [
                     "key",
-                    "blue"
-                ]
-            ],
-            [
-                [
-                    "box",
-                    "red"
-                ],
-                [
-                    "ball",
-                    "grey"
+                    "purple"
                 ]
             ]
         ]
@@ -255,32 +193,32 @@
             ],
             [
                 "key",
-                "grey"
-            ],
-            [
-                "key",
                 "red"
             ],
             [
                 "key",
-                "purple"
+                "yellow"
+            ],
+            [
+                "key",
+                "grey"
             ]
         ],
         "pairs": [
             [
                 [
-                    "ball",
-                    "red"
+                    "box",
+                    "yellow"
                 ],
                 [
                     "box",
-                    "blue"
+                    "purple"
                 ]
             ],
             [
                 [
                     "box",
-                    "yellow"
+                    "grey"
                 ],
                 [
                     "ball",
@@ -293,18 +231,80 @@
                     "grey"
                 ],
                 [
+                    "box",
+                    "blue"
+                ]
+            ],
+            [
+                [
+                    "ball",
+                    "red"
+                ],
+                [
+                    "ball",
+                    "purple"
+                ]
+            ]
+        ]
+    },
+    {
+        "keys": [
+            [
+                "key",
+                "red"
+            ],
+            [
+                "key",
+                "yellow"
+            ],
+            [
+                "key",
+                "blue"
+            ],
+            [
+                "key",
+                "green"
+            ]
+        ],
+        "pairs": [
+            [
+                [
+                    "key",
+                    "grey"
+                ],
+                [
+                    "ball",
+                    "grey"
+                ]
+            ],
+            [
+                [
+                    "ball",
+                    "green"
+                ],
+                [
+                    "box",
+                    "purple"
+                ]
+            ],
+            [
+                [
+                    "box",
+                    "blue"
+                ],
+                [
                     "ball",
                     "yellow"
                 ]
             ],
             [
                 [
-                    "ball",
-                    "blue"
+                    "box",
+                    "yellow"
                 ],
                 [
-                    "box",
-                    "green"
+                    "ball",
+                    "purple"
                 ]
             ]
         ]
