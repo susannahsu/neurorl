@@ -293,7 +293,7 @@ class KeyRoom(LevelGen):
       locations=False,
       unblocking=False,
       rooms_locked=True,
-      basic_only: bool = False,
+      basic_only: int = 0,
       flat_task: bool = True,
       swap_episodes: int = 100_000,
       num_task_rooms: int = 2,
@@ -341,6 +341,7 @@ class KeyRoom(LevelGen):
       self.num_dists = num_dists
       self.train_objects = [p[0] for p in maze_config['pairs']]
       self.test_objects = [p[1] for p in maze_config['pairs']]
+
       self.all_final_objects = self.train_objects + self.test_objects
 
       self.all_possible_objects = self.all_final_objects + maze_config['keys']
@@ -478,7 +479,10 @@ class KeyRoom(LevelGen):
       ###########################################
       # starts to the right for some reason
       self.all_objects = []
-      for object in self.train_objects+self.test_objects:
+      potential_objects = self.train_objects+self.test_objects
+      if self.basic_only == 2:
+         potential_objects = potential_objects[:1]
+      for object in potential_objects:
        # Assuming construct is a function that creates an object based on the type and color
         obj = construct(*object)
         self.all_objects.append(obj)

@@ -103,20 +103,22 @@ FLAGS = flags.FLAGS
 
 @dataclasses.dataclass
 class QlearningConfig(q_learning.Config):
-  samples_per_insert: float = 0.0
+  samples_per_insert: float = 10.0
+  importance_sampling_exponent: float = 0.0
 
 @dataclasses.dataclass
 class ObjectQlearningConfig(object_q_learning.Config):
-  samples_per_insert: float = 0.0
+  samples_per_insert: float = 10.0
+  importance_sampling_exponent: float = 0.0
 
 
 @dataclasses.dataclass
 class UsfaConfig(usfa.Config):
 
   # arch
-  state_dim: int = 512
-  final_conv_dim: int = 0
-  conv_flat_dim: Optional[int] = 512
+  state_dim: int = 256
+  final_conv_dim: int = 16
+  conv_flat_dim: Optional[int] = 0
   sf_layers : Tuple[int]=(1024,)
   policy_layers : Tuple[int]=()
 
@@ -617,10 +619,12 @@ def sweep(search: str = 'default'):
   elif search == 'flat_q':
     space = [
         {
-            "num_steps": tune.grid_search([30e6]),
+            "num_steps": tune.grid_search([20e6]),
             "agent": tune.grid_search(['flat_q']),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['flat_q-3']),
+            "group": tune.grid_search(['flat_q-2']),
+            "dot": tune.grid_search([False, True]),
+            "env.basic_only": tune.grid_search([True]),
         },
     ]
   elif search == 'flat_usfa':
@@ -634,12 +638,17 @@ def sweep(search: str = 'default'):
         {
             "num_steps": tune.grid_search([20e6]),
             "agent": tune.grid_search(['flat_usfa']),
-            "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['flat_usfa-8']),
+            "seed": tune.grid_search([6]),
+            "group": tune.grid_search(['flat_usfa-10']),
             "q_coeff": tune.grid_search([0.0]),
-            "sf_coeff": tune.grid_search([1.0]),
-            "sf_loss": tune.grid_search(['qlearning', 'qlambda']),
+            "sf_coeff": tune.grid_search([1e5, 1e6, 1e7]),
+            # "sf_coeff": tune.grid_search([1, 10, 100, 1e4]),
+            "sf_loss": tune.grid_search(['qlearning']),
             "env.basic_only": tune.grid_search([True]),
+            # "state_dim": tune.grid_search([256, 512]),
+            # "sf_layers": tune.grid_search([[256], [256, 256]]),
+            "sf_layers": tune.grid_search([[256]]),
+            # "policy_layers": tune.grid_search([[128], []]),
             # "learning_rate": tune.grid_search([1e-1, 1e-2, 5e-3,  1e-3]),
             # "combine_policy": tune.grid_search(['product', 'sum']),
         },

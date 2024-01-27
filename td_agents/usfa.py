@@ -442,8 +442,8 @@ class IndependentSfHead(hk.Module):
   Independent SF heads help with optimization.
 
   Inspired by 
-  1. https://arxiv.org/abs/2301.12305
-  2. https://arxiv.org/abs/2310.15940
+  1. Modular Successor Feature Approximators: https://arxiv.org/abs/2301.12305
+  2. Categorical Successor Feature Approximators: https://arxiv.org/abs/2310.15940
 
   """
   def __init__(
@@ -451,13 +451,19 @@ class IndependentSfHead(hk.Module):
       layers: int,
       num_actions: int,
       state_features_dim: int,
-      policy_layers : Tuple[int]=(32,),
+      policy_layers : Tuple[int]=(),
       name: Optional[str] = None):
     super(IndependentSfHead, self).__init__(name=name)
-    del policy_layers
 
     self.sf_net_factory = lambda: hk.nets.MLP(
         tuple(layers)+(num_actions,))
+    
+    self.policy_layers = policy_layers
+    if policy_layers:
+      self.policy_net_factory = lambda: hk.nets.MLP(layers)
+    else:
+      identity = lambda x: x 
+      self.policy_net_factory = lambda: identity
 
     self.num_actions = num_actions
     self.state_features_dim = state_features_dim
@@ -476,18 +482,26 @@ class IndependentSfHead(hk.Module):
     Returns:
         jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
     """
-    assert policy.shape[0] == self.state_features_dim
+    ndims = self.state_features_dim
+    assert policy.shape[0] == ndims
+
+    # [C, 1]
+    policy = jnp.expand_dims(policy, axis=1)
+    if self.policy_layers:
+      # [[P], ..., [P]]
+      policy = [self.policy_net_factory()(policy[idx]) for idx in range(ndims)]
+      # [C, P]
+      policy = jnp.stack(policy, axis=0)
+
     # Below, we make C copies of sf_input, break policy into C vectors of dimension 1,
     # and then concatenate each break policy unit to each sf_input copy.
     concat = lambda a, b: jnp.concatenate((a, b))
     concat = jax.vmap(concat, in_axes=(None, 0), out_axes=0)
-
-    policy = jnp.expand_dims(policy, axis=1)  # [C, 1]
-    sf_inputs = concat(sf_input, policy)  # [C, D+1]
+    sf_inputs = concat(sf_input, policy)  # [C, D+D]
 
     # now we get sf-estimates for each policy dimension
     # [[A], ..., [A]]
-    sf = [self.sf_net_factory()(sf_inputs[idx]) for idx in range(self.state_features_dim)]
+    sf = [self.sf_net_factory()(sf_inputs[idx]) for idx in range(ndims)]
     # [A, C]
     sf = jnp.stack(sf, axis=1)
 

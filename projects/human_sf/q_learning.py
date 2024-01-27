@@ -23,8 +23,12 @@ from td_agents import q_learning as q_basic
 
 Array = acme_types.NestedArray
 
-Config = q_basic.Config
 R2D2LossFn = q_basic.R2D2LossFn
+
+@dataclasses.dataclass
+class Config(basics.Config):
+  q_dim: int = 512
+  dot: bool = True
 
 def concat(inputs: networks.TorsoOutput):
   pieces = (inputs.image, inputs.action, inputs.reward, inputs.task)
@@ -39,15 +43,19 @@ class DotQMlp(hk.Module):
       num_actions: int,
       hidden_sizes: Sequence[int],
       out_dim: int = 128,
-      w_init: Optional[hk.initializers.Initializer] = None,
+      dot: bool = True,
   ):
     super().__init__(name='dot_qhead')
     self.num_actions = num_actions
     self.out_dim = out_dim
+    self.dot = dot
 
-    self.q_mlp = hk.nets.MLP([*hidden_sizes, num_actions*out_dim], w_init=w_init)
-    self.task_linear = hk.Linear(out_dim=out_dim, with_bias=False)
+    if self.dot:
+      self.q_mlp = hk.nets.MLP([*hidden_sizes, num_actions*out_dim])
+    else:
+      self.q_mlp = hk.nets.MLP([*hidden_sizes, num_actions])
 
+    self.task_linear = hk.nets.MLP((out_dim, out_dim))
 
   def __call__(self, state: jax.Array, task: jax.Array) -> jax.Array:
     """Forward pass of the network.
@@ -60,15 +68,20 @@ class DotQMlp(hk.Module):
         jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
     """
 
-    task = self.task_linear(task)
-    outputs = self.q_mlp(state)  # [A*C]
-    # [A, C]
-    outputs = jnp.reshape(outputs, [self.num_actions, self.out_dim])
+    outputs = self.q_mlp(state)
 
-    q_vals = jax.vmap(jnp.multiply, in_axes=(0, None), out_axes=0)(outputs, task)
+    if self.dot:
+      # [A, C]
+      outputs = jnp.reshape(outputs, [self.num_actions, self.out_dim])
 
-    # [A]
-    q_vals = q_vals.sum(-1)
+      task = self.task_linear(task)
+      q_vals = jax.vmap(jnp.multiply, in_axes=(0, None), out_axes=0)(outputs, task)
+
+      # [A]
+      q_vals = q_vals.sum(-1)
+    else:
+      import ipdb; ipdb.set_trace()
+      q_vals = outputs
 
     return q_vals
 
@@ -130,7 +143,6 @@ def make_minigrid_networks(
   """Builds default R2D2 networks for Atari games."""
 
   num_actions = env_spec.actions.num_values
-  task_dim = env_spec.observations.observation['task'].shape[-1]
 
   def make_core_module() -> R2D2Arch:
     vision_torso = networks.BabyAIVisionTorso(
@@ -148,6 +160,7 @@ def make_minigrid_networks(
       head=DotQMlp(
         num_actions=num_actions,
         hidden_sizes=[config.q_dim],
+        dot=config.dot,
       ))
 
   return networks_lib.make_unrollable_network(
