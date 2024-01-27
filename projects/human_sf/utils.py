@@ -63,11 +63,8 @@ def process_inputs(
   # reward = jnp.tanh(inputs.reward)
   reward = jnp.expand_dims(inputs.reward, axis=-1)
 
-  state_input = jnp.concatenate(
-    (image, task, reward), axis=-1)
-
   objects_mask = inputs.observation['objects_mask']
-  return state_input, objects, objects_mask
+  return image, task, reward, objects, objects_mask
 
 class TaskAwareLSTMState(NamedTuple):
   hidden: jax.Array
