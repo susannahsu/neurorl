@@ -28,6 +28,8 @@ Array = acme_types.NestedArray
 @dataclasses.dataclass
 class Config(basics.Config):
   q_dim: int = 512
+  object_conditioned: bool = True
+  dot: bool = True
 
 class ObjectOrientedR2D2(hk.RNNCore):
   """A duelling recurrent network for use with Atari observations as seen in R2D2.
@@ -62,10 +64,13 @@ class ObjectOrientedR2D2(hk.RNNCore):
       state: hk.LSTMState  # [B, ...]
   ) -> Tuple[base.QValues, hk.LSTMState]:
 
-    state_input, objects, objects_mask = self.process_inputs(inputs)
+    image, task, reward, objects, objects_mask = self.process_inputs(inputs)
+    state_input = jnp.concatenate((image, task, reward), axis=-1)
+
+
     core_outputs, new_state = self._memory(state_input, state)
 
-    q_values = self._object_qhead(core_outputs, objects, objects_mask)
+    q_values = self._object_qhead(core_outputs, task, objects, objects_mask)
 
     return q_values, new_state
 
@@ -76,13 +81,14 @@ class ObjectOrientedR2D2(hk.RNNCore):
   ) -> Tuple[base.QValues, hk.LSTMState]:
     """Efficient unroll that applies torso, core, and duelling mlp in one pass."""
 
-    state_input, objects, objects_mask = hk.BatchApply(
+    image, task, reward, objects, objects_mask = hk.BatchApply(
       jax.vmap(self.process_inputs))(inputs)  # [T, B, D+A+1]
 
+    state_input = jnp.concatenate((image, task, reward), axis=-1)
     core_outputs, new_states = hk.static_unroll(
       self._memory, state_input, state)
 
-    q_values = hk.BatchApply(jax.vmap(self._object_qhead))(core_outputs, objects, objects_mask)  # [T, B, A]
+    q_values = hk.BatchApply(jax.vmap(self._object_qhead))(core_outputs, task, objects, objects_mask)  # [T, B, A]
     return q_values, new_states
 
 def get_actor_core(
@@ -170,8 +176,10 @@ def make_minigrid_networks(
   def make_core_module() -> ObjectOrientedR2D2:
 
     def object_qhead(state: jax.Array,
+                     task: jax.Array,
                      objects: jax.Array,
                      objects_mask: jax.Array):
+      del task
       #--------------
       # primitive actions
       #--------------
@@ -199,7 +207,54 @@ def make_minigrid_networks(
 
       return qs
 
-    object_qhead = hk.to_module(object_qhead)("object_qhead")
+    def dot_object_qhead(
+      state: jax.Array,
+      task: jax.Array,
+      objects: jax.Array,
+      objects_mask: jax.Array):
+
+      import ipdb; ipdb.set_trace()
+      out_dim = 128  # [D]
+      task = hk.Linear(out_dim)(task)
+
+      vmultiply = jax.vmap(jnp.multiply, in_axes=(0, None), out_axes=0)
+      # --------------
+      # primitive actions
+      # --------------
+      primitive_qhead = hk.nets.MLP([config.q_dim, num_actions*out_dim])
+      primitive_outs = primitive_qhead(state)
+
+      # [A, D]
+      primitive_outs = jnp.reshape(primitive_outs, [num_actions, out_dim])
+
+      primitive_qs = vmultiply(primitive_outs, task)
+
+      # --------------
+      # objects actions
+      # --------------
+      object_qhead = hk.nets.MLP([config.q_dim, out_dim])
+
+      # vmap concat over middle dimension to replicate concat across all "actions"
+      # [D1] + [A, D2] --> [A, D1+D2]
+      def concat(a, b): return jnp.concatenate((a, b), axis=-1)
+      concat = jax.vmap(concat, in_axes=(None, 0), out_axes=0)
+
+      object_inputs = concat(state, objects)
+      object_outs = object_qhead(object_inputs)
+      object_outs = jnp.squeeze(object_outs, axis=-1)
+      object_qs = vmultiply(object_outs, task)
+
+      # whereover objects not available, but -inf
+      # important for learning
+      object_qs = jnp.where(objects_mask, object_qs, -jnp.inf)
+      qs = jnp.concatenate((primitive_qs, object_qs))
+
+      return qs
+
+    if config.dot:
+      object_qhead = hk.to_module(dot_object_qhead)("object_qhead")
+    else:
+      object_qhead = hk.to_module(object_qhead)("object_qhead")
 
 
     return ObjectOrientedR2D2(
