@@ -188,7 +188,8 @@ class Observer(basics.ActorObserver):
     """Returns metrics collected for the current episode."""
     if not self.idx % self.period == 0:
       return
-    to_log = {}
+    if not self.logging:
+      return
 
     tasks = [t.observation.observation['task'] for t in self.timesteps]
     tasks = np.stack(tasks)
@@ -235,10 +236,9 @@ class Observer(basics.ActorObserver):
         ax.imshow(frame)
         ax.axis('off')
         figs.append(fig)
-    wandb.log({
-      f'{self.prefix}/episode': [wandb.Image(fig) for fig in figs]})
+    self.wandb_log({
+      f'{self.prefix}/episode-{task}': [wandb.Image(fig) for fig in figs]})
     [plt.close(fig) for fig in figs]
-
 
 def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,

@@ -298,6 +298,7 @@ class KeyRoom(LevelGen):
       basic_only: int = 0,
       flat_task: bool = True,
       swap_episodes: int = 0,
+      terminate_failure: bool = True,
       num_task_rooms: int = 2,
       color_rooms: bool = True,
       training=True,
@@ -341,12 +342,14 @@ class KeyRoom(LevelGen):
       self.training = training
       self.room_size = room_size
       self.num_dists = num_dists
+      self.terminate_failure = terminate_failure
       self.train_objects = [p[0] for p in maze_config['pairs']]
       self.test_objects = [p[1] for p in maze_config['pairs']]
 
       self.all_final_objects = self.train_objects + self.test_objects
 
       self.all_possible_objects = self.all_final_objects + maze_config['keys']
+
       colors = ["red", "green", "blue", "purple", "yellow", "grey"]
       object_types = ["key", "ball", "box"]
       all_pairs = [(obj_type, color) for obj_type in object_types for color in colors]
@@ -366,6 +369,9 @@ class KeyRoom(LevelGen):
 
       self.colors = list(self.colors)
       self.types = list(self.types)
+
+      self.colors.sort()
+      self.types.sort()
 
       self.rooms_locked = rooms_locked
       self.room_colors = room_colors
@@ -495,6 +501,7 @@ class KeyRoom(LevelGen):
       potential_objects = self.train_objects+self.test_objects
       if self.basic_only == 2:
          potential_objects = potential_objects[:1]
+
       for object in potential_objects:
        # Assuming construct is a function that creates an object based on the type and color
         obj = construct(*object)
@@ -503,7 +510,6 @@ class KeyRoom(LevelGen):
 
       # Sample random task object
       task_object = random.choice(potential_objects)
-
       # Assuming 'colors_to_room' is defined elsewhere or is not needed for flat tasks
       self.task = self.task_class(
           types=self.types,
@@ -620,8 +626,14 @@ class KeyRoom(LevelGen):
       if self.carrying:
         # if carrying and one of the "final" objects, terminate
         shape, color = self.carrying.type, self.carrying.color
-        if [shape, color] in self.all_final_objects:
-          terminated = True
+        if self.terminate_failure:
+          if [shape, color] in self.all_final_objects:
+            terminated = True
+        else:
+          target_shape = self.task.target_type
+          target_color = self.task.target_color
+          if shape == target_shape and color == target_color:
+            terminated = True
 
       truncated = False
       if self.step_count >= self._max_steps:

@@ -404,11 +404,11 @@ def setup_experiment_inputs(
       reset=50 if not debug else 5,
       get_task_name=env_get_task_name,
       ),
-    key_room.ObjectCountObserver(
-      reset=1000 if not debug else 5,
-      prefix=f'Images',
-      agent_name=agent,
-      get_task_name=env_get_task_name),
+    # key_room.ObjectCountObserver(
+    #   reset=1000 if not debug else 5,
+    #   prefix=f'Images',
+    #   agent_name=agent,
+    #   get_task_name=env_get_task_name),
   ]
 
   return experiment_builder.OnlineExperimentConfigInputs(
@@ -431,10 +431,15 @@ def train_single(
 ):
 
   debug = FLAGS.debug
+  def env_get_task_name(env):
+    return env.unwrapped.task_name
+    # name += "\n"
+    # name +=str(env.unwrapped.task.task_array)
+    # name += "\n"
 
   experiment_config_inputs = setup_experiment_inputs(
     make_environment_fn=make_keyroom_env,
-    env_get_task_name= lambda env: env.unwrapped.task_name,
+    env_get_task_name=env_get_task_name,
     agent_config_kwargs=agent_config_kwargs,
     env_kwargs=env_kwargs,
     debug=debug)
@@ -603,9 +608,9 @@ def sweep(search: str = 'default'):
             "num_steps": tune.grid_search([5e6]),
             "agent": tune.grid_search(['flat_q']),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['flat_q-2']),
-            "dot": tune.grid_search([False, True]),
-            "env.basic_only": tune.grid_search([2,1]),
+            "group": tune.grid_search(['flat_q-5']),
+            "dot": tune.grid_search([False]),
+            "env.basic_only": tune.grid_search([1]),
         },
     ]
   elif search == 'flat_usfa':
@@ -620,12 +625,12 @@ def sweep(search: str = 'default'):
             "num_steps": tune.grid_search([5e6]),
             "agent": tune.grid_search(['flat_usfa']),
             "seed": tune.grid_search([6]),
-            "group": tune.grid_search(['flat_usfa-11']),
+            "group": tune.grid_search(['flat_usfa-14']),
             "q_coeff": tune.grid_search([0.0]),
-            "sf_coeff": tune.grid_search([1e1, 1e2, 1e3, 1e4, 1e5]),
+            "sf_coeff": tune.grid_search([1, 1e1, 1e2]),
             # "sf_coeff": tune.grid_search([1, 10, 100, 1e4]),
             "sf_loss": tune.grid_search(['qlearning']),
-            "env.basic_only": tune.grid_search([2]),
+            "env.basic_only": tune.grid_search([1, 2]),
             # "state_dim": tune.grid_search([256, 512]),
             # "sf_layers": tune.grid_search([[256], [256, 256]]),
             "sf_layers": tune.grid_search([[256]]),

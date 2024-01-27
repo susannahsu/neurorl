@@ -237,7 +237,6 @@ class UsfaLossFn(basics.RecurrentLossFn):
 
     return sf_td_error, batch_loss, metrics # [T, B], [B]
 
-
 class Observer(ActorObserver):
   def __init__(self,
                period=100,
@@ -315,24 +314,29 @@ class Observer(ActorObserver):
     state_features = jnp.stack([t.observation.observation['state_features'] for t in self.timesteps])[1:-1]
 
     ndims = sfs.shape[1]
-    for i in range(ndims):
-      # Create a figure and axis
-      fig, ax = plt.subplots()
-      # Plot each row as a separate line
-      ax.plot(state_features[:, i], label=f'$\\phi$')
-      ax.plot(sfs[:, i], label=f'$\\psi$')
+    for i in range(0, ndims, 4):
+        # Create a figure and axis
+        fig, ax = plt.subplots()
 
-      # Add labels and title if necessary
-      ax.set_xlabel('time')
-      # ax.set_ylabel('}')
-      ax.set_title(f"Successor feature prediction {i}")
-      ax.legend()
+        # Determine the end of the current group
+        end = min(i + 4, ndims)
 
-      # Log the plot to wandb
-      self.wandb_log({f"{self.prefix}/sf-prediction-{i}": wandb.Image(fig)})
+        # Plot each dimension in the group
+        for j in range(i, end):
+            ax.plot(state_features[:, j], label=f'$\\phi_{j}$')
+            ax.plot(sfs[:, j], label=f'$\\psi_{j}$')
 
-      # Close the plot
-      plt.close(fig)
+        # Add labels and title
+        ax.set_xlabel('Time')
+        # ax.set_ylabel('Value')
+        ax.set_title(f"Successor Feature Prediction (Dimensions {i} to {end-1})")
+        ax.legend()
+
+        # Log the plot to wandb
+        self.wandb_log({f"{self.prefix}/sf-group-prediction-{i//4}": wandb.Image(fig)})
+
+        # Close the plot
+        plt.close(fig)
 
     ##################################
     # q-values
@@ -361,14 +365,16 @@ class Observer(ActorObserver):
     ##################################
     # [T, H, W, C]
     frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
-    frames = frames.transpose(0, 3, 1, 2)
-    to_log['episode'] = wandb.Video(frames, caption=f"Task: {task}", fps=.5)
 
-
-    ##################################
-    # log
-    ##################################
-    self.wandb_log({f'{self.prefix}/{k}': v for k,v in to_log.items()})
+    figs = []
+    for frame in frames:
+        fig, ax = plt.subplots()
+        ax.imshow(frame)
+        ax.axis('off')
+        figs.append(fig)
+    self.wandb_log({
+      f'{self.prefix}/episode-{task}': [wandb.Image(fig) for fig in figs]})
+    [plt.close(fig) for fig in figs]
 
 class USFAPreds(NamedTuple):
   q_values: jnp.ndarray  # q-value
@@ -392,7 +398,8 @@ class MonolithicSfHead(hk.Module):
       self.policy_net = lambda x: x
 
     self.sf_net = hk.nets.MLP(
-        tuple(layers)+(num_actions * state_features_dim,))
+        tuple(layers)+(num_actions * state_features_dim,),
+        w_init=jnp.zeros)
 
     self.num_actions = num_actions
     self.state_features_dim = state_features_dim
@@ -456,8 +463,9 @@ class IndependentSfHead(hk.Module):
     super(IndependentSfHead, self).__init__(name=name)
 
     self.sf_net_factory = lambda: hk.nets.MLP(
-        tuple(layers)+(num_actions,))
-    
+        tuple(layers)+(num_actions,),
+        w_init=jnp.zeros)
+
     self.policy_layers = policy_layers
     if policy_layers:
       self.policy_net_factory = lambda: hk.nets.MLP(layers)
