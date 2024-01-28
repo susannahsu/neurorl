@@ -14,11 +14,11 @@ from minigrid.envs.babyai.core.verifier import PickupInstr
 
 class GlobalObjDesc(NamedTuple):
     color: int
+    category: str
     type: int
     state: int
     global_pos: Tuple[int, int]
     local_pos: Tuple[int, int]
-    visible: bool
 
 def matrix_to_row(row, column, num_columns):
     unique_index = row * num_columns + column
@@ -166,7 +166,7 @@ class GotoOptionsWrapper(Wrapper):
 
     def __init__(self,
                  env,
-                 max_options: int = 5,
+                 max_options: int = 1,
                  use_options: bool = True,
                  partial_obs: bool = True):
         """
@@ -223,13 +223,12 @@ class GotoOptionsWrapper(Wrapper):
              }
         )
 
-    def get_objects(self):
-        grid, vis_mask = self.gen_obs_grid()
-        vis_mask = vis_mask.reshape(-1)
+    def get_visible_objects(self):
+        grid, _ = self.gen_obs_grid()
 
-        objects = []
+        visible_objects = []
         types_ignore = ['wall', 'unseen', 'empty', 'floor']
-        for idx, (object, v) in enumerate(zip(grid.grid, vis_mask)):
+        for idx, object in enumerate(grid.grid):
           if object is None: continue
           if object.type in types_ignore: continue
           type, color, state = object.encode()
@@ -237,14 +236,14 @@ class GotoOptionsWrapper(Wrapper):
             type=type,
             color=color,
             state=state,
+            category=(IDX_TO_COLOR[color], IDX_TO_OBJECT[type]),
             global_pos=object.cur_pos,
             local_pos=flat_to_matrix(
                idx, self.num_cols),
-            visible=v,
           )
-          objects.append(obj)
+          visible_objects.append(obj)
 
-        return objects
+        return visible_objects
 
     def post_env_iter_update(self, obs, info):
       """Update after every env.reset() or env.step().
@@ -253,10 +252,8 @@ class GotoOptionsWrapper(Wrapper):
       #############
       # Get visible objects
       #############
-      objects = self.get_objects()
-      visible_objects =  [
-        o for o in objects if o.visible]
-      nobjects = len(visible_objects)
+      objects = self.get_visible_objects()
+      nobjects = len(objects)
 
       #############
       # Create matrix with object information
@@ -271,8 +268,10 @@ class GotoOptionsWrapper(Wrapper):
 
       object_mask = np.zeros((self.max_options),dtype=np.uint8)
 
-      for _, obj in enumerate(visible_objects):
-        idx = self.object2idx[(obj.type, obj.color)]
+      for _, obj in enumerate(objects):
+        color, type = obj.category
+        key = (type, color)
+        idx = self.object2idx[key]
         object_mask[idx] = 1
         object_info[idx] = np.concatenate(
            (make_onehot(obj.local_pos[0]),
@@ -291,14 +290,14 @@ class GotoOptionsWrapper(Wrapper):
       info['nobjects'] = nobjects
 
       info['actions'] = self.primitive_actions + [
-        f'go to {IDX_TO_COLOR[o.color]} {IDX_TO_OBJECT[o.type]}' for o in visible_objects
+          f'go to {IDX_TO_COLOR[o.color]} {IDX_TO_OBJECT[o.type]}' for o in objects
       ]
       info['actions'] = {idx: action for idx, action in enumerate(info['actions'])}
       #############
       # Update environment variables
       #############
       self.prior_objects = objects
-      self.prior_visible_objects = visible_objects
+      self.prior_visible_objects = objects
 
     def reset(self, *args, **kwargs):
       self.prior_action = None
@@ -308,7 +307,7 @@ class GotoOptionsWrapper(Wrapper):
       self.object2idx = { o : i for i, o in  enumerate(self.object_types)}
       assert len(self.object2idx) == len(self.object_types), 'does not work with repeating objects'
 
-      self.post_env_iter_update(obs, info)
+      # self.post_env_iter_update(obs, info)
       return obs, info
 
     def execute_option(self, action):
