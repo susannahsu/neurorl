@@ -316,6 +316,16 @@ class GotoOptionsWrapper(Wrapper):
         # obj = self.prior_visible_objects[option_idx]
         obj = self.object_types[option_idx]
 
+        shape, color = obj
+        def match(x):
+           return x.category == (color, shape)
+
+        # print(f"EXECUTING {option_idx}:", color, shape)
+
+        obj = [o for o in self.prior_visible_objects if match(o)]
+        assert len(obj) == 1, f'mismatches: {obj}'
+        obj = obj[0]
+
         # if position in front is already goal position, do nothing
         front_pos = self.unwrapped.front_pos
         global_pos = obj.global_pos
