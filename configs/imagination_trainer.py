@@ -8,7 +8,7 @@ python -m ipdb -c continue configs/imagination_trainer.py \
   --parallel='none' \
   --run_distributed=False \
   --debug=True \
-  --use_wandb=False \
+  --use_wandb=True \
   --wandb_entity=wcarvalho92 \
   --wandb_project=imagination_debug
 
@@ -47,6 +47,7 @@ python configs/imagination_trainer.py \
 
 """
 import functools 
+from typing import Dict
 
 import dataclasses
 from absl import flags
@@ -67,6 +68,10 @@ import dm_env
 import haiku as hk
 import jax
 import jax.numpy as jnp
+import numpy as np
+import rlax
+import wandb
+import matplotlib.pyplot as plt
 
 from td_agents import q_learning, basics, muzero
 from library import muzero_mlps
@@ -120,16 +125,16 @@ def observation_encoder(
     max_num_stacks: int=mental_blocks.MAX_STACKS,
     max_num_blocks: int=mental_blocks.MAX_BLOCKS):
   # create embeddings for different elements in state repr
-  cur_stack_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
-  table_stack_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  cur_stack_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal())
+  table_stack_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal())
   goal_stack_embed = cur_stack_embed
-  intersection_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
-  cur_pointer_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  intersection_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal())
+  cur_pointer_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal())
   table_pointer_embed = cur_pointer_embed
-  input_parsed_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  input_parsed_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal())
   goal_parsed_embed = input_parsed_embed
   # backbone of the encoder: mlp with relu
-  mlp = hk.nets.MLP([256,256], activate_final=True) # default RELU activations between layers (and after final layer)
+  mlp = hk.nets.MLP([512,512], activate_final=True) # default RELU activations between layers (and after final layer)
   def fn(x, dropout_rate=None):
     # concatenate embeddings and previous reward and action
     x = jnp.concatenate((
@@ -141,7 +146,7 @@ def observation_encoder(
         table_pointer_embed(x.observation[-3, :].reshape(-1)),
         input_parsed_embed(x.observation[-2, :].reshape(-1)),
         goal_parsed_embed(x.observation[-1, :].reshape(-1)),
-        jnp.expand_dims(jnp.tanh(x.reward), 0),   # [1]
+        jnp.expand_dims(x.reward, 0),   # [1]
         jax.nn.one_hot(x.action, num_actions)  # [A]
       ))
     # relu first, then mlp, relu
@@ -284,6 +289,94 @@ def make_muzero_networks(
     make_core_module=make_core_module,
     **kwargs)
 
+class QObserver(basics.ActorObserver):
+  def __init__(self,
+               period=100,
+               prefix: str = 'QObserver'):
+    super(QObserver, self).__init__()
+    self.period = period
+    self.prefix = prefix
+    self.idx = -1
+    self.logging = True
+
+  def wandb_log(self, d: dict):
+    if self.logging:
+      if wandb.run is not None:
+        wandb.log(d)
+      else:
+        self.logging = False
+        self.period = np.inf
+
+  def observe_first(self, state: basics.ActorState, timestep: dm_env.TimeStep) -> None:
+    """Observes the initial state and initial time-step.
+
+    Usually state will be all zeros and time-step will be output of reset."""
+    self.idx += 1
+
+    # epsiode just ended, flush metrics if you want
+    if self.idx > 0:
+      self.get_metrics()
+
+    # start collecting metrics again
+    self.actor_states = [state]
+    self.timesteps = [timestep]
+    self.actions = []
+
+  def observe_action(self, state: basics.ActorState, action: jax.Array) -> None:
+    """Observe state and action that are due to observation of time-step.
+
+    Should be state after previous time-step along"""
+    self.actor_states.append(state)
+    self.actions.append(action)
+
+  def observe_timestep(self, timestep: dm_env.TimeStep) -> None:
+    """Observe next.
+
+    Should be time-step after selecting action"""
+    self.timesteps.append(timestep)
+
+  def get_metrics(self) -> Dict[str, float]:
+    """Returns metrics collected for the current episode."""
+    if not self.idx % self.period == 0:
+      return
+    if not self.logging:
+      return
+
+    ##################################
+    # successor features
+    ##################################
+    # first prediction is empty (None)
+    q_values = [s.predictions for s in self.actor_states[1:]]
+    q_values = jnp.stack(q_values)
+    npreds = len(q_values)
+    actions = jnp.stack(self.actions)[:npreds]
+    q_values = rlax.batched_index(q_values, actions)
+
+    rewards = jnp.stack([t.reward for t in self.timesteps[1:]])
+    # Create a figure and axis
+    fig, ax = plt.subplots()
+    ax.plot(q_values, label='q_values')
+    ax.plot(rewards, label='rewards')
+
+    # Add labels and title if necessary
+    ax.set_xlabel('time')
+    total_reward = rewards.sum()
+    ax.set_title(f"reward prediction:\nR={total_reward}")
+    ax.legend()
+
+    # Log the plot to wandb
+    self.wandb_log({f"{self.prefix}/reward_prediction": wandb.Image(fig)})
+
+    # Close the plot
+    plt.close(fig)
+
+    # ##################################
+    # # get images
+    # ##################################
+    # # [T, H, W, C]
+    # frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
+    # self.wandb_log({
+    #   f'{self.prefix}/episode-{task}': [wandb.Image(frame) for frame in frames]})
 
 def make_environment(seed: int,
                      difficulty: int= 2,
@@ -331,6 +424,10 @@ def setup_experiment_inputs(
     config = q_learning.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
+      ActorCls=functools.partial(
+        basics.BasicActor,
+        observers=[QObserver(period=1 if debug else 500)],
+        ),
       LossFn=q_learning.R2D2LossFn(
           discount=config.discount,
           importance_sampling_exponent=config.importance_sampling_exponent,
