@@ -150,9 +150,9 @@ class Observer(basics.ActorObserver):
 
   def wandb_log(self, d: dict):
     if self.logging:
-      try:
+      if wandb.run is not None:
         wandb.log(d)
-      except wandb.errors.Error as e:
+      else:
         self.logging = False
         self.period = np.inf
 

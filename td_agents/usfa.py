@@ -34,11 +34,11 @@ class Config(basics.Config):
 
   final_conv_dim: int = 16
   conv_flat_dim: Optional[int] = 0
-  sf_layers : Tuple[int]=(128, 128)
-  policy_layers : Tuple[int]=(32,)
-  combine_policy: str = 'concat'
+  sf_layers : Tuple[int]=(256, 256)
+  policy_layers : Tuple[int]=(256, 256)
+  combine_policy: str = 'sum'
 
-  head: str = 'independent'
+  head: str = 'monolithic'
   sf_coeff: float = 1.0
   q_coeff: float = 0.0
   sf_loss: str = 'qlearning'
@@ -85,6 +85,62 @@ def sample_gauss(mean: jax.Array,
   else:
     samples = jnp.expand_dims(mean, axis=1) # [N, D]
   return samples
+
+def get_actor_core(
+    networks: basics.NetworkFn,
+    config: Config,
+    evaluation: bool = False,
+    extract_q_values = lambda preds: preds.q_values
+  ):
+  """Returns ActorCore for R2D2."""
+
+  def select_action(params: networks_lib.Params,
+                    observation: networks_lib.Observation,
+                    state: ActorState[actor_core_lib.RecurrentState]):
+    rng, policy_rng = jax.random.split(state.rng)
+
+    preds, recurrent_state = networks.apply(params, policy_rng, observation, state.recurrent_state, evaluation)
+
+    q_values = extract_q_values(preds)
+
+    epsilon = state.epsilon
+    action = rlax.epsilon_greedy(epsilon).sample(policy_rng, q_values)
+    return action, ActorState(
+        rng=rng,
+        epsilon=state.epsilon,
+        step=state.step + 1,
+        predictions=preds,
+        recurrent_state=recurrent_state,
+        prev_recurrent_state=state.recurrent_state)
+
+  def init(
+      rng: networks_lib.PRNGKey
+  ) -> ActorState[actor_core_lib.RecurrentState]:
+    rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
+    if not evaluation:
+      epsilon = jax.random.choice(epsilon_rng,
+                                  np.logspace(
+                                    start=config.epsilon_min,
+                                    stop=config.epsilon_max,
+                                    num=config.num_epsilons,
+                                    base=config.epsilon_base))
+    else:
+      epsilon = config.evaluation_epsilon
+    initial_core_state = networks.init_recurrent_state(state_rng, None)
+    return ActorState(
+        rng=rng,
+        epsilon=epsilon,
+        step=0,
+        recurrent_state=initial_core_state,
+        prev_recurrent_state=initial_core_state)
+
+  def get_extras(
+      state: ActorState[actor_core_lib.RecurrentState]
+  ) -> r2d2_actor.R2D2Extras:
+    return {'core_state': state.prev_recurrent_state}
+
+  return actor_core_lib.ActorCore(init=init, select_action=select_action,
+                                  get_extras=get_extras)
 
 @dataclasses.dataclass
 class UsfaLossFn(basics.RecurrentLossFn):
@@ -224,8 +280,9 @@ class UsfaLossFn(basics.RecurrentLossFn):
 
       batch_loss += q_loss*self.q_coeff
 
-    metrics = {
-      '0.total_loss': batch_loss,
+    cumulant_reward = (cumulants*task_w).sum(-1)
+    reward_error = (cumulant_reward - data.reward[:-1])
+    metrics = {      '0.total_loss': batch_loss,
       f'0.1.sf_loss_{self.loss_fn}': sf_loss,
       '0.1.q_loss': q_loss,
       '2.q_td_error': jnp.abs(value_td_error),
@@ -233,6 +290,7 @@ class UsfaLossFn(basics.RecurrentLossFn):
       '3.cumulants': cumulants,
       '3.sf_mean': online_sf,
       '3.q_mean': online_q,
+      '4.reward_error': reward_error,
       # '3.sf_var': online_sf.var(),
       }
 
@@ -241,18 +299,22 @@ class UsfaLossFn(basics.RecurrentLossFn):
 class Observer(ActorObserver):
   def __init__(self,
                period=100,
+               plot_success_only: bool = False,
                prefix: str = 'SFsObserver'):
     super(Observer, self).__init__()
     self.period = period
     self.prefix = prefix
+    self.successes = 0
     self.idx = -1
     self.logging = True
+    self.plot_success_only = plot_success_only
 
   def wandb_log(self, d: dict):
     if self.logging:
-      try:
+      if wandb.run is not None:
         wandb.log(d)
-      except wandb.errors.Error as e:
+      else:
+        print("WANDB is not initialized")
         self.logging = False
         self.period = np.inf
 
@@ -286,9 +348,19 @@ class Observer(ActorObserver):
 
   def flush_metrics(self) -> Dict[str, float]:
     """Returns metrics collected for the current episode."""
-    if not self.idx % self.period == 0:
+    rewards = jnp.stack([t.reward for t in self.timesteps])[1:]
+    total_reward = rewards.sum()
+    if self.plot_success_only and not total_reward > 0:
       return
-    to_log = {}
+
+    self.successes += 1
+
+    count = self.successes if self.plot_success_only else self.idx
+
+    if not count % self.period == 0:
+      return
+    if not self.logging:
+      return
 
     tasks = [t.observation.observation['task'] for t in self.timesteps]
     tasks = np.stack(tasks)
@@ -298,7 +370,6 @@ class Observer(ActorObserver):
     # Actor states: T, starting at 0
     # timesteps: T, starting at 0
     # action: T-1, starting at 0
-
     ##################################
     # successor features
     ##################################
@@ -317,8 +388,15 @@ class Observer(ActorObserver):
     sfs = index(sfs, actions[:, None])  # [T-1, 1, C]
     sfs = jnp.squeeze(sfs, axis=-2)  # [T-1, C]
 
+    q_values = (sfs*tasks[:-1]).sum(-1)
+
     # ignore 0th (reset) time-step w/ 0 reward and last (terminal) time-step
     state_features = jnp.stack([t.observation.observation['state_features'] for t in self.timesteps])[1:]
+
+    discounts = jnp.stack([t.discount for t in self.timesteps[1:]])*.99
+    n_step_return = functools.partial(rlax.n_step_bootstrapped_returns, n=5)
+    n_step_return = jax.vmap(n_step_return, in_axes=(1, None, 1), out_axes=1)
+    features_returns = n_step_return(state_features, discounts, sfs)
 
     ndims = sfs.shape[1]
     group_size = 5
@@ -339,10 +417,18 @@ class Observer(ActorObserver):
           # Plot state_features with a dashed line style
           if state_features[:, j].sum() > 0:
             nplotted += 1
-            ax.plot(state_features[:, j], label=f'$\\phi {j}$', linestyle='--', color=color)
-            
-            # Plot sfs with the same color
-            ax.plot(sfs[:, j], label=f'$\\psi {j}$', color=color)
+
+            # STATE FEATURES
+            ax.plot(state_features[:, j], label=f'$\\phi - {j}$', linestyle='--', color=color)
+
+            # STATE FEATURE RETURNS
+            ax.plot(features_returns[:, j], label=f'$\\phi - {j} - R$', linestyle=':', color=color)
+
+            # SUCCESSOR FEATURES
+            ax.plot(sfs[:, j], label=f'$\\psi - {j}$', color=color)
+
+            ax.plot(rewards, label='rewards', linestyle='--', color='grey')
+            ax.plot(q_values, label='q_values', color='grey')
 
         # Add labels and title
         ax.set_xlabel('Time')
@@ -360,25 +446,23 @@ class Observer(ActorObserver):
     ##################################
     # q-values
     ##################################
-    rewards = jnp.stack([t.reward for t in self.timesteps])[1:]
-    total_reward = rewards.sum()
-    if total_reward.sum():
-      q_values = (sfs*tasks[:-1]).sum(-1)
-      # Create a figure and axis
-      fig, ax = plt.subplots()
-      ax.plot(q_values, label='q_values')
-      ax.plot(rewards, label='rewards')
+    # if total_reward.sum():
+    #   q_values = (sfs*tasks[:-1]).sum(-1)
+    #   # Create a figure and axis
+    #   fig, ax = plt.subplots()
+    #   ax.plot(q_values, label='q_values')
+    #   ax.plot(rewards, label='rewards')
 
-      # Add labels and title if necessary
-      ax.set_xlabel('time')
-      ax.set_title(f"reward prediction: {task}\nR={total_reward}")
-      ax.legend()
+    #   # Add labels and title if necessary
+    #   ax.set_xlabel('time')
+    #   ax.set_title(f"reward prediction: {task}\nR={total_reward}")
+    #   ax.legend()
 
-      # Log the plot to wandb
-      self.wandb_log({f"{self.prefix}/reward_prediction": wandb.Image(fig)})
+    #   # Log the plot to wandb
+    #   self.wandb_log({f"{self.prefix}/reward_prediction": wandb.Image(fig)})
 
-      # Close the plot
-      plt.close(fig)
+    #   # Close the plot
+    #   plt.close(fig)
 
     ##################################
     # get images
@@ -405,7 +489,7 @@ class MonolithicSfHead(hk.Module):
     super(MonolithicSfHead, self).__init__(name=name)
 
     if policy_layers:
-      self.policy_net = hk.nets.MLP(policy_layers)
+      self.policy_net = hk.nets.MLP(policy_layers, activate_final=True)
     else:
       self.policy_net = lambda x: x
 
@@ -430,6 +514,8 @@ class MonolithicSfHead(hk.Module):
     Returns:
         jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
     """
+    policy = self.policy_net(policy)
+
     dim = sf_input.shape[-1]
     linear = lambda x: hk.Linear(dim, with_bias=False)(x)
     if self.combine_policy == 'concat':
@@ -478,7 +564,7 @@ class IndependentSfHead(hk.Module):
 
     self.policy_layers = policy_layers
     if policy_layers:
-      self.policy_net_factory = lambda: hk.nets.MLP(layers)
+      self.policy_net_factory = lambda: hk.nets.MLP(policy_layers, activate_final=True)
     else:
       identity = lambda x: x 
       self.policy_net_factory = lambda: identity
@@ -536,7 +622,6 @@ class SfGpiHead(hk.Module):
   """Universal Successor Feature Approximator GPI head"""
   def __init__(self,
     num_actions: int,
-    state_features_dim: int,
     sf_net : hk.Module,
     nsamples: int=10,
     variance: Optional[float]=0.5,
@@ -556,7 +641,6 @@ class SfGpiHead(hk.Module):
     """
     super(SfGpiHead, self).__init__()
     self.num_actions = num_actions
-    self.state_features_dim = state_features_dim
     self.var = variance
     self.nsamples = nsamples
     self.eval_task_support = eval_task_support
@@ -586,7 +670,7 @@ class SfGpiHead(hk.Module):
     return self.sfgpi(
       usfa_input=usfa_input,
       policies=policies,
-      task=policy)
+      task=task)
 
   def evaluate(self,
     task: jnp.ndarray,  # task vector
@@ -681,8 +765,8 @@ class UsfaArch(hk.RNNCore):
         )
     else:
       predictions = self._head(
-        task=inputs.observation['task'],
         usfa_input=core_outputs,
+        task=inputs.observation['task'],
       )
     return predictions, new_state
 
@@ -706,8 +790,8 @@ class UsfaArch(hk.RNNCore):
 
     # treat T,B like this don't exist with vmap
     predictions = jax.vmap(jax.vmap(self._head))(
-        task=inputs.observation['task'],  # [T, B, N]
-        usfa_input=core_outputs,  # [T, B, D]
+        core_outputs,                # [T, B, D]
+        inputs.observation['task'],  # [T, B]
       )
     return predictions, new_states
 
@@ -749,7 +833,6 @@ def make_minigrid_networks(
 
     usfa_head = SfGpiHead(
       num_actions=num_actions,
-      state_features_dim=state_features_dim,
       nsamples=config.nsamples,
       variance=config.variance,
       sf_net=sf_net,

@@ -123,7 +123,6 @@ class BaseTaskRep:
       # in this setting, whenever goes 0 -> +
       state_features = positive_difference
 
-
     self._prior_features = current_features
     self._state_features = state_features
 
@@ -182,7 +181,7 @@ class FlatTaskRep(BaseTaskRep):
         state_vector[idx] = 1
 
     current_room_color = self.current_room(env)
-    if current_room_color:
+    if current_room_color != 'start':
         room_idx = self.get_vector_index(current_room_color, 'room')
         state_vector[room_idx] = 1
 
@@ -241,7 +240,7 @@ class StructuredTaskRep(BaseTaskRep):
 
     # Check the color of the current room
     current_room_color = self.current_room(env)
-    if current_room_color:
+    if current_room_color != 'start':
         room_color_idx = self.colors.index(current_room_color)
         room_shape_idx = self.types.index('room')
         state_array[room_color_idx, room_shape_idx] = 1
@@ -296,6 +295,7 @@ class KeyRoom(LevelGen):
       unblocking=False,
       rooms_locked=True,
       basic_only: int = 0,
+      task_set: int = 1,
       flat_task: bool = True,
       swap_episodes: int = 0,
       terminate_failure: bool = True,
@@ -305,7 +305,6 @@ class KeyRoom(LevelGen):
       # include_task_signals=False,
       max_steps_per_room: int = 100,
       implicit_unlock=True,
-      room_colors: List[str] = ['blue', 'yellow', 'red', 'green'],
       **kwargs):
       """
       Initialize a KeyRoom environment with customizable parameters.
@@ -322,13 +321,11 @@ class KeyRoom(LevelGen):
           include_task_signals (bool, optional): Whether to include task-specific signals. Defaults to True.
           max_steps_per_room (int, optional): The maximum number of steps per room. Defaults to 100.
           implicit_unlock (bool, optional): Whether implicit unlocking is allowed. Defaults to True.
-          room_colors (List[str], optional): The colors of the rooms in the grid. Defaults to ['blue', 'yellow', 'red', 'green'].
           **kwargs: Additional keyword arguments for customization.
 
       Attributes:
           tasks (List[ObjectTestTask]): A list of tasks to be performed in the environment.
           rooms_locked (bool): Whether rooms are initially locked.
-          room_colors (List[str]): The colors of the rooms in the grid.
           include_task_signals (bool): Whether to include task-specific signals (i.e. room color, indicator object).
       """
 
@@ -374,11 +371,10 @@ class KeyRoom(LevelGen):
       self.types.sort()
 
       self.rooms_locked = rooms_locked
-      self.room_colors = room_colors
       self.basic_only = basic_only
 
-      all_tasks = []
-      train_tasks = []
+      both_objects = []
+      first_objects = []
       for idx, (type, color) in enumerate(maze_config['keys']):
         train_object, test_object = maze_config['pairs'][idx]
 
@@ -386,17 +382,22 @@ class KeyRoom(LevelGen):
             types=self.types,
             colors=self.colors,
             target=train_object)
-        train_tasks.append(train_task)
-        all_tasks.append(train_task)
+        first_objects.append(train_task)
+        both_objects.append(train_task)
 
         test_task = self.task_class(
             types=self.types,
             colors=self.colors,
             target=test_object)
-        all_tasks.append(test_task)
+        both_objects.append(test_task)
 
-      self.all_task_arrays = np.array([t.task_array for t in all_tasks])
-      self.train_task_arrays = np.array([t.task_array for t in train_tasks])
+      # all_task_arrays = np.array([t.task_array for t in both_objects])
+      # train_task_arrays = np.array([t.task_array for t in first_objects])
+      if task_set == 0:
+        self.task_set = np.array([t.task_array for t in first_objects])
+      elif task_set == 1:
+        self.task_set = np.array([t.task_array for t in both_objects])
+        
       self.episodes = 0
 
       super().__init__(
@@ -410,8 +411,12 @@ class KeyRoom(LevelGen):
           **kwargs,
       )
 
-      self._max_steps = max_steps_per_room*self.num_navs_needed()
-      task_array = self.all_task_arrays[0]
+      if self.basic_only == 0:
+        self._max_steps = max_steps_per_room*self.num_navs_needed()
+      else:
+        self._max_steps = max_steps_per_room
+
+      task_array = self.task_set[0]
       cumulants_space = spaces.Box(
           low=0,
           high=100.0,
@@ -421,21 +426,21 @@ class KeyRoom(LevelGen):
       train_task_arrays = spaces.Box(
           low=0,
           high=100.0,
-          shape=self.train_task_arrays.shape,  # number of cells
+          shape=self.task_set.shape,  # number of cells
           dtype="float32",
       )
-      all_task_arrays = spaces.Box(
-          low=0,
-          high=100.0,
-          shape=self.all_task_arrays.shape,  # number of cells
-          dtype="float32",
-      )
+      # all_task_arrays = spaces.Box(
+      #     low=0,
+      #     high=100.0,
+      #     shape=self.all_task_arrays.shape,  # number of cells
+      #     dtype="float32",
+      # )
       self.observation_space = spaces.Dict(
           {**self.observation_space.spaces,
            "state_features": cumulants_space,
            "task": copy.deepcopy(cumulants_space),  # equivalent specs
            "train_tasks": train_task_arrays,
-           "all_tasks": all_task_arrays,
+          #  "all_tasks": all_task_arrays,
            }
       )
 
@@ -596,8 +601,8 @@ class KeyRoom(LevelGen):
     def update_obs(self, obs):
       obs['task'] = self.task.task_array
       obs['state_features'] = self.task.state_features
-      obs['train_tasks'] = self.train_task_arrays
-      obs['all_tasks'] = self.all_task_arrays
+      obs['train_tasks'] = self.task_set
+      # obs['all_tasks'] = self.all_task_arrays
 
     def reset(self, *args, **kwargs):
       obs, info = super().reset(*args, **kwargs)

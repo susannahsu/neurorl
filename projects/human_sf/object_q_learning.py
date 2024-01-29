@@ -251,10 +251,80 @@ def make_minigrid_networks(
 
       return qs
 
+    def qhead(
+        state: jax.Array,
+        task: jax.Array,
+        objects: jax.Array,
+        objects_mask: jax.Array):
+      del task
+      del objects
+
+      #--------------
+      # actions
+      #--------------
+      nobjects = objects_mask.shape[-1]
+      qhead=hk.nets.MLP([config.q_dim, num_actions + nobjects])
+      qs = qhead(state)
+
+      #--------------
+      # mask
+      #--------------
+      action_mask = jnp.ones(num_actions)
+      mask = jnp.concatenate((action_mask, objects_mask), axis=-1)
+
+      #--------------
+      # objects actions
+      #--------------
+      # whereover objects not available, but -inf
+      # important for learning
+      qs =  jnp.where(mask, qs, -jnp.inf)
+
+      return qs
+
+    def dot_qhead(
+      state: jax.Array,
+      task: jax.Array,
+      objects: jax.Array,
+      objects_mask: jax.Array):
+
+      del objects
+      out_dim = 128  # [D]
+      task = hk.Linear(out_dim)(task)
+      import ipdb; ipdb.set_trace()
+      #--------------
+      # actions
+      #--------------
+      nobjects = objects_mask.shape[-1]
+      total_actions = num_actions + nobjects
+      qhead = hk.nets.MLP([config.q_dim, total_actions*out_dim])
+      outs = qhead(state)
+      # [A, D]
+      outs = jnp.reshape(outs, [total_actions, out_dim])
+
+      vmultiply = jax.vmap(jnp.multiply, in_axes=(0, None), out_axes=0)
+      qs = vmultiply(outs, task)
+
+      #--------------
+      # mask
+      #--------------
+      action_mask = jnp.ones(num_actions)
+      mask = jnp.concatenate((action_mask, objects_mask), axis=-1)
+
+      # whereover objects not available, but -inf
+      # important for learning
+      qs =  jnp.where(mask, qs, -jnp.inf)
+      return qs
+
     if config.dot:
-      object_qhead = hk.to_module(dot_object_qhead)("object_qhead")
+      if config.object_conditioned:
+        object_qhead = hk.to_module(dot_object_qhead)("object_qhead")
+      else:
+        object_qhead = hk.to_module(dot_qhead)("object_qhead")
     else:
-      object_qhead = hk.to_module(object_qhead)("object_qhead")
+      if config.object_conditioned:
+        object_qhead = hk.to_module(object_qhead)("object_qhead")
+      else:
+        object_qhead = hk.to_module(qhead)("object_qhead")
 
 
     return ObjectOrientedR2D2(

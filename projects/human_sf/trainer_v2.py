@@ -120,14 +120,17 @@ class UsfaConfig(usfa.Config):
   state_dim: int = 256
   final_conv_dim: int = 16
   conv_flat_dim: Optional[int] = 0
-  sf_layers : Tuple[int]=(1024,)
-  policy_layers : Tuple[int]=()
+  sf_layers : Tuple[int]=(256, 256)
+  policy_layers : Tuple[int]=(256, 256)
 
   # learner
   importance_sampling_exponent: float = 0.0
   samples_per_insert: float = 10.0
-  sf_coeff: float = 10.0
+  sf_coeff: float = 1e4
   q_coeff: float = 1.0
+
+  combine_policy: str = 'sum'
+  head: str = 'monolithic'
 
   # eval actor
   eval_task_support: str = "train"  # options:
@@ -269,10 +272,10 @@ def setup_experiment_inputs(
       config=config,
       ActorCls=functools.partial(
         basics.BasicActor,
-        observers=[usfa.Observer(period=1 if debug else 500)]
+        observers=[usfa.Observer(plot_success_only=True, period=1 if debug else 500)]
       ),
       get_actor_core_fn=functools.partial(
-        basics.get_actor_core,
+        usfa.get_actor_core,
         extract_q_values=lambda preds: preds.q_values,
         ),
       LossFn=usfa.UsfaLossFn(
@@ -625,18 +628,8 @@ def sweep(search: str = 'default'):
             "num_steps": tune.grid_search([5e6]),
             "agent": tune.grid_search(['flat_usfa']),
             "seed": tune.grid_search([6]),
-            "group": tune.grid_search(['flat_usfa-16']),
-            "q_coeff": tune.grid_search([0.0]),
-            "sf_coeff": tune.grid_search([1, 1e1, 1e2, 1e-3]),
-            # "sf_coeff": tune.grid_search([1, 10, 100, 1e4]),
-            "sf_loss": tune.grid_search(['qlearning']),
+            "group": tune.grid_search(['flat-usfa-6']),
             "env.basic_only": tune.grid_search([1]),
-            "head": tune.grid_search(['independent', 'monolithic']),
-            # "sf_layers": tune.grid_search([[256], [256, 256]]),
-            "sf_layers": tune.grid_search([[256]]),
-            # "policy_layers": tune.grid_search([[128], []]),
-            # "learning_rate": tune.grid_search([1e-1, 1e-2, 5e-3,  1e-3]),
-            # "combine_policy": tune.grid_search(['product', 'sum']),
         },
     ]
   elif search == 'flat_muzero':
