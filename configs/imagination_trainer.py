@@ -120,16 +120,16 @@ def observation_encoder(
     max_num_stacks: int=mental_blocks.MAX_STACKS,
     max_num_blocks: int=mental_blocks.MAX_BLOCKS):
   # create embeddings for different elements in state repr
-  cur_stack_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
-  table_stack_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  cur_stack_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  table_stack_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
   goal_stack_embed = cur_stack_embed
-  intersection_embed = hk.Linear(16, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
-  cur_pointer_embed = hk.Linear(16, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  intersection_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  cur_pointer_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
   table_pointer_embed = cur_pointer_embed
-  input_parsed_embed = hk.Linear(16, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
+  input_parsed_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal(), with_bias=False)
   goal_parsed_embed = input_parsed_embed
   # backbone of the encoder: mlp with relu
-  mlp = hk.nets.MLP([128,128], activate_final=True) # default RELU activations between layers (and after final layer)
+  mlp = hk.nets.MLP([256,256], activate_final=True) # default RELU activations between layers (and after final layer)
   def fn(x, dropout_rate=None):
     # concatenate embeddings and previous reward and action
     x = jnp.concatenate((
@@ -182,7 +182,7 @@ def make_muzero_networks(
     **kwargs) -> muzero.MuZeroNetworks:
   """Builds default MuZero networks for BabyAI tasks."""
 
-  num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum)
+  num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum) + 1
 
   def make_core_module() -> muzero.MuZeroNetworks:
 
@@ -375,7 +375,8 @@ def setup_experiment_inputs(
           discretizer=discretizer,
           mcts_policy=mcts_policy,
           simulation_steps=config.simulation_steps,
-          reanalyze_ratio=config.reanalyze_ratio,
+          #reanalyze_ratio=config.reanalyze_ratio,
+          reanalyze_ratio=0,
           root_policy_coef=config.root_policy_coef,
           root_value_coef=config.root_value_coef,
           model_policy_coef=config.model_policy_coef,
@@ -590,13 +591,13 @@ def sweep(search: str = 'default'):
   if search == 'initial':
     space = [
         {
-            "group": tune.grid_search(['run-2']),
+            "group": tune.grid_search(['netc1e-3p0.3all']),
             "num_steps": tune.grid_search([50e6]),
             #"agent": tune.grid_search(['qlearning', 'muzero']),
-            "agent": tune.grid_search(['muzero', 'qlearning']),
-            "num_bins": tune.grid_search([101]), 
+            "agent": tune.grid_search(['qlearning']),
+            #"num_bins": tune.grid_search([101]), 
             "seed": tune.grid_search([1]),
-            "env.difficulty": tune.grid_search([2]),
+            "env.difficulty": tune.grid_search([2,3,4]),
         }
     ]
   elif search == 'muzero':

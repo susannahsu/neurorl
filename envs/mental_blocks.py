@@ -19,7 +19,7 @@ MAX_BLOCKS = 7 # maximum number of blocks allowed in each stack
 MAX_STEPS = 50 # maximum number of actions allowed in each episode
 BASE_BLOCK_REWARD = 3 # base reward for getting 1 block correct, cumulates with more blocks correct
 BLOCK_REWARD_DECAY_FACTOR = 1.2 # discount factor for subsequently correct blocks, the larger the faster the decay
-ACTION_COST = 1 # cost for performing any action
+ACTION_COST = 1e-3 # cost for performing any action
 
 class Simulator():
 	def __init__(self, input_stacks, goal_stacks, 
@@ -39,8 +39,8 @@ class Simulator():
 		self.state_size = self.state.size # total number of elements in flattened state matrix
 		num_valid_blocks = [[1 for _ in goal_stack] for goal_stack in goal_stacks]
 		self.num_valid_blocks = sum(sum(l) for l in num_valid_blocks)
-		self.reward_upper_bound = sum([self.base_block_reward / (self.reward_decay_factor**(intersection+1)) for istack in range(len(goal_stacks)) for jblock in range(len(goal_stacks[istack])) for intersection in range(jblock+1)]) - self.action_cost
-		self.reward_lower_bound = -self.action_cost*3
+		self.reward_upper_bound = sum([self.base_block_reward / (self.reward_decay_factor**(intersection+1)) for istack in range(len(goal_stacks)) for jblock in range(len(goal_stacks[istack])) for intersection in range(jblock+1)]) #- self.action_cost
+		#self.reward_lower_bound = -self.action_cost*3
 		self.max_episode_reward = sum([self.base_block_reward / (self.reward_decay_factor**(intersection+1)) for istack in range(len(goal_stacks)) for jblock in range(len(goal_stacks[istack])) for intersection in range(jblock+1)] 
 								+ [-5*action_cost for istack in range(len(goal_stacks)) for _ in range(len(goal_stacks[istack]))]
 								+ [-1*action_cost for _ in range(len(goal_stacks)) ] + [-action_cost, -action_cost])
@@ -105,7 +105,7 @@ class Simulator():
 		info = None
 		if (not input_parsed) or (not goal_parsed):
 			if (not input_parsed) and (not goal_parsed) and (action_name != "parse_input") and (action_name != "parse_goal"):
-				reward -= self.action_cost*2
+				reward -= 0.3 #self.action_cost*2
 				print('\tboth input and goal not parsed yet') if self.verbose else 0
 			elif (not input_parsed) and action_name == "parse_input":
 				self.__parse_input()
@@ -114,39 +114,39 @@ class Simulator():
 				self.__parse_goal()
 				goal_parsed = True
 			else:
-				reward -= self.action_cost*2
+				reward -= 0.3 #self.action_cost*2
 				print('\teither input or goal not parsed yet') if self.verbose else 0
 		elif action_name == "next_stack":
 			if cur_pointer + 1 >= self.max_stacks: # new cur pointer idx out of range
-				reward -= self.action_cost
+				reward -= 0.3 #self.action_cost
 				print('\tcur pointer out of range') if self.verbose else 0
 			else: # next stack
 				self.state[-4, cur_pointer] = 0
 				self.state[-4, cur_pointer+1] = 1
 		elif action_name == "previous_stack":
 			if cur_pointer == 0: # cur pointer is already minimum
-				reward -= self.action_cost
+				reward -= 0.3 #self.action_cost
 				print('\tcur pointer out of range') if self.verbose else 0
 			else: # previous stack
 				self.state[-4, cur_pointer] = 0
 				self.state[-4, cur_pointer-1] = 1
 		elif action_name == "next_table":
 			if table_pointer + 1 >= self.max_blocks: # new table pointer out of range
-				reward -= self.action_cost
+				reward -= 0.3 #self.action_cost
 				print('\ttable pointer out of range') if self.verbose else 0
 			else: # next table stack
 				self.state[-3, table_pointer] = 0
 				self.state[-3, table_pointer+1] = 1
 		elif action_name == "previous_table":
 			if table_pointer == 0: # table pointer is already minimum
-				reward -= self.action_cost
+				reward -= 0.3 #self.action_cost
 				print('\ttable pointer out of range') if self.verbose else 0
 			else: # previous table stack
 				self.state[-3, table_pointer] = 0
 				self.state[-3, table_pointer-1] = 1
 		elif action_name == "remove":
 			if np.all(self.state[cur_pointer*self.max_blocks + self.max_blocks-1]==0): # nothing to remove, cur stack is empty
-				reward -= self.action_cost
+				reward -= 0.3 #self.action_cost
 				print('\tnothing to remove, cur stack empty') if self.verbose else 0
 			else: # pop the top block from cur stack
 				pop_idx = 0
@@ -163,14 +163,15 @@ class Simulator():
 						break
 				print('\tremove top block', block_id) if self.verbose else 0
 				r, terminated = self.__readout_reward()
+				r = r / self.reward_upper_bound 
 				reward += r
 		elif action_name == "add":
 			if np.all(self.state[self.max_blocks*self.max_stacks+table_pointer]==0): # nothing to add, table stack is empty
-				reward -= self.action_cost
+				reward -= 0.3 #self.action_cost
 				print('\tnothing to add, table stack empty') if self.verbose else 0
 			elif np.any(self.state[cur_pointer*self.max_blocks]==1): # intent to add to cur stack, but stack full
 				print('\tintend to add to full stack, last block in stack is',self.state[cur_pointer+self.max_blocks-1]) if self.verbose else 0
-				reward -= self.action_cost
+				reward -= 0.3 #self.action_cost
 			else: # add the block to cur stack
 				new_block = np.argmax(self.state[self.max_blocks*self.max_stacks+table_pointer]) # the new blockid to be added
 				self.state[self.max_blocks*self.max_stacks+table_pointer, new_block] = 0 # remove the block from table
@@ -179,20 +180,22 @@ class Simulator():
 						self.state[i, new_block] = 1 # add the block to the top of cur stack
 						break
 				r, terminated = self.__readout_reward()
+				r = r / self.reward_upper_bound
 				reward += r 
 		elif action_name == "parse_input": # parse input repetitively
 			assert input_parsed
 			self.__parse_input()
-			reward -= self.action_cost
+			reward -= 0.3 #self.action_cost
 			print('\tinput parsed again, reset') if self.verbose else 0
 		elif action_name == "parse_goal": # parse goal repetitively
 			assert goal_parsed
-			reward -= self.action_cost
+			reward -= 0.3 #self.action_cost
 			print('\tgoal parsed again') if self.verbose else 0
 		self.current_time += 1
 		if self.current_time >= self.max_steps:
 			truncated = True
-		normalized_reward = 2*(reward - self.reward_lower_bound)/(self.reward_upper_bound-self.reward_lower_bound) - 1
+		#normalized_reward = 2*(reward - self.reward_lower_bound)/(self.reward_upper_bound-self.reward_lower_bound) - 1
+		normalized_reward = reward
 		return self.state.copy(), normalized_reward, terminated, truncated, info
 
 
