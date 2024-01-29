@@ -129,6 +129,18 @@ def setup_logger_factory(
     if use_wandb:
       wandb.init(**wandb_init_kwargs)
 
+  def logger_factory(
+      name: str,
+      steps_key: Optional[str] = None,
+      actor_id: Optional[int] = None,
+  ) -> loggers.Logger:
+    """Logger factory. initialized wandb (inside process). only 1st process logs to wandb. 
+    only 1st process saves data. """
+    if custom_steps_keys is not None:
+      steps_key = custom_steps_keys(name)
+    if use_wandb:
+      wandb.init(**wandb_init_kwargs)
+
     if name == 'actor':
       return experiment_logger.make_logger(
           log_dir=log_dir,
@@ -136,8 +148,8 @@ def setup_logger_factory(
           time_delta=0.0,
           log_with_key=log_with_key,
           steps_key=steps_key,
-          save_data=task_id == 0,
-          use_wandb=use_wandb)
+          save_data=actor_id == 0,
+          use_wandb=use_wandb and actor_id == 0)
     elif name == 'evaluator':
       return experiment_logger.make_logger(
           log_dir=log_dir,
@@ -145,7 +157,7 @@ def setup_logger_factory(
           time_delta=0.0,
           log_with_key=log_with_key,
           steps_key=steps_key,
-          use_wandb=use_wandb)
+          use_wandb=use_wandb and actor_id == 0)
     elif name == 'learner':
       return experiment_logger.make_logger(
           log_dir=log_dir,
@@ -154,6 +166,7 @@ def setup_logger_factory(
           steps_key=steps_key,
           use_wandb=use_wandb,
           asynchronous=True)
+  return logger_factory
   return logger_factory
 
 

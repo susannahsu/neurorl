@@ -8,13 +8,14 @@ salloc -p gpu -t 0-06:00 --mem=8000 --gres=gpu:1
 
 **load modules**
 ```
+module load Mambaforge/23.3.1-fasrc01
 module load python/3.10.12-fasrc01
 module load cuda/11.8.0-fasrc01
 ```
 
 **Create and activate conda environment**
 ```
-mamba env create -f conda-env.yml
+mamba env create -f conda_env.yml
 
 source activate neurorl
 ```
