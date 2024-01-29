@@ -56,8 +56,6 @@ import rlax
 import tree
 
 
-from library.utils import ActorObserver
-
 _PMAP_AXIS_NAME = 'data'
 
 Number = Union[int, float, np.float32, jnp.float32]

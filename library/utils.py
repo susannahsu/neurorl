@@ -19,7 +19,7 @@ import rlax
 import matplotlib.pyplot as plt
 from acme.utils.observers import EnvLoopObserver
 
-from library.basics import ActorObserver, ActorState
+from td_agents.basics import ActorObserver, ActorState
 
 Number = Union[int, float, np.float32, jnp.float32]
 
