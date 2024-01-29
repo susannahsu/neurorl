@@ -67,9 +67,9 @@ class Config(basics.Config):
 
   # Architecture
   state_dim: int = 256
-  reward_layers: Tuple = (32,)
-  policy_layers: Tuple = (128, 32,)
-  value_layers: Tuple = (128, 32,)
+  reward_layers: Tuple[int] = (128,)
+  policy_layers: Tuple[int] = (128, 32)
+  value_layers: Tuple[int] = (512, 512)
 
   transition_blocks: int = 6  # number of resnet blocks
   prediction_blocks: int = 2  # number of resnet blocks
@@ -112,7 +112,7 @@ class Config(basics.Config):
   # number of bins for two-hot rep  max_scalar_value: float = 10.0  # number of bins for two-hot rep
   max_scalar_value: float = 10.0
   # this interpolates between mcts output vs. observed return
-  v_target_source: str = 'reanalyze'
+  value_target_source: str = 'return'
   reanalyze_ratio: float = 0.5  # percent of time to use mcts vs. observed return
   mask_model: bool = True
 
@@ -204,17 +204,17 @@ class MuZeroLossFn(basics.RecurrentLossFn):
                        mctx.gumbel_muzero_policy] = mctx.gumbel_muzero_policy
   invalid_actions: Optional[jax.Array] = None
 
-  simulation_steps : float = .5  # how many time-steps of simulation to learn model with
-  reanalyze_ratio : float = .5  # how often to learn from MCTS data vs. experience
+  simulation_steps : float = 5  # how many time-steps of simulation to learn model with
+  reanalyze_ratio : float = 0.5  # how often to learn from MCTS data vs. experience
   mask_model: bool = True  # mask model outputs when out of bounds of data
   value_target_source: str = 'return'
 
-  scalar_coef: float = 1.0
+  scalar_coef: float = 1e3
   root_policy_coef: float = 1.0      # categorical
   model_policy_coef: float = 10.0    # categorical
-  root_value_coef: float = 0.25e3    # scalar
-  model_value_coef: float = 2.5e3    # scalar
-  model_reward_coef: float = 1.0e3   # scalar
+  root_value_coef: float = 0.25    # scalar
+  model_value_coef: float = 2.5    # scalar
+  model_reward_coef: float = 1.0   # scalar
 
   state_from_preds: Callable[
     [RootOutput], jax.Array] = lambda preds: preds.state
@@ -485,11 +485,11 @@ class MuZeroLossFn(basics.RecurrentLossFn):
 
     # POLICY
     policy_model_target = jnp.concatenate(
-        (policy_target, uniform_policy))
+        (policy_target[1:], uniform_policy))
 
     # STATE FEATURES
-    state_features = data.observation.observation['state_features']
-    dummy_zeros = jnp.zeros((self.simulation_steps-1, state_features.shape[-1]))
+    state_features = data.observation.observation['state_features'][1:]
+    dummy_zeros = jnp.zeros((self.simulation_steps, state_features.shape[-1]))
     state_features_target = jnp.concatenate((state_features, dummy_zeros))
 
     # REWARD
@@ -502,16 +502,16 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     else:
       nz = self.simulation_steps
     dummy_zeros = jnp.zeros(nz)
-    value_model_target = jnp.concatenate((value_target, dummy_zeros))
+    value_model_target = jnp.concatenate((value_target[1:], dummy_zeros))
 
     # for every timestep t=0,...T,  we have predictions for t+1, ..., t+k where k = simulation_steps
     # use rolling window to create T x k prediction targets
     roll = functools.partial(rolling_window, size=self.simulation_steps)
     vmap_roll = jax.vmap(roll, 1, 2)
-    value_model_target = roll(value_model_target[1:])    # [T, k]
+    value_model_target = roll(value_model_target)    # [T, k]
     reward_model_target = roll(reward_model_target)      # [T, k]
     state_features_target = vmap_roll(state_features_target)  # [T, k, features]
-    policy_model_target = vmap_roll(policy_model_target[1:])  # [T, k, actions]
+    policy_model_target = vmap_roll(policy_model_target)  # [T, k, actions]
 
     # ------------
     # get masks for losses

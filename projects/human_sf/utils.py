@@ -15,15 +15,14 @@ def add_batch(nest, batch_size: Optional[int]):
   return jax.tree_util.tree_map(broadcast, nest)
 
 def process_inputs(
+    inputs: observation_action_reward.OAR,
     vision_fn: hk.Module,
     task_encoder: hk.Module,
-    inputs: observation_action_reward.OAR):
-  # convert action to onehot
-  num_primitive_actions = inputs.observation['actions'].shape[-1]
-  # [A, A] array
-  actions = jax.nn.one_hot(
-      inputs.observation['actions'],
-      num_classes=num_primitive_actions)
+    ):
+  # # [A, A] array
+  # actions = jax.nn.one_hot(
+  #     inputs.observation['actions'],
+  #     num_classes=num_primitive_actions)
 
   # convert everything to floats
   inputs = jax.tree_map(lambda x: x.astype(jnp.float32), inputs)
@@ -35,13 +34,13 @@ def process_inputs(
   # rest: object 
   # each are [N, D] where N differs for action and object embeddings
   def mlp(x):
-    x = hk.Linear(128, w_init=hk.initializers.TruncatedNormal())(x)
-    x = hk.Linear(128)(jax.nn.relu(x))
+    x = hk.Linear(256, w_init=hk.initializers.TruncatedNormal())(x)
+    x = hk.Linear(256)(jax.nn.relu(x))
     return x
-  action_mlp = hk.to_module(mlp)('action_mlp')
+  # action_mlp = hk.to_module(mlp)('action_mlp')
   object_mlp = hk.to_module(mlp)('object_mlp')
 
-  actions = action_mlp(actions)
+  # actions = action_mlp(actions)
   objects = object_mlp(inputs.observation['objects'])
 
   #----------------------------

@@ -128,7 +128,7 @@ class Config(r2d2.R2D2Config):
   epsilon_steps: Optional[int] = None
 
   # value-based action-selection options (distributed)
-  evaluation_epsilon: float = 0.01
+  evaluation_epsilon: float = 0.00
   # num_epsilons: int = 10
   # epsilon_min: float = .01
   # epsilon_max: float = .9

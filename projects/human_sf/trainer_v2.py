@@ -142,10 +142,6 @@ class MuZeroConfig(muzero.Config):
   min_scalar_value: Optional[float] = None
   num_bins: Optional[int] = 81  # number of bins for two-hot rep
   scalar_step_size: Optional[float] = None  # step size between bins
-  value_target_source: str = 'return'
-
-  value_layers: Tuple[int] = (512, 512)
-  reward_layers: Tuple[int] = (128,)
 
 def make_keyroom_env(
     seed: int,
@@ -190,13 +186,13 @@ def make_keyroom_env(
   # Gym wrappers
   ####################################
   gym_wrappers = [DictObservationSpaceWrapper]
+
+  gym_wrappers.append(functools.partial(
+    minigrid.wrappers.RGBImgPartialObsWrapper, tile_size=8))
+
   if object_options:
     gym_wrappers.append(functools.partial(
       GotoOptionsWrapper, use_options=object_options))
-  
-  # MUST GO LAST. GotoOptionsWrapper exploits symbolic obs
-  gym_wrappers.append(functools.partial(
-    minigrid.wrappers.RGBImgPartialObsWrapper, tile_size=8))
 
   for wrapper in gym_wrappers:
     env = wrapper(env)
@@ -333,6 +329,7 @@ def setup_experiment_inputs(
             model_policy_coef=config.model_policy_coef,
             model_value_coef=config.model_value_coef,
             model_reward_coef=config.model_reward_coef,
+            scalar_coef=config.scalar_coef,
         ))
     network_factory = functools.partial(
         muzero.make_minigrid_networks,
@@ -618,12 +615,6 @@ def sweep(search: str = 'default'):
     ]
   elif search == 'flat_usfa':
     space = [
-        # {
-        #     "num_steps": tune.grid_search([5e6]),
-        #     "agent": tune.grid_search(['flat_usfa']),
-        #     "seed": tune.grid_search([5]),
-        #     "group": tune.grid_search(['flat_usfa-4-reg']),
-        # },
         {
             "num_steps": tune.grid_search([5e6]),
             "agent": tune.grid_search(['flat_usfa']),
@@ -635,11 +626,12 @@ def sweep(search: str = 'default'):
   elif search == 'flat_muzero':
     space = [
         {
-            "num_steps": tune.grid_search([30e6]),
+            "num_steps": tune.grid_search([5e6]),
             "agent": tune.grid_search(['flat_muzero']),
             "seed": tune.grid_search([5]),
-            "max_sim_depth": tune.grid_search([1]),
-            "group": tune.grid_search(['flat_muzero-1']),
+            "env.basic_only": tune.grid_search([2]),
+            "scalar_coef": tune.grid_search([1, 1e3, 1e4]),
+            "group": tune.grid_search(['flat_muzero-3']),
         },
     ]
   elif search == 'object_q':
@@ -648,8 +640,11 @@ def sweep(search: str = 'default'):
             "num_steps": tune.grid_search([30e6]),
             "agent": tune.grid_search(['object_q']),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['object_q-3']),
-            "trace_length": tune.grid_search([10, 20]),
+            "group": tune.grid_search(['object_q-1']),
+            "dot": tune.grid_search([False, True]),
+            "object_conditioned": tune.grid_search([False, True]),
+            "env.basic_only": tune.grid_search([1]),
+            # "trace_length": tune.grid_search([10, 20]),
         },
     ]
 

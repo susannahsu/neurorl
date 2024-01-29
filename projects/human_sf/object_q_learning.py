@@ -175,6 +175,10 @@ def make_minigrid_networks(
   num_actions = env_spec.actions.num_values
   def make_core_module() -> ObjectOrientedR2D2:
 
+    def make_action_object_mask(objects_mask):
+      action_mask = jnp.ones(num_actions)
+      return jnp.concatenate((action_mask, objects_mask), axis=-1)
+
     def object_qhead(state: jax.Array,
                      task: jax.Array,
                      objects: jax.Array,
@@ -213,11 +217,9 @@ def make_minigrid_networks(
       objects: jax.Array,
       objects_mask: jax.Array):
 
-      import ipdb; ipdb.set_trace()
       out_dim = 128  # [D]
-      task = hk.Linear(out_dim)(task)
+      task = hk.Linear(out_dim)(task)[None]  # [1, D]
 
-      vmultiply = jax.vmap(jnp.multiply, in_axes=(0, None), out_axes=0)
       # --------------
       # primitive actions
       # --------------
@@ -226,8 +228,7 @@ def make_minigrid_networks(
 
       # [A, D]
       primitive_outs = jnp.reshape(primitive_outs, [num_actions, out_dim])
-
-      primitive_qs = vmultiply(primitive_outs, task)
+      primitive_qs = (primitive_outs*task).sum(-1)
 
       # --------------
       # objects actions
@@ -241,13 +242,14 @@ def make_minigrid_networks(
 
       object_inputs = concat(state, objects)
       object_outs = object_qhead(object_inputs)
-      object_outs = jnp.squeeze(object_outs, axis=-1)
-      object_qs = vmultiply(object_outs, task)
+
+      object_qs = (object_outs*task).sum(-1)
 
       # whereover objects not available, but -inf
       # important for learning
-      object_qs = jnp.where(objects_mask, object_qs, -jnp.inf)
+      mask = make_action_object_mask(objects_mask)
       qs = jnp.concatenate((primitive_qs, object_qs))
+      qs = jnp.where(mask, qs, -jnp.inf)
 
       return qs
 
@@ -269,8 +271,7 @@ def make_minigrid_networks(
       #--------------
       # mask
       #--------------
-      action_mask = jnp.ones(num_actions)
-      mask = jnp.concatenate((action_mask, objects_mask), axis=-1)
+      mask = make_action_object_mask(objects_mask)
 
       #--------------
       # objects actions
@@ -289,8 +290,8 @@ def make_minigrid_networks(
 
       del objects
       out_dim = 128  # [D]
-      task = hk.Linear(out_dim)(task)
-      import ipdb; ipdb.set_trace()
+      task = hk.Linear(out_dim)(task)[None]  # [1, D]
+
       #--------------
       # actions
       #--------------
@@ -302,16 +303,14 @@ def make_minigrid_networks(
       outs = jnp.reshape(outs, [total_actions, out_dim])
 
       vmultiply = jax.vmap(jnp.multiply, in_axes=(0, None), out_axes=0)
-      qs = vmultiply(outs, task)
+      qs = (outs*task).sum(-1)
 
       #--------------
       # mask
       #--------------
-      action_mask = jnp.ones(num_actions)
-      mask = jnp.concatenate((action_mask, objects_mask), axis=-1)
-
       # whereover objects not available, but -inf
       # important for learning
+      mask = make_action_object_mask(objects_mask)
       qs =  jnp.where(mask, qs, -jnp.inf)
       return qs
 

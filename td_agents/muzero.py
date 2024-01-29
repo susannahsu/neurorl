@@ -97,7 +97,7 @@ class Config(basics.Config):
   # number of bins for two-hot rep  max_scalar_value: float = 10.0  # number of bins for two-hot rep
   max_scalar_value: float = 10.0
   # this interpolates between mcts output vs. observed return
-  v_target_source: str = 'reanalyze'
+  value_target_source: str = 'reanalyze'
   reanalyze_ratio: float = 0.5  # percent of time to use mcts vs. observed return
   mask_model: bool = True
 

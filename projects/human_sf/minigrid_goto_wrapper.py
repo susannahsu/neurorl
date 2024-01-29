@@ -307,13 +307,14 @@ class GotoOptionsWrapper(Wrapper):
       self.object2idx = { o : i for i, o in  enumerate(self.object_types)}
       assert len(self.object2idx) == len(self.object_types), 'does not work with repeating objects'
 
-      # self.post_env_iter_update(obs, info)
+      self.post_env_iter_update(obs, info)
       return obs, info
 
     def execute_option(self, action):
         option_idx = action - len(self.primitive_actions)
 
-        obj = self.prior_visible_objects[option_idx]
+        # obj = self.prior_visible_objects[option_idx]
+        obj = self.object_types[option_idx]
 
         # if position in front is already goal position, do nothing
         front_pos = self.unwrapped.front_pos
