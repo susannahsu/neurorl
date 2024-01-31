@@ -241,10 +241,9 @@ def make_minigrid_networks(
       model_policy_fn = root_policy_fn
       model_base_transformation = root_base_transformation
 
-    def apply_objects_mask(policy_logits, objects_mask):
+    def make_action_mask(objects_mask):
       action_mask = jnp.ones(num_primitive_actions)
-      action_mask = jnp.concatenate((action_mask, objects_mask), axis=-1)
-      return jnp.where(action_mask, policy_logits, -jnp.inf)
+      return jnp.concatenate((action_mask, objects_mask), axis=-1)
 
     def root_predictor(state: State, objects_mask: jax.Array):
       assert state.ndim in (1, 2), "should be [D] or [B, D]"
@@ -254,12 +253,14 @@ def make_minigrid_networks(
         value_logits = root_value_fn(state)
         policy_logits = root_policy_fn(state)
 
-        policy_logits = apply_objects_mask(policy_logits, objects_mask)
+        action_mask = make_action_mask(objects_mask)
+        policy_logits = jnp.where(action_mask, policy_logits, -jnp.inf)
 
         return RootOutput(
             state=state,
             value_logits=value_logits,
             policy_logits=policy_logits,
+            action_mask=action_mask,
         )
       if state.ndim == 2:
         _root_predictor = jax.vmap(_root_predictor)
@@ -280,7 +281,8 @@ def make_minigrid_networks(
           logits=objects_mask_logits).sample(
             seed=hk.next_rng_key())
 
-        policy_logits = apply_objects_mask(policy_logits, objects_mask)
+        action_mask = make_action_mask(objects_mask)
+        policy_logits = jnp.where(action_mask, policy_logits, -jnp.inf)
 
         return ModelOutput(
             new_state=state,

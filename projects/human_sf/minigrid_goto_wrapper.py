@@ -298,6 +298,7 @@ class GotoOptionsWrapper(Wrapper):
       #############
       self.prior_objects = objects
       self.prior_visible_objects = objects
+      self.prior_object_mask = object_mask
 
     def reset(self, *args, **kwargs):
       self.prior_action = None
@@ -322,20 +323,20 @@ class GotoOptionsWrapper(Wrapper):
 
         # print(f"EXECUTING {option_idx}:", color, shape)
 
-        obj = [o for o in self.prior_visible_objects if match(o)]
-        assert len(obj) == 1, f'mismatches: {obj}'
-        obj = obj[0]
+        match = [o for o in self.prior_visible_objects if match(o)]
+        assert len(match) == 1, f'mismatches: {match}'
+        match = match[0]
 
         # if position in front is already goal position, do nothing
         front_pos = self.unwrapped.front_pos
-        global_pos = obj.global_pos
+        global_pos = match.global_pos
         if front_pos[0] == global_pos[0] and front_pos[1] == global_pos[1]:
           # don't update prior primitive action
           # self.prior_action = action
           return self.env.step(self.actions.done)
 
         # otherwise, generate a trajectory to the goal position
-        bot = GotoBot(self.env, obj.global_pos)
+        bot = GotoBot(self.env, match.global_pos)
         actions, obss, rewards, truncateds, dones, infos = bot.generate_trajectory()
 
         # not doable

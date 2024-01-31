@@ -54,7 +54,7 @@ class Config(basics.Config):
   # Architecture
   state_dim: int = 256
   reward_layers: Tuple[int] = (512, 512)
-  policy_layers: Tuple[int] = (512, 512)
+  policy_layers: Tuple[int] = (128, 32)
   value_layers: Tuple[int] = (512, 512)
 
   transition_blocks: int = 6  # number of resnet blocks
@@ -72,10 +72,10 @@ class Config(basics.Config):
   model_value_coef: float = 2.5
   model_reward_coef: float = 1.0
 
-  discount: float = 0.99
+  discount: float = 0.997**4
   tx_pair: rlax.TxPair = rlax.IDENTITY_PAIR
   batch_size: Optional[int] = 64
-  trace_length: Optional[int] = 20
+  trace_length: Optional[int] = 40
   sequence_period: Optional[int] = None
 
   warmup_steps: int = 1_000
@@ -105,7 +105,7 @@ class Config(basics.Config):
   simulation_steps: int = 5
   num_simulations: int = 4
   max_sim_depth: Optional[int] = None
-  max_sim_depth_eval: Optional[int] = 50
+  max_sim_depth_eval: Optional[int] = None
   q_normalize_epsilon: float = 0.01  # copied from `jax_muzero`
   # muzero_policy: str = 'gumbel_muzero'
 
@@ -126,6 +126,7 @@ class RootOutput:
   state: jax.Array
   value_logits: jax.Array
   policy_logits: jax.Array
+  action_mask: Optional[jax.Array] = None
 
 
 @chex.dataclass(frozen=True)
@@ -239,12 +240,11 @@ class MuZeroLossFn(basics.RecurrentLossFn):
 
   """
   discretizer: utils.Discretizer = utils.Discretizer(
-    max_value=10, num_bins=101)
+    max_value=10, num_bins=81)
   mcts_policy: Union[mctx.muzero_policy,
                        mctx.gumbel_muzero_policy] = mctx.gumbel_muzero_policy
-  invalid_actions: Optional[jax.Array] = None
 
-  simulation_steps : float = .5  # how many time-steps of simulation to learn model with
+  simulation_steps : int = 5  # how many time-steps of simulation to learn model with
   reanalyze_ratio : float = .5  # how often to learn from MCTS data vs. experience
   mask_model: bool = True  # mask model outputs when out of bounds of data
   value_target_source: str = 'return'
@@ -640,8 +640,6 @@ class MuZeroLossFn(basics.RecurrentLossFn):
     )
 
 
-
-
     # ------------
     # objects_mask_loss
     # ------------
@@ -864,12 +862,16 @@ def mcts_select_action(
                             value=value,
                             embedding=preds.state[None])
 
+  invalid_actions = None
+  if preds.action_mask is not None:
+    invalid_actions = 1 - preds.action_mask[None]
   # 1 step of policy improvement
   rng, improve_key = jax.random.split(rng)
   mcts_outputs = mcts_policy(
       params=params,
       rng_key=improve_key,
       root=root,
+      invalid_actions=invalid_actions,
       recurrent_fn=functools.partial(
           model_step,
           discount=jnp.full(value.shape, discount),
@@ -879,10 +881,11 @@ def mcts_select_action(
 
   # batch "0"
   policy_target = mcts_outputs.action_weights[0]
-
   if evaluation:
     action = jnp.argmax(policy_target, axis=-1)
   else:
+    if preds.action_mask is not None:
+      policy_target = jnp.where(preds.action_mask, policy_target, -jnp.inf)
     action = jax.random.categorical(policy_rng, policy_target)
 
   return action, basics.ActorState(
@@ -896,20 +899,26 @@ def muzero_policy_act_mcts_eval(
     discretizer,
     mcts_policy,
     evaluation: bool = True,
+    mcts_train: bool = True,
+    mcts_eval: bool = True,
 ):
   """Returns ActorCore for MuZero."""
+  mcts = functools.partial(
+    mcts_select_action,
+    networks=networks,
+    evaluation=evaluation,
+    mcts_policy=mcts_policy,
+    discretizer=discretizer,
+    discount=config.discount)
+  policy = functools.partial(
+    policy_select_action,
+    networks=networks,
+    evaluation=evaluation)
 
   if evaluation:
-    select_action = functools.partial(mcts_select_action,
-                                      networks=networks,
-                                      evaluation=evaluation,
-                                      mcts_policy=mcts_policy,
-                                      discretizer=discretizer,
-                                      discount=config.discount)
+    select_action = mcts if mcts_eval else policy
   else:
-    select_action = functools.partial(policy_select_action,
-                                      networks=networks,
-                                      evaluation=evaluation)
+    select_action = mcts if mcts_train else policy
 
   def init(rng):
     rng, state_rng = jax.random.split(rng, 2)

@@ -148,7 +148,7 @@ class MuZeroConfig(muzero.Config):
 
 def make_keyroom_env(
     seed: int,
-    room_size: int = 7,
+    room_size: int = 6,
     evaluation: bool = False,
     object_options: bool = False,
     flat_task: bool = True,
@@ -156,7 +156,7 @@ def make_keyroom_env(
     swap_episodes: int = 0,
     maze_idx: int = 0,
     num_task_rooms: int = 2,
-    color_rooms: bool = True,
+    color_rooms: bool = False,
     **kwargs) -> dm_env.Environment:
   """Loads environments.
   
@@ -195,7 +195,10 @@ def make_keyroom_env(
 
   if object_options:
     gym_wrappers.append(functools.partial(
-      GotoOptionsWrapper, use_options=object_options))
+      GotoOptionsWrapper,
+      max_options=15,
+      use_options=True,
+      ))
 
   for wrapper in gym_wrappers:
     env = wrapper(env)
@@ -248,7 +251,7 @@ def setup_experiment_inputs(
       get_actor_core_fn=basics.get_actor_core,
       ActorCls=functools.partial(
         basics.BasicActor,
-        observers=[q_learning.Observer(period=1 if debug else 500)]
+        observers=[q_learning.Observer(period=1 if debug else 2000)]
       ),
       LossFn=q_learning.R2D2LossFn(
         discount=config.discount,
@@ -272,7 +275,7 @@ def setup_experiment_inputs(
       config=config,
       ActorCls=functools.partial(
         basics.BasicActor,
-        observers=[usfa.Observer(plot_success_only=True, period=1 if debug else 500)]
+        observers=[usfa.Observer(plot_success_only=True, period=1 if debug else 2000)]
       ),
       get_actor_core_fn=functools.partial(
         usfa.get_actor_core,
@@ -291,55 +294,6 @@ def setup_experiment_inputs(
       ))
     network_factory = functools.partial(
             usfa.make_minigrid_networks, config=config)
-
-  elif agent == 'scalar_flat_muzero':
-    # has no mechanism to select from object options since dependent on what agent sees
-    env_kwargs['object_options'] = False
-
-    config = MuZeroConfig(**config_kwargs)
-
-    import mctx
-    # currently using same policy in learning and acting
-    mcts_policy = functools.partial(
-        mctx.gumbel_muzero_policy,
-        max_depth=config.max_sim_depth,
-        num_simulations=config.num_simulations,
-        gumbel_scale=config.gumbel_scale)
-
-    discretizer = None
-
-    builder = basics.Builder(
-        config=config,
-        get_actor_core_fn=functools.partial(
-            scalar_muzero.muzero_policy_act_mcts_eval,
-            mcts_policy=mcts_policy,
-            discretizer=discretizer,
-        ),
-        optimizer_cnstr=scalar_muzero.muzero_optimizer_constr,
-        LossFn=scalar_muzero.MuZeroLossFn(
-            discount=config.discount,
-            importance_sampling_exponent=config.importance_sampling_exponent,
-            burn_in_length=config.burn_in_length,
-            max_replay_size=config.max_replay_size,
-            max_priority_weight=config.max_priority_weight,
-            bootstrap_n=config.bootstrap_n,
-            value_target_source=config.value_target_source,
-            discretizer=discretizer,
-            mcts_policy=mcts_policy,
-            simulation_steps=config.simulation_steps,
-            reanalyze_ratio=config.reanalyze_ratio,
-            root_policy_coef=config.root_policy_coef,
-            root_value_coef=config.root_value_coef,
-            model_policy_coef=config.model_policy_coef,
-            model_value_coef=config.model_value_coef,
-            model_reward_coef=config.model_reward_coef,
-            model_features_coef=config.model_features_coef,
-            scalar_coef=config.scalar_coef,
-        ))
-    network_factory = functools.partial(
-        scalar_muzero.make_minigrid_networks,
-        config=config,
-        task_encoder=task_encoder)
 
   elif agent == 'flat_muzero':
     # has no mechanism to select from object options since dependent on what agent sees
@@ -801,11 +755,43 @@ def sweep(search: str = 'default'):
             "agent": tune.grid_search(['object_muzero']),
             "seed": tune.grid_search([5]),
             "group": tune.grid_search(['object_muzero-2']),
-            "env.basic_only": tune.grid_search([1]),
+            "env.basic_only": tune.grid_search([0]),
             # "trace_length": tune.grid_search([10, 20]),
         },
     ]
-
+  elif search == 'q':
+    space = [
+        {
+            "num_steps": tune.grid_search([30e6]),
+            "agent": tune.grid_search(['object_q', 'flat_q']),
+            "seed": tune.grid_search([6]),
+            "group": tune.grid_search(['q-2']),
+            "env.basic_only": tune.grid_search([0]),
+        },
+    ]
+  elif search == 'muzero':
+    space = [
+        {
+            "num_steps": tune.grid_search([30e6]),
+            "agent": tune.grid_search(['object_muzero', 'flat_muzero']),
+            "seed": tune.grid_search([6]),
+            "group": tune.grid_search(['muzero-2']),
+            "env.basic_only": tune.grid_search([0]),
+            "trace_length": tune.grid_search([40]),
+        },
+    ]
+  elif search == 'benchmark':
+    space = [
+        {
+            "num_steps": tune.grid_search([30e6]),
+            "agent": tune.grid_search([
+              'object_muzero', 'flat_muzero', 'object_q', 'flat_q']),
+            "seed": tune.grid_search([6]),
+            "group": tune.grid_search(['benchmark-2']),
+            "env.basic_only": tune.grid_search([0]),
+            # "trace_length": tune.grid_search([40]),
+        },
+    ]
   else:
     raise NotImplementedError(search)
 
