@@ -1,18 +1,29 @@
+"""
+Main changes:
+- predicting objects mask
+- masking policy with objects mask (visible at current time-step)
+"""
 import functools
 
 from typing import Optional, Tuple, Optional, Callable, Union, Any
 
-import dataclasses
+from acme import specs
+
+import distrax
 import haiku as hk
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 import library.networks as networks
+from library.utils import scale_gradient 
+from library import muzero_mlps
 
 from td_agents import basics
 from td_agents.basics import MbrlNetworks, make_mbrl_network
-from td_agents import muzero
+
+from projects.human_sf import muzero
+from projects.human_sf import utils
+
 
 BatchSize = int
 PRNGKey = jax.random.KeyArray
@@ -55,11 +66,13 @@ class ObjectOrientedMuZero(hk.RNNCore):
     self._root_pred_fn = root_pred_fn
     self._model_pred_fn = model_pred_fn
 
-    self.process_inputs = functools.partial(
+    process_inputs = functools.partial(
       utils.process_inputs,
       vision_fn=vision_fn,
       task_encoder=task_encoder,
       )
+    self.process_inputs = hk.to_module(process_inputs)(
+      "process_inputs")
 
   def initial_state(self,
                     batch_size: Optional[int] = None,
@@ -83,9 +96,11 @@ class ObjectOrientedMuZero(hk.RNNCore):
         Tuple[RootOutput, State]: single muzero output and single new state.
     """
 
-    state_input = self._vision_fn(inputs)  # [D+A+1]
+    image, task, reward, objects, objects_mask = self.process_inputs(inputs)
+    state_input = jnp.concatenate((image, task, reward), axis=-1)
+
     hidden, new_state = self._state_fn(state_input, state)
-    root_outputs = self._root_pred_fn(hidden)
+    root_outputs = self._root_pred_fn(hidden, objects_mask)
 
     return root_outputs, new_state
 
@@ -104,10 +119,13 @@ class ObjectOrientedMuZero(hk.RNNCore):
         Tuple[RootOutput, State]: muzero outputs and single new state.
     """
     # [T, B, D+A+1]
-    state_input = hk.BatchApply(self._vision_fn)(inputs)
+    image, task, reward, objects, objects_mask = hk.BatchApply(
+      jax.vmap(self.process_inputs))(inputs)  # [T, B, D+A+1]
+    state_input = jnp.concatenate((image, task, reward), axis=-1)
+
     all_hidden, new_state = hk.static_unroll(
         self._state_fn, state_input, state)
-    root_output = hk.BatchApply(self._root_pred_fn)(all_hidden)
+    root_output = hk.BatchApply(self._root_pred_fn)(all_hidden, objects_mask)
 
     return root_output, new_state
 
@@ -156,70 +174,6 @@ class ObjectOrientedMuZero(hk.RNNCore):
     # [T, D], [D]
     return model_output, new_state
 
-def get_actor_core(
-    networks: MbrlNetworks,
-    config: Config,
-    discretizer: Optional[utils.Discretizer] = None,
-    mcts_policy: Optional[
-      Union[mctx.muzero_policy, mctx.gumbel_muzero_policy]] = None,
-    evaluation: bool = True,
-):
-  """Returns ActorCore for MuZero."""
-
-  if config.action_source == 'policy':
-    select_action = functools.partial(
-      policy_select_action,
-      networks=networks,
-      evaluation=evaluation)
-  elif config.action_source == 'value':
-    select_action = functools.partial(
-      value_select_action,
-      networks=networks,
-      evaluation=evaluation,
-      discretizer=discretizer,
-      discount=config.discount)
-  elif config.action_source == 'mcts':
-    select_action = functools.partial(
-      mcts_select_action,
-      networks=networks,
-      evaluation=evaluation,
-      mcts_policy=mcts_policy,
-      discretizer=discretizer,
-      discount=config.discount)
-  else:
-    raise NotImplementedError(config.action_source)
-
-  def init(
-      rng: networks_lib.PRNGKey,
-  ) -> basics.ActorState[actor_core_lib.RecurrentState]:
-    rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
-    initial_core_state = networks.init_recurrent_state(
-        state_rng)
-    if evaluation:
-      epsilon = config.evaluation_epsilon
-    else:
-      epsilon = jax.random.choice(
-        epsilon_rng,
-        np.logspace(
-          start=config.epsilon_min,
-          stop=config.epsilon_max,
-          num=config.num_epsilons,
-          base=config.epsilon_base))
-    return basics.ActorState(
-        rng=rng,
-        epsilon=epsilon,
-        recurrent_state=initial_core_state,
-        prev_recurrent_state=initial_core_state)
-
-  def get_extras(
-          state: basics.ActorState[actor_core_lib.RecurrentState]) -> actor_core_lib.Extras:
-    return {'core_state': state.prev_recurrent_state}
-
-  return actor_core_lib.ActorCore(init=init,
-                                  select_action=select_action,
-                                  get_extras=get_extras)
-
-
 def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,
         config: Config,
@@ -227,8 +181,10 @@ def make_minigrid_networks(
         **kwargs) -> MbrlNetworks:
   """Builds default MuZero networks for BabyAI tasks."""
 
-  num_actions = env_spec.actions.num_values
-  state_dim = config.state_dim
+  num_primitive_actions = env_spec.actions.num_values
+  num_possible_objects = env_spec.observations.observation[
+    'objects_mask'].shape[-1]
+  num_actions = num_primitive_actions + num_possible_objects
 
   def make_core_module() -> MbrlNetworks:
 
@@ -265,6 +221,10 @@ def make_minigrid_networks(
         config.value_layers, config.num_bins, name='pred_root_value')
     root_policy_fn = muzero_mlps.PredictionMlp(
         config.policy_layers, num_actions, name='pred_root_policy')
+
+    model_objects_mask_fn = muzero_mlps.PredictionMlp(
+        config.policy_layers,
+        num_possible_objects, name='pred_model_objects')
     model_reward_fn = muzero_mlps.PredictionMlp(
         config.reward_layers, config.num_bins, name='pred_model_reward')
 
@@ -281,13 +241,20 @@ def make_minigrid_networks(
       model_policy_fn = root_policy_fn
       model_base_transformation = root_base_transformation
 
-    def root_predictor(state: State):
+    def apply_objects_mask(policy_logits, objects_mask):
+      action_mask = jnp.ones(num_primitive_actions)
+      action_mask = jnp.concatenate((action_mask, objects_mask), axis=-1)
+      return jnp.where(action_mask, policy_logits, -jnp.inf)
+
+    def root_predictor(state: State, objects_mask: jax.Array):
       assert state.ndim in (1, 2), "should be [D] or [B, D]"
 
-      def _root_predictor(state: State):
+      def _root_predictor(state: State, objects_mask: jax.Array):
         state = root_base_transformation(state)
-        policy_logits = root_policy_fn(state)
         value_logits = root_value_fn(state)
+        policy_logits = root_policy_fn(state)
+
+        policy_logits = apply_objects_mask(policy_logits, objects_mask)
 
         return RootOutput(
             state=state,
@@ -296,7 +263,7 @@ def make_minigrid_networks(
         )
       if state.ndim == 2:
         _root_predictor = jax.vmap(_root_predictor)
-      return _root_predictor(state)
+      return _root_predictor(state, objects_mask)
 
     def model_predictor(state: State):
       assert state.ndim in (1, 2), "should be [D] or [B, D]"
@@ -308,19 +275,29 @@ def make_minigrid_networks(
         policy_logits = model_policy_fn(state)
         value_logits = model_value_fn(state)
 
+        objects_mask_logits = model_objects_mask_fn(state)
+        objects_mask = distrax.Bernoulli(
+          logits=objects_mask_logits).sample(
+            seed=hk.next_rng_key())
+
+        policy_logits = apply_objects_mask(policy_logits, objects_mask)
+
         return ModelOutput(
             new_state=state,
             value_logits=value_logits,
             policy_logits=policy_logits,
             reward_logits=reward_logits,
+            objects_mask_logits=objects_mask_logits,
         )
       if state.ndim == 2:
         _model_predictor = jax.vmap(_model_predictor)
       return _model_predictor(state)
 
     return ObjectOrientedMuZero(
-        observation_fn=observation_fn,
-        state_fn=state_fn,
+        vision_fn=networks.BabyAIVisionTorso(
+          conv_dim=16, out_dim=config.state_dim),
+        state_fn=hk.LSTM(config.state_dim),
+        task_encoder=task_encoder,
         transition_fn=transition_fn,
         root_pred_fn=root_predictor,
         model_pred_fn=model_predictor)

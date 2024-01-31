@@ -28,7 +28,7 @@ Array = acme_types.NestedArray
 @dataclasses.dataclass
 class Config(basics.Config):
   q_dim: int = 512
-  object_conditioned: bool = True
+  object_conditioned: bool = False
   dot: bool = True
 
 class ObjectOrientedR2D2(hk.RNNCore):
@@ -48,11 +48,15 @@ class ObjectOrientedR2D2(hk.RNNCore):
     self._memory = memory
     self._object_qhead = object_qhead
     self._task_encoder = task_encoder
-    self.process_inputs = functools.partial(
+
+    process_inputs = functools.partial(
       utils.process_inputs,
       vision_fn=vision_fn,
       task_encoder=task_encoder,
       )
+
+    self.process_inputs = hk.to_module(process_inputs)(
+      "process_inputs")
 
   def initial_state(self, batch_size: Optional[int],
                     **unused_kwargs) -> hk.LSTMState:

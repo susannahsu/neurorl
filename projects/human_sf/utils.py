@@ -17,7 +17,7 @@ def add_batch(nest, batch_size: Optional[int]):
 def process_inputs(
     inputs: observation_action_reward.OAR,
     vision_fn: hk.Module,
-    task_encoder: hk.Module,
+    task_encoder: Optional[hk.Module] = None,
     ):
   # # [A, A] array
   # actions = jax.nn.one_hot(
@@ -57,7 +57,9 @@ def process_inputs(
   image = vision_fn(image)  # [D+A+1]
 
   # task
-  task = task_encoder(inputs.observation['task'])
+  task = None
+  if task_encoder:
+    task = task_encoder(inputs.observation)
 
   # reward = jnp.tanh(inputs.reward)
   reward = jnp.expand_dims(inputs.reward, axis=-1)

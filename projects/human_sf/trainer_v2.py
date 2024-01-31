@@ -82,10 +82,13 @@ import library.utils as utils
 
 from td_agents import basics
 
-from td_agents import usfa
 from projects.human_sf import q_learning
 from projects.human_sf import object_q_learning
 from projects.human_sf import muzero
+from projects.human_sf import object_muzero
+from projects.human_sf import scalar_muzero
+from projects.human_sf import usfa
+# from projects.human_sf import object_usfa
 
 from projects.human_sf import key_room_v3 as key_room
 
@@ -232,6 +235,9 @@ def setup_experiment_inputs(
   # flat agents
   #################################
 
+  task_encoder = lambda obs: hk.nets.MLP(
+    (128, 128), activate_final=True)(obs['task'])
+
   if agent == 'flat_q':
     # has no mechanism to select from object options since dependent on what agent sees
     env_kwargs['object_options'] = False
@@ -255,9 +261,7 @@ def setup_experiment_inputs(
     network_factory = functools.partial(
       q_learning.make_minigrid_networks,
       config=config,
-      task_encoder=lambda obs: hk.nets.MLP(
-        (128, 128), activate_final=True)(obs['task']))
-
+      task_encoder=task_encoder)
 
   elif agent == 'flat_usfa':
     # has no mechanism to select from object options since dependent on what agent sees
@@ -288,7 +292,7 @@ def setup_experiment_inputs(
     network_factory = functools.partial(
             usfa.make_minigrid_networks, config=config)
 
-  elif agent == 'flat_muzero':
+  elif agent == 'scalar_flat_muzero':
     # has no mechanism to select from object options since dependent on what agent sees
     env_kwargs['object_options'] = False
 
@@ -307,12 +311,12 @@ def setup_experiment_inputs(
     builder = basics.Builder(
         config=config,
         get_actor_core_fn=functools.partial(
-            muzero.muzero_policy_act_mcts_eval,
+            scalar_muzero.muzero_policy_act_mcts_eval,
             mcts_policy=mcts_policy,
             discretizer=discretizer,
         ),
-        optimizer_cnstr=muzero.muzero_optimizer_constr,
-        LossFn=muzero.MuZeroLossFn(
+        optimizer_cnstr=scalar_muzero.muzero_optimizer_constr,
+        LossFn=scalar_muzero.MuZeroLossFn(
             discount=config.discount,
             importance_sampling_exponent=config.importance_sampling_exponent,
             burn_in_length=config.burn_in_length,
@@ -329,13 +333,73 @@ def setup_experiment_inputs(
             model_policy_coef=config.model_policy_coef,
             model_value_coef=config.model_value_coef,
             model_reward_coef=config.model_reward_coef,
+            model_features_coef=config.model_features_coef,
             scalar_coef=config.scalar_coef,
+        ))
+    network_factory = functools.partial(
+        scalar_muzero.make_minigrid_networks,
+        config=config,
+        task_encoder=task_encoder)
+
+  elif agent == 'flat_muzero':
+    # has no mechanism to select from object options since dependent on what agent sees
+    env_kwargs['object_options'] = False
+
+    config = muzero.Config(**config_kwargs)
+
+    import mctx
+    mcts_act_policy = functools.partial(
+        mctx.gumbel_muzero_policy,
+        max_depth=config.max_sim_depth_eval,
+        num_simulations=config.num_simulations,
+        gumbel_scale=config.gumbel_scale)
+
+    # currently using same policy in learning and acting
+    mcts_learn_policy = functools.partial(
+        mctx.gumbel_muzero_policy,
+        max_depth=config.max_sim_depth,
+        num_simulations=config.num_simulations,
+        gumbel_scale=config.gumbel_scale)
+
+
+    discretizer = utils.Discretizer(
+                  num_bins=config.num_bins,
+                  step_size=config.scalar_step_size,
+                  max_value=config.max_scalar_value,
+                  tx_pair=config.tx_pair,
+              )
+    config.num_bins = discretizer.num_bins
+
+    builder = basics.Builder(
+        config=config,
+        get_actor_core_fn=functools.partial(
+            muzero.muzero_policy_act_mcts_eval,
+            mcts_policy=mcts_act_policy,
+            discretizer=discretizer,
+        ),
+        optimizer_cnstr=muzero.muzero_optimizer_constr,
+        LossFn=muzero.MuZeroLossFn(
+            discount=config.discount,
+            importance_sampling_exponent=config.importance_sampling_exponent,
+            burn_in_length=config.burn_in_length,
+            max_replay_size=config.max_replay_size,
+            max_priority_weight=config.max_priority_weight,
+            bootstrap_n=config.bootstrap_n,
+            value_target_source=config.value_target_source,
+            discretizer=discretizer,
+            mcts_policy=mcts_learn_policy,
+            simulation_steps=config.simulation_steps,
+            reanalyze_ratio=config.reanalyze_ratio,
+            root_policy_coef=config.root_policy_coef,
+            root_value_coef=config.root_value_coef,
+            model_policy_coef=config.model_policy_coef,
+            model_value_coef=config.model_value_coef,
+            model_reward_coef=config.model_reward_coef,
         ))
     network_factory = functools.partial(
         muzero.make_minigrid_networks,
         config=config,
-        task_encoder=lambda obs: hk.nets.MLP(
-              (128, 128), activate_final=True)(obs['task']))
+        task_encoder=task_encoder)
   #################################
   # object centric agents
   #################################
@@ -360,17 +424,15 @@ def setup_experiment_inputs(
     network_factory = functools.partial(
       object_q_learning.make_minigrid_networks,
       config=config,
-      task_encoder=lambda obs: hk.nets.MLP(
-        (128, 128), activate_final=True)(obs))
+      task_encoder=task_encoder)
 
   elif agent == 'object_usfa':
+    env_kwargs['object_options'] = True  # has no mechanism to select from object options since dependent on what agent sees
+
     config = usfa.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      get_actor_core_fn=functools.partial(
-        basics.get_actor_core,
-        extract_q_values=lambda preds: preds.q_values,
-        ),
+      get_actor_core_fn=object_usfa.get_actor_core,
       LossFn=usfa.UsfaLossFn(
         discount=config.discount,
 
@@ -382,8 +444,94 @@ def setup_experiment_inputs(
       ))
     # NOTE: main differences below
     network_factory = functools.partial(
-            usfa.make_object_oriented_minigrid_networks, config=config)
+      usfa.make_object_oriented_minigrid_networks,
+      config=config)
+
+  elif agent == 'object_usfa_att':
     env_kwargs['object_options'] = True  # has no mechanism to select from object options since dependent on what agent sees
+    env_kwargs['flat_task'] = False  # has no mechanism to select from object options since dependent on what agent sees
+    raise NotImplementedError('uncomment below and finis')
+    # config = usfa.Config(**config_kwargs)
+    # builder = basics.Builder(
+    #   config=config,
+    #   get_actor_core_fn=object_usfa.get_actor_core,
+    #   LossFn=usfa.UsfaLossFn(
+    #     discount=config.discount,
+
+    #     importance_sampling_exponent=config.importance_sampling_exponent,
+    #     burn_in_length=config.burn_in_length,
+    #     max_replay_size=config.max_replay_size,
+    #     max_priority_weight=config.max_priority_weight,
+    #     bootstrap_n=config.bootstrap_n,
+    #   ))
+    # # NOTE: main differences below
+    # network_factory = functools.partial(
+    #   object_usfa.make_object_oriented_minigrid_networks,
+    #   config=config,
+    #   task_encoder=task_encoder,
+    #   attribute_factorization=True)
+
+  elif agent == 'object_muzero':
+    # has no mechanism to select from object options since dependent on what agent sees
+    env_kwargs['object_options'] = True
+
+    config = muzero.Config(**config_kwargs)
+
+    import mctx
+    mcts_act_policy = functools.partial(
+        mctx.gumbel_muzero_policy,
+        max_depth=config.max_sim_depth_eval,
+        num_simulations=config.num_simulations,
+        gumbel_scale=config.gumbel_scale)
+
+    # currently using same policy in learning and acting
+    mcts_learn_policy = functools.partial(
+        mctx.gumbel_muzero_policy,
+        max_depth=config.max_sim_depth,
+        num_simulations=config.num_simulations,
+        gumbel_scale=config.gumbel_scale)
+
+
+    discretizer = utils.Discretizer(
+                  num_bins=config.num_bins,
+                  step_size=config.scalar_step_size,
+                  max_value=config.max_scalar_value,
+                  tx_pair=config.tx_pair,
+              )
+    config.num_bins = discretizer.num_bins
+
+    builder = basics.Builder(
+        config=config,
+        get_actor_core_fn=functools.partial(
+            muzero.muzero_policy_act_mcts_eval,
+            mcts_policy=mcts_act_policy,
+            discretizer=discretizer,
+        ),
+        optimizer_cnstr=muzero.muzero_optimizer_constr,
+        LossFn=muzero.MuZeroLossFn(
+            discount=config.discount,
+            importance_sampling_exponent=config.importance_sampling_exponent,
+            burn_in_length=config.burn_in_length,
+            max_replay_size=config.max_replay_size,
+            max_priority_weight=config.max_priority_weight,
+            bootstrap_n=config.bootstrap_n,
+            value_target_source=config.value_target_source,
+            discretizer=discretizer,
+            mcts_policy=mcts_learn_policy,
+            simulation_steps=config.simulation_steps,
+            reanalyze_ratio=config.reanalyze_ratio,
+            root_policy_coef=config.root_policy_coef,
+            root_value_coef=config.root_value_coef,
+            model_policy_coef=config.model_policy_coef,
+            model_value_coef=config.model_value_coef,
+            model_reward_coef=config.model_reward_coef,
+            object_options_mask=True,
+        ))
+    network_factory = functools.partial(
+        object_muzero.make_minigrid_networks,
+        config=config,
+        task_encoder=task_encoder)
+
   else:
     raise NotImplementedError(agent)
 
@@ -629,9 +777,8 @@ def sweep(search: str = 'default'):
             "num_steps": tune.grid_search([5e6]),
             "agent": tune.grid_search(['flat_muzero']),
             "seed": tune.grid_search([5]),
-            "env.basic_only": tune.grid_search([2]),
-            "scalar_coef": tune.grid_search([1, 1e3, 1e4]),
-            "group": tune.grid_search(['flat_muzero-3']),
+            "env.basic_only": tune.grid_search([1]),
+            "group": tune.grid_search(['flat_muzero-6']),
         },
     ]
   elif search == 'object_q':
@@ -640,9 +787,20 @@ def sweep(search: str = 'default'):
             "num_steps": tune.grid_search([30e6]),
             "agent": tune.grid_search(['object_q']),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['object_q-1']),
+            "group": tune.grid_search(['object_q-2']),
             "dot": tune.grid_search([False, True]),
             "object_conditioned": tune.grid_search([False, True]),
+            "env.basic_only": tune.grid_search([1]),
+            # "trace_length": tune.grid_search([10, 20]),
+        },
+    ]
+  elif search == 'object_muzero':
+    space = [
+        {
+            "num_steps": tune.grid_search([30e6]),
+            "agent": tune.grid_search(['object_muzero']),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['object_muzero-2']),
             "env.basic_only": tune.grid_search([1]),
             # "trace_length": tune.grid_search([10, 20]),
         },

@@ -205,7 +205,7 @@ class Observer(basics.ActorObserver):
     actions = jnp.stack(self.actions)[:npreds]
     q_values = rlax.batched_index(q_values, actions)
 
-    rewards = jnp.stack([t.reward for t in self.timesteps])[1:]
+    rewards = jnp.stack([t.reward for t in self.timesteps[1:]])
     # Create a figure and axis
     fig, ax = plt.subplots()
     ax.plot(q_values, label='q_values')
