@@ -254,7 +254,7 @@ def make_minigrid_networks(
         policy_logits = root_policy_fn(state)
 
         action_mask = make_action_mask(objects_mask)
-        policy_logits = jnp.where(action_mask, policy_logits, -jnp.inf)
+        policy_logits = jnp.where(action_mask, policy_logits, -1e8)
 
         return RootOutput(
             state=state,
@@ -282,7 +282,7 @@ def make_minigrid_networks(
             seed=hk.next_rng_key())
 
         action_mask = make_action_mask(objects_mask)
-        policy_logits = jnp.where(action_mask, policy_logits, -jnp.inf)
+        policy_logits = jnp.where(action_mask, policy_logits, -1e8)
 
         return ModelOutput(
             new_state=state,

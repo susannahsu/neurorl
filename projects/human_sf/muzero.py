@@ -885,7 +885,7 @@ def mcts_select_action(
     action = jnp.argmax(policy_target, axis=-1)
   else:
     if preds.action_mask is not None:
-      policy_target = jnp.where(preds.action_mask, policy_target, -jnp.inf)
+      policy_target = jnp.where(preds.action_mask, policy_target, -1e8)
     action = jax.random.categorical(policy_rng, policy_target)
 
   return action, basics.ActorState(
