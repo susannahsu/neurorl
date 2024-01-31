@@ -52,8 +52,9 @@ class Config(basics.Config):
   """Configuration options for MuZero agent."""
 
   # Architecture
+  out_conv_dim: int = 0
   state_dim: int = 256
-  reward_layers: Tuple[int] = (512, 512)
+  reward_layers: Tuple[int] = (128,)
   policy_layers: Tuple[int] = (128, 32)
   value_layers: Tuple[int] = (512, 512)
 

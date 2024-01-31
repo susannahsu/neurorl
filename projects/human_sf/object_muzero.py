@@ -297,7 +297,7 @@ def make_minigrid_networks(
 
     return ObjectOrientedMuZero(
         vision_fn=networks.BabyAIVisionTorso(
-          conv_dim=16, out_dim=config.state_dim),
+          conv_dim=config.out_conv_dim, out_dim=config.state_dim),
         state_fn=hk.LSTM(config.state_dim),
         task_encoder=task_encoder,
         transition_fn=transition_fn,
