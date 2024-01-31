@@ -683,9 +683,9 @@ class MuZeroLossFn(basics.RecurrentLossFn):
 
       objects_mask_loss = jnp.zeros_like(reward_loss)
       if self.object_options_mask:
-        import ipdb; ipdb.set_trace()
         mask_log_prob = -distrax.Bernoulli(
         model_outputs_.objects_mask_logits).log_prob(objects_mask_target_)
+        mask_log_prob = mask_log_prob.mean(-1)
         objects_mask_loss = utils.episode_mean(mask_log_prob, policy_mask_)
 
       return reward_ce, value_ce, policy_ce, reward_loss, value_loss, policy_loss, objects_mask_loss

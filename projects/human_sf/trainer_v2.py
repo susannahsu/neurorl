@@ -88,7 +88,7 @@ from projects.human_sf import muzero
 from projects.human_sf import object_muzero
 from projects.human_sf import scalar_muzero
 from projects.human_sf import usfa
-# from projects.human_sf import object_usfa
+from projects.human_sf import object_usfa
 
 from projects.human_sf import key_room_v3 as key_room
 
