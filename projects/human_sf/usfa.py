@@ -34,13 +34,13 @@ class Config(basics.Config):
 
   final_conv_dim: int = 16
   conv_flat_dim: Optional[int] = 0
-  sf_layers : Tuple[int]=(256, 256)
-  policy_layers : Tuple[int]=(256, 256)
+  sf_layers : Tuple[int]=(1024, 1024)
+  policy_layers : Tuple[int]=(128, 128)
   combine_policy: str = 'sum'
 
   head: str = 'monolithic'
-  sf_coeff: float = 1.0
-  q_coeff: float = 0.0
+  sf_coeff: float = 1e3
+  q_coeff: float = 1.0
   sf_loss: str = 'qlearning'
 
 def cumulants_from_env(data, online_preds, online_state, target_preds, target_state):
@@ -225,7 +225,8 @@ class UsfaLossFn(basics.RecurrentLossFn):
     td_error_fn = jax.vmap(td_error_fn, in_axes=1, out_axes=1)
 
     # vmap over policy dimension (N), return N in dim=2
-    td_error_fn = jax.vmap(td_error_fn, in_axes=(2, None, 2, 2, None, None), out_axes=2)
+    td_error_fn = jax.vmap(
+      td_error_fn, in_axes=(2, None, 2, 2, None, None), out_axes=2)
 
     # output = [0=T, 1=B, 2=N, 3=C]
     sf_td_error = td_error_fn(
@@ -235,7 +236,6 @@ class UsfaLossFn(basics.RecurrentLossFn):
       selector_actions[1:],  # [T, B, N]       (vmap 2,1)
       cumulants,  # [T-1, B, C]       (vmap None,1)
       discounts[:-1])  # [T, B]          (vmap None,1)
-
 
     #---------------------
     # Q-learning TD-error
@@ -278,11 +278,22 @@ class UsfaLossFn(basics.RecurrentLossFn):
       else:
         q_loss = (0.5 * jnp.square(value_td_error)).mean(axis=(0,2,3))
 
-      batch_loss += q_loss*self.q_coeff
+      batch_loss = batch_loss + q_loss*self.q_coeff
 
     cumulant_reward = (cumulants*task_w).sum(-1)
     reward_error = (cumulant_reward - data.reward[:-1])
-    metrics = {      '0.total_loss': batch_loss,
+
+    if online_preds.action_mask is not None:
+      mask = online_preds.action_mask[:,:,None]  # [T, B, 1, A]
+
+      # [T, B, N, A]
+      online_q = online_q*mask
+
+      # [T, B, N, A, D]
+      online_sf = online_sf*mask[:,:,:,:, None]
+
+    metrics = {
+      '0.total_loss': batch_loss,
       f'0.1.sf_loss_{self.loss_fn}': sf_loss,
       '0.1.q_loss': q_loss,
       '2.q_td_error': jnp.abs(value_td_error),
@@ -477,13 +488,14 @@ class USFAPreds(NamedTuple):
   sf: jnp.ndarray # successor features
   policy: jnp.ndarray  # policy vector
   task: jnp.ndarray  # task vector (potentially embedded)
+  action_mask: Optional[jax.Array] = None
 
 class MonolithicSfHead(hk.Module):
   def __init__(self,
-               layers: int,
+               layers: Tuple[int],
                num_actions: int,
                state_features_dim: int,
-               combine_policy: str = 'concat',
+               combine_policy: str = 'sum',
                policy_layers : Tuple[int]=(32,),
                name: Optional[str] = None):
     super(MonolithicSfHead, self).__init__(name=name)
@@ -495,7 +507,7 @@ class MonolithicSfHead(hk.Module):
 
     self.sf_net = hk.nets.MLP(
         tuple(layers)+(num_actions * state_features_dim,))
-
+    self.layers = layers
     self.num_actions = num_actions
     self.state_features_dim = state_features_dim
     self.combine_policy = combine_policy
@@ -518,12 +530,17 @@ class MonolithicSfHead(hk.Module):
 
     dim = sf_input.shape[-1]
     linear = lambda x: hk.Linear(dim, with_bias=False)(x)
+    out_linear = lambda x: hk.Linear(self.layers[-1], with_bias=False)(x)
+
     if self.combine_policy == 'concat':
       sf_input = jnp.concatenate((sf_input, policy))  # 2D
+      # sf_input = jax.nn.relu(out_linear(jax.nn.relu(sf_input)))
     elif self.combine_policy == 'product':
-      sf_input = linear(jax.nn.relu(sf_input))*linear(policy)
+      sf_input = linear(sf_input)*linear(policy)
+      # sf_input = jax.nn.relu(out_linear(jax.nn.relu(sf_input)))
     elif self.combine_policy == 'sum':
-      sf_input = linear(jax.nn.relu(sf_input))+linear(policy)
+      sf_input = linear(sf_input)+linear(policy)
+      # sf_input = jax.nn.relu(out_linear(jax.nn.relu(sf_input)))
     else:
       raise NotImplementedError
 
@@ -805,7 +822,6 @@ def make_minigrid_networks(
 
   def make_core_module() -> UsfaArch:
     vision_torso = networks.BabyAIVisionTorso(
-        flatten=True,
         conv_dim=config.final_conv_dim,
         out_dim=config.conv_flat_dim)
 
@@ -827,7 +843,7 @@ def make_minigrid_networks(
       state_features_dim=state_features_dim,
       num_actions=num_actions,
       policy_layers=config.policy_layers,
-      # combine_policy=config.combine_policy,
+      combine_policy=config.combine_policy,
       )
     
 

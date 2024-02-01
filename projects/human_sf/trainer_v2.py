@@ -124,7 +124,7 @@ class UsfaConfig(usfa.Config):
   final_conv_dim: int = 16
   conv_flat_dim: Optional[int] = 0
   sf_layers : Tuple[int]=(256, 256)
-  policy_layers : Tuple[int]=(256, 256)
+  policy_layers : Tuple[int]=(128, 128)
 
   # learner
   importance_sampling_exponent: float = 0.0
@@ -330,6 +330,8 @@ def setup_experiment_inputs(
             muzero.muzero_policy_act_mcts_eval,
             mcts_policy=mcts_act_policy,
             discretizer=discretizer,
+            mcts_train=config.mcts_train,
+            mcts_eval=config.mcts_eval,
         ),
         optimizer_cnstr=muzero.muzero_optimizer_constr,
         LossFn=muzero.MuZeroLossFn(
@@ -364,9 +366,7 @@ def setup_experiment_inputs(
     config = ObjectQlearningConfig(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      get_actor_core_fn=functools.partial(
-        object_q_learning.get_actor_core,
-      ),
+      get_actor_core_fn=object_q_learning.get_actor_core,
       LossFn=q_learning.R2D2LossFn(
         discount=config.discount,
         importance_sampling_exponent=config.importance_sampling_exponent,
@@ -383,40 +383,44 @@ def setup_experiment_inputs(
   elif agent == 'object_usfa':
     env_kwargs['object_options'] = True  # has no mechanism to select from object options since dependent on what agent sees
 
-    config = usfa.Config(**config_kwargs)
+    config = UsfaConfig(**config_kwargs)
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=object_usfa.get_actor_core,
       LossFn=usfa.UsfaLossFn(
         discount=config.discount,
-
         importance_sampling_exponent=config.importance_sampling_exponent,
         burn_in_length=config.burn_in_length,
         max_replay_size=config.max_replay_size,
         max_priority_weight=config.max_priority_weight,
         bootstrap_n=config.bootstrap_n,
+        sf_coeff=config.sf_coeff,
+        loss_fn=config.sf_loss,
+        q_coeff=config.q_coeff,
       ))
     # NOTE: main differences below
     network_factory = functools.partial(
-      usfa.make_object_oriented_minigrid_networks,
+      object_usfa.make_minigrid_networks,
       config=config)
 
   elif agent == 'object_usfa_att':
     env_kwargs['object_options'] = True  # has no mechanism to select from object options since dependent on what agent sees
     env_kwargs['flat_task'] = False  # has no mechanism to select from object options since dependent on what agent sees
     raise NotImplementedError('uncomment below and finis')
-    # config = usfa.Config(**config_kwargs)
+    # config = UsfaConfig(**config_kwargs)
     # builder = basics.Builder(
     #   config=config,
     #   get_actor_core_fn=object_usfa.get_actor_core,
     #   LossFn=usfa.UsfaLossFn(
     #     discount=config.discount,
-
     #     importance_sampling_exponent=config.importance_sampling_exponent,
     #     burn_in_length=config.burn_in_length,
     #     max_replay_size=config.max_replay_size,
     #     max_priority_weight=config.max_priority_weight,
     #     bootstrap_n=config.bootstrap_n,
+    #     sf_coeff=config.sf_coeff,
+    #     loss_fn=config.sf_loss,
+    #     q_coeff=config.q_coeff,
     #   ))
     # # NOTE: main differences below
     # network_factory = functools.partial(
@@ -429,7 +433,7 @@ def setup_experiment_inputs(
     # has no mechanism to select from object options since dependent on what agent sees
     env_kwargs['object_options'] = True
 
-    config = muzero.Config(**config_kwargs)
+    config = object_muzero.Config(**config_kwargs)
 
     import mctx
     mcts_act_policy = functools.partial(
@@ -460,6 +464,7 @@ def setup_experiment_inputs(
             muzero.muzero_policy_act_mcts_eval,
             mcts_policy=mcts_act_policy,
             discretizer=discretizer,
+            mcts_train=config.mcts_train,
         ),
         optimizer_cnstr=muzero.muzero_optimizer_constr,
         LossFn=muzero.MuZeroLossFn(
@@ -742,8 +747,8 @@ def sweep(search: str = 'default'):
             "agent": tune.grid_search(['object_q']),
             "seed": tune.grid_search([5]),
             "group": tune.grid_search(['object_q-2']),
-            "dot": tune.grid_search([False, True]),
-            "object_conditioned": tune.grid_search([False, True]),
+            # "dot": tune.grid_search([False, True]),
+            # "object_conditioned": tune.grid_search([False, True]),
             "env.basic_only": tune.grid_search([1]),
             # "trace_length": tune.grid_search([10, 20]),
         },
@@ -759,6 +764,19 @@ def sweep(search: str = 'default'):
             # "trace_length": tune.grid_search([10, 20]),
         },
     ]
+  elif search == 'usfa':
+    space = [
+        {
+            "num_steps": tune.grid_search([5e6]),
+            "agent": tune.grid_search(['object_usfa']),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['usfa-9']),
+            "env.basic_only": tune.grid_search([1]),
+            "combine_policy": tune.grid_search(['sum']),
+            "sf_coeff": tune.grid_search([0.0]),
+            "sf_layers": tune.grid_search([[1024, 1024]]),
+        },
+    ]
   elif search == 'q':
     space = [
         {
@@ -772,25 +790,37 @@ def sweep(search: str = 'default'):
   elif search == 'muzero':
     space = [
         {
-            "num_steps": tune.grid_search([30e6]),
+            "num_steps": tune.grid_search([5e6]),
             "agent": tune.grid_search(['object_muzero', 'flat_muzero']),
             "seed": tune.grid_search([6]),
-            "group": tune.grid_search(['muzero-2']),
-            "env.basic_only": tune.grid_search([0]),
-            "trace_length": tune.grid_search([40]),
+            "group": tune.grid_search(['muzero-3']),
+            "mcts_train": tune.grid_search([True, False]),
+            "env.basic_only": tune.grid_search([1]),
         },
     ]
+
   elif search == 'benchmark':
     space = [
         {
             "num_steps": tune.grid_search([30e6]),
             "agent": tune.grid_search([
-              'object_muzero', 'flat_muzero', 'object_q', 'flat_q']),
+              'object_muzero', 'object_usfa', 'object_q',
+              'flat_muzero', 'flat_usfa']),
             "seed": tune.grid_search([6]),
-            "group": tune.grid_search(['benchmark-2']),
+            "group": tune.grid_search(['benchmark-4']),
             "env.basic_only": tune.grid_search([0]),
-            # "trace_length": tune.grid_search([40]),
+            # "trace_length": tune.grid_search([20]),
+            # "out_conv_dim": tune.grid_search([16, 0]),
         },
+        # {
+        #     "num_steps": tune.grid_search([30e6]),
+        #     "agent": tune.grid_search([
+        #       'object_q']),
+        #     "seed": tune.grid_search([6]),
+        #     "group": tune.grid_search(['benchmark-4']),
+        #     "env.basic_only": tune.grid_search([0]),
+        #     "trace_length": tune.grid_search([40]),
+        # },
     ]
   else:
     raise NotImplementedError(search)

@@ -24,11 +24,13 @@ from td_agents import basics
 from projects.human_sf import utils
 
 Array = acme_types.NestedArray
+LARGE_NEGATIVE = -1e7
 
 @dataclasses.dataclass
 class Config(basics.Config):
   out_conv_dim: int = 0
-  q_dim: int = 512
+  out_dim: int = 128
+  q_dim: int = 256
   object_conditioned: bool = False
   dot: bool = True
 
@@ -93,7 +95,7 @@ class ObjectOrientedR2D2(hk.RNNCore):
     core_outputs, new_states = hk.static_unroll(
       self._memory, state_input, state)
 
-    q_values = hk.BatchApply(jax.vmap(self._object_qhead))(core_outputs, task, objects, objects_mask)  # [T, B, A]
+    q_values = jax.vmap(jax.vmap(self._object_qhead))(core_outputs, task, objects, objects_mask)  # [T, B, A]
     return q_values, new_states
 
 def get_actor_core(
@@ -118,7 +120,7 @@ def get_actor_core(
       axis=-1)
 
     def uniform(rng):
-      logits = jnp.where(valid_actions, valid_actions, -1e8)
+      logits = jnp.where(valid_actions, valid_actions, LARGE_NEGATIVE)
 
       return jax.random.categorical(rng, logits)
 
@@ -180,7 +182,7 @@ def make_minigrid_networks(
   num_actions = int(env_spec.actions.num_values)
   def make_core_module() -> ObjectOrientedR2D2:
 
-    def make_action_object_mask(objects_mask):
+    def make_action_mask(objects_mask):
       action_mask = jnp.ones(num_actions)
       return jnp.concatenate((action_mask, objects_mask), axis=-1)
 
@@ -211,7 +213,7 @@ def make_minigrid_networks(
 
       # whereover objects not available, but -inf
       # important for learning
-      object_qs =  jnp.where(objects_mask, object_qs, -1e8)
+      object_qs =  jnp.where(objects_mask, object_qs, LARGE_NEGATIVE)
       qs = jnp.concatenate((primitive_qs, object_qs))
 
       return qs
@@ -222,8 +224,8 @@ def make_minigrid_networks(
       objects: jax.Array,
       objects_mask: jax.Array):
 
-      out_dim = 128  # [D]
-      task = hk.nets.MLP((out_dim, out_dim))[None]  # [1, D]
+      out_dim = config.out_dim  # [D]
+      task = hk.nets.MLP((out_dim, out_dim))(task)[None]  # [1, D]
 
       # --------------
       # primitive actions
@@ -252,9 +254,9 @@ def make_minigrid_networks(
 
       # whereover objects not available, but -inf
       # important for learning
-      mask = make_action_object_mask(objects_mask)
+      mask = make_action_mask(objects_mask)
       qs = jnp.concatenate((primitive_qs, object_qs))
-      qs = jnp.where(mask, qs, -1e8)
+      qs = jnp.where(mask, qs, LARGE_NEGATIVE)
 
       return qs
 
@@ -270,20 +272,20 @@ def make_minigrid_networks(
       # actions
       #--------------
       nobjects = objects_mask.shape[-1]
-      qhead=hk.nets.MLP([config.q_dim, num_actions + nobjects])
+      qhead = hk.nets.MLP([config.q_dim, num_actions + nobjects])
       qs = qhead(state)
 
       #--------------
       # mask
       #--------------
-      mask = make_action_object_mask(objects_mask)
+      mask = make_action_mask(objects_mask)
 
       #--------------
       # objects actions
       #--------------
       # whereover objects not available, but -inf
       # important for learning
-      qs =  jnp.where(mask, qs, -1e8)
+      qs =  jnp.where(mask, qs, LARGE_NEGATIVE)
 
       return qs
 
@@ -294,8 +296,8 @@ def make_minigrid_networks(
       objects_mask: jax.Array):
 
       del objects
-      out_dim = 128  # [D]
-      task = hk.nets.MLP((out_dim, out_dim))[None]  # [1, D]
+      out_dim = config.out_dim  # [D]
+      task = hk.nets.MLP((out_dim, out_dim))(task)[None]  # [1, D]
 
       #--------------
       # actions
@@ -314,8 +316,8 @@ def make_minigrid_networks(
       #--------------
       # whereover objects not available, but -inf
       # important for learning
-      mask = make_action_object_mask(objects_mask)
-      qs =  jnp.where(mask, qs, -1e8)
+      mask = make_action_mask(objects_mask)
+      qs =  jnp.where(mask, qs, LARGE_NEGATIVE)
       return qs
 
     if config.dot:

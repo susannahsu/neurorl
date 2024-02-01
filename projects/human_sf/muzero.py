@@ -45,7 +45,7 @@ StateFn = Callable[[Params, PRNGKey, Observation, State],
                    Tuple[NetworkOutput, State]]
 RootFn = Callable[[State], Tuple[State, PolicyLogits, ValueLogits]]
 ModelFn = Callable[[State], Tuple[State, RewardLogits, PolicyLogits, ValueLogits]]
-
+LARGE_NEGATIVE = -1e7
 
 @dataclasses.dataclass
 class Config(basics.Config):
@@ -65,6 +65,8 @@ class Config(basics.Config):
 
   # actor hps
   action_source: str = 'policy'  # 'policy', 'mcts'
+  mcts_train: bool = False
+  mcts_eval: bool = True
 
   # Learner options
   root_policy_coef: float = 1.0
@@ -886,7 +888,7 @@ def mcts_select_action(
     action = jnp.argmax(policy_target, axis=-1)
   else:
     if preds.action_mask is not None:
-      policy_target = jnp.where(preds.action_mask, policy_target, -1e8)
+      policy_target = jnp.where(preds.action_mask, policy_target, LARGE_NEGATIVE)
     action = jax.random.categorical(policy_rng, policy_target)
 
   return action, basics.ActorState(

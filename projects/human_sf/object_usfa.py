@@ -26,23 +26,37 @@ from projects.human_sf import usfa
 from projects.human_sf import object_q_learning
 
 Array = acme_types.NestedArray
+LARGE_NEGATIVE = -1e7
 
 get_actor_core = functools.partial(
   object_q_learning.get_actor_core,
   extract_q_values=lambda preds: preds.q_values)
 
+def make_action_mask(objects_mask, num_actions):
+  num_primitive_actions = num_actions - objects_mask.shape[-1]
+  action_mask = jnp.ones(num_primitive_actions)
+  return jnp.concatenate((action_mask, objects_mask), axis=-1)
+
 def mask_predictions(
     predictions: usfa.USFAPreds,
     objects_mask: jax.Array):
-  q_values = predictions.q_values  # [A]
-  sf = predictions.sf  # [A, D]
 
-  import ipdb; ipdb.set_trace()
+  num_actions = predictions.q_values.shape[-1]
+  action_mask = make_action_mask(objects_mask, num_actions)
+
+  mask = lambda x: jnp.where(action_mask, x, LARGE_NEGATIVE)
+
+  q_values = mask(predictions.q_values)  # [A]
+
+  # vmap over dims 0 and 2
+  mask = jax.vmap(mask)
+  mask = jax.vmap(mask, 2, 2)
+  sf = mask(predictions.sf)   # [N, A, Cumulants]
 
   return predictions._replace(
     q_values=q_values,
     sf=sf,
-  )
+    action_mask=action_mask)
 
 class ObjectOrientedUsfaArch(hk.RNNCore):
   """Universal Successor Feature Approximator."""
@@ -73,7 +87,6 @@ class ObjectOrientedUsfaArch(hk.RNNCore):
     image, _, _, _, objects_mask = self.process_inputs(inputs)
     core_outputs, new_state = self._memory(image, state)
 
-    import ipdb; ipdb.set_trace()
     if evaluation:
       predictions = self._sf_head.evaluate(
         task=inputs.observation['task'],
@@ -106,7 +119,7 @@ class ObjectOrientedUsfaArch(hk.RNNCore):
     core_outputs, new_states = hk.static_unroll(
       self._memory, image, state)
 
-    predictions = jax.vmap(jax.vmap(self._head))(
+    predictions = jax.vmap(jax.vmap(self._sf_head))(
         core_outputs,                # [T, B, D]
         inputs.observation['task'],  # [T, B]
       )
@@ -116,12 +129,16 @@ class ObjectOrientedUsfaArch(hk.RNNCore):
 
     return predictions, new_states
 
-def make_object_oriented_minigrid_networks(
+def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,
         config: usfa.Config) -> networks_lib.UnrollableNetwork:
   """Builds default USFA networks for Minigrid games."""
 
-  num_actions = env_spec.actions.num_values
+  num_primitive_actions = env_spec.actions.num_values
+  num_possible_objects = env_spec.observations.observation[
+    'objects_mask'].shape[-1]
+  num_actions = num_primitive_actions + num_possible_objects
+
   state_features_dim = env_spec.observations.observation['state_features'].shape[0]
 
   def make_core_module() -> ObjectOrientedUsfaArch:
@@ -131,7 +148,7 @@ def make_object_oriented_minigrid_networks(
       state_features_dim=state_features_dim,
       num_actions=num_actions,
       policy_layers=config.policy_layers,
-      # combine_policy=config.combine_policy,
+      combine_policy=config.combine_policy,
     )
     usfa_head = usfa.SfGpiHead(
       num_actions=num_actions,
@@ -142,9 +159,10 @@ def make_object_oriented_minigrid_networks(
 
     return ObjectOrientedUsfaArch(
       vision_fn=networks.BabyAIVisionTorso(
-          conv_dim=16, out_dim=config.state_dim),
+        conv_dim=config.final_conv_dim,
+        out_dim=config.conv_flat_dim),
       memory=hk.LSTM(config.state_dim),
-      head=usfa_head)
+      sf_head=usfa_head)
 
   return networks_lib.make_unrollable_network(
     env_spec, make_core_module)

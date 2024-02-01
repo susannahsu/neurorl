@@ -185,7 +185,9 @@ class GotoOptionsWrapper(Wrapper):
           self.actions.toggle,
           self.actions.done,  # does nothing
         ]
-
+        self.prior_objects = None
+        self.prior_visible_objects = None
+        self.prior_object_mask = None
         env.reset()
         max_options = max(max_options, len(env.all_objects))
 
@@ -266,7 +268,7 @@ class GotoOptionsWrapper(Wrapper):
          (self.max_options, 5*self.max_dims_per_feature),
          dtype=np.uint8)
 
-      object_mask = np.zeros((self.max_options),dtype=np.uint8)
+      object_mask = np.zeros((self.max_options), dtype=np.uint8)
 
       for _, obj in enumerate(objects):
         color, type = obj.category
@@ -283,19 +285,23 @@ class GotoOptionsWrapper(Wrapper):
       #############
       # Update observation
       #############
-      obs['actions'] = self.primitive_actions_arr
-      obs['objects'] = object_info
-      obs['objects_mask'] = object_mask
-      info['nactions'] = len(self.primitive_actions_arr) + nobjects
-      info['nobjects'] = nobjects
+      obs['actions'] = np.array(self.primitive_actions_arr)
+      obs['objects'] = np.array(object_info)
+      obs['objects_mask'] = np.array(object_mask)
+      # info['nactions'] = len(self.primitive_actions_arr) + nobjects
+      # info['nobjects'] = nobjects
 
-      info['actions'] = self.primitive_actions + [
-          f'go to {IDX_TO_COLOR[o.color]} {IDX_TO_OBJECT[o.type]}' for o in objects
-      ]
-      info['actions'] = {idx: action for idx, action in enumerate(info['actions'])}
+      # info['actions'] = self.primitive_actions + [
+      #     f'go to {IDX_TO_COLOR[o.color]} {IDX_TO_OBJECT[o.type]}' for o in objects
+      # ]
+      # info['actions'] = {idx: action for idx, action in enumerate(info['actions'])}
       #############
       # Update environment variables
       #############
+      del self.prior_objects
+      del self.prior_visible_objects
+      del self.prior_object_mask
+
       self.prior_objects = objects
       self.prior_visible_objects = objects
       self.prior_object_mask = object_mask

@@ -9,6 +9,7 @@ from typing import Optional, Tuple, Optional, Callable, Union, Any
 
 from acme import specs
 
+import dataclasses
 import distrax
 import haiku as hk
 import jax
@@ -44,8 +45,13 @@ ModelFn = Callable[[State], Tuple[State, RewardLogits, PolicyLogits, ValueLogits
 
 RootOutput = muzero.RootOutput
 ModelOutput = muzero.ModelOutput
+LARGE_NEGATIVE = -1e7
 
-Config = muzero.Config
+
+@dataclasses.dataclass
+class Config(muzero.Config):
+  trace_length: int = 20
+  out_conv_dim: int = 16
 
 class ObjectOrientedMuZero(hk.RNNCore):
   """MuZero Network Architecture.
@@ -96,7 +102,7 @@ class ObjectOrientedMuZero(hk.RNNCore):
         Tuple[RootOutput, State]: single muzero output and single new state.
     """
 
-    image, task, reward, objects, objects_mask = self.process_inputs(inputs)
+    image, task, reward, _, objects_mask = self.process_inputs(inputs)
     state_input = jnp.concatenate((image, task, reward), axis=-1)
 
     hidden, new_state = self._state_fn(state_input, state)
@@ -119,7 +125,7 @@ class ObjectOrientedMuZero(hk.RNNCore):
         Tuple[RootOutput, State]: muzero outputs and single new state.
     """
     # [T, B, D+A+1]
-    image, task, reward, objects, objects_mask = hk.BatchApply(
+    image, task, reward, _, objects_mask = hk.BatchApply(
       jax.vmap(self.process_inputs))(inputs)  # [T, B, D+A+1]
     state_input = jnp.concatenate((image, task, reward), axis=-1)
 
@@ -254,7 +260,7 @@ def make_minigrid_networks(
         policy_logits = root_policy_fn(state)
 
         action_mask = make_action_mask(objects_mask)
-        policy_logits = jnp.where(action_mask, policy_logits, -1e8)
+        policy_logits = jnp.where(action_mask, policy_logits, LARGE_NEGATIVE)
 
         return RootOutput(
             state=state,
@@ -282,7 +288,7 @@ def make_minigrid_networks(
             seed=hk.next_rng_key())
 
         action_mask = make_action_mask(objects_mask)
-        policy_logits = jnp.where(action_mask, policy_logits, -1e8)
+        policy_logits = jnp.where(action_mask, policy_logits, LARGE_NEGATIVE)
 
         return ModelOutput(
             new_state=state,

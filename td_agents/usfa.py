@@ -805,7 +805,6 @@ def make_minigrid_networks(
 
   def make_core_module() -> UsfaArch:
     vision_torso = networks.BabyAIVisionTorso(
-        flatten=True,
         conv_dim=config.final_conv_dim,
         out_dim=config.conv_flat_dim)
 
