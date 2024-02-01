@@ -97,13 +97,6 @@ pip install dm-haiku==0.0.10
 unset LD_LIBRARY
 unset PYTHONPATH
 
-# load env
-source activate neurorl
-
-# load modules
-module load python/3.10.12-fasrc01
-module load cuda/11.8.0-fasrc01
-
 # set environment variables
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib
 export PYTHONPATH=$PYTHONPATH:.

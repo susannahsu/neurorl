@@ -182,7 +182,7 @@ class AvgStateTDObserver(ActorObserver):
   def observe_timestep(self, state: ActorState, timestep: dm_env.TimeStep) -> None:
     """Observe next.
     
-    Should be state after previous time-step along"""
+    Should be time-step after selecting action"""
     import ipdb; ipdb.set_trace()
 
   def get_metrics(self) -> Dict[str, Number]:
