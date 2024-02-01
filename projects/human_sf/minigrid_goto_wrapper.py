@@ -29,6 +29,95 @@ def flat_to_matrix(unique_index, num_columns):
     col = unique_index % num_columns
     return int(row), int(col)
 
+
+class GoNextToSubgoal(bot_lib.Subgoal):
+    """Simplified version of BabyAI subgoal.
+
+    only accepts tuples for pos
+    """
+
+    def replan_before_action(self):
+        target_obj = None
+        target_pos = tuple(self.datum)
+
+        # Suppore we are walking towards the door that we would like to open,
+        # it is locked, and we don't have the key. What do we do? If we are carrying
+        # something, it makes to just continue, as we still need to bring this object
+        # close to the door. If we are not carrying anything though, then it makes
+        # sense to change the plan and go straight for the required key.
+
+        # The position we are on is the one we should go next to
+        # -> Move away from it
+
+        if np.array_equal(target_pos, self.fwd_pos):
+            self.bot.stack.pop()
+            return
+
+        # We are still far from the target
+        # -> try to find a non-blocker path
+        path, _, _ = self.bot._shortest_path(
+            lambda pos, cell: pos == target_pos,
+        )
+
+        # No non-blocker path found and
+        # reexploration within the room is not allowed or there is nothing to explore
+        # -> Look for blocker paths
+        if not path:
+            path, _, _ = self.bot._shortest_path(
+                lambda pos, cell: pos == target_pos, try_with_blockers=True
+            )
+
+        # So there is a path (blocker, or non-blockers)
+        # -> try following it
+        next_cell = np.asarray(path[0])
+
+        # Choose the action in the case when the forward cell
+        # is the one we should go next to
+        if np.array_equal(next_cell, self.fwd_pos):
+            if self.fwd_cell:
+               return self.actions.done
+            else:
+                return self.actions.forward
+
+        # The forward cell is not the one we should go to
+        # -> turn towards the direction we need to go
+        if np.array_equal(next_cell - self.pos, self.right_vec):
+            return self.actions.right
+        elif np.array_equal(next_cell - self.pos, -self.right_vec):
+            return self.actions.left
+
+        # If we reach this point in the code,  then the cell is behind us.
+        # Instead of choosing left or right randomly,
+        # let's do something that might be useful:
+        # Because when we're GoingNextTo for the purpose of exploring,
+        # things might change while on the way to the position we're going to, we should
+        # pick this right or left wisely.
+        # The simplest thing we should do is: pick the one
+        # that doesn't lead you to face a non empty cell.
+        # One better thing would be to go to the direction
+        # where the closest wall/door is the furthest
+        distance_right = self.bot._closest_wall_or_door_given_dir(
+            self.pos, self.right_vec
+        )
+        distance_left = self.bot._closest_wall_or_door_given_dir(
+            self.pos, -self.right_vec
+        )
+        if distance_left > distance_right:
+            return self.actions.left
+        return self.actions.right
+
+    def replan_after_action(self, action_taken):
+        if action_taken in [
+            self.actions.pickup,
+            self.actions.drop,
+            self.actions.toggle,
+        ]:
+            self._plan_undo_action(action_taken)
+
+    def is_exploratory(self):
+        return self.reason == "Explore"
+
+
 class GotoBot(bot_lib.BabyAIBot):
   """"""
   def __init__(self, env, loc):
@@ -42,7 +131,7 @@ class GotoBot(bot_lib.BabyAIBot):
     # Stack of tasks/subtasks to complete (tuples)
     # self.subgoals = subgoals = self.mission.task.subgoals()
     self.loc = loc
-    self.goal = bot_lib.GoNextToSubgoal(self, loc, reason='none')
+    self.goal = GoNextToSubgoal(self, loc, reason='none')
     self.stack = [self.goal]
     self.stack.reverse()
 
@@ -78,7 +167,7 @@ class GotoBot(bot_lib.BabyAIBot):
     while self.stack:
       idx += 1
       if idx > 1000:
-        raise RuntimeError("Taking too long")
+        raise RuntimeError(f"generate_trajectory taking too long {idx}")
 
       action = self.replan(action_taken)
 
@@ -135,7 +224,12 @@ class GotoBot(bot_lib.BabyAIBot):
         self.stack[-1].replan_after_action(action_taken)
     
     suggested_action = None
+    idx = 0
     while self.stack:
+        idx += 1
+        if idx > 1000:
+          import ipdb; ipdb.set_trace()
+          raise RuntimeError(f"replan taking too long {idx}")
         subgoal = self.stack[-1]
         suggested_action = subgoal.replan_before_action()
         # If is not clear what can be done for the current subgoal
@@ -193,6 +287,7 @@ class GotoOptionsWrapper(Wrapper):
 
         self.primitive_actions_arr = np.array(
            [int(a) for a in self.primitive_actions], dtype=np.uint8)
+        nactions = len(self.primitive_actions_arr)
         self.max_options = max_options
 
         if not partial_obs:
@@ -217,11 +312,17 @@ class GotoOptionsWrapper(Wrapper):
             shape=(max_options,),  # number of cells
             dtype="uint8",
         )
+        action_mask_space = spaces.Box(
+            low=0, high=255, # doesn't matter
+            shape=(nactions+max_options,),  # number of cells
+            dtype="uint8",
+        )
         self.observation_space = spaces.Dict(
             {**self.observation_space.spaces,
              "actions": actions_space,
              "objects": objects_space,
              "objects_mask": objects_mask_space,
+             "action_mask": action_mask_space,
              }
         )
 
@@ -288,6 +389,8 @@ class GotoOptionsWrapper(Wrapper):
       obs['actions'] = np.array(self.primitive_actions_arr)
       obs['objects'] = np.array(object_info)
       obs['objects_mask'] = np.array(object_mask)
+      obs['action_mask'] = np.concatenate((np.ones(len(self.primitive_actions_arr)), object_mask))
+
       # info['nactions'] = len(self.primitive_actions_arr) + nobjects
       # info['nobjects'] = nobjects
 
@@ -327,7 +430,7 @@ class GotoOptionsWrapper(Wrapper):
         def match(x):
            return x.category == (color, shape)
 
-        # print(f"EXECUTING {option_idx}:", color, shape)
+        # print(f"EXECUTING OPTION {option_idx}: go to", color, shape)
 
         match = [o for o in self.prior_visible_objects if match(o)]
         assert len(match) == 1, f'mismatches: {match}'
@@ -341,7 +444,11 @@ class GotoOptionsWrapper(Wrapper):
           # self.prior_action = action
           return self.env.step(self.actions.done)
 
+        if self.env.carrying:
+          if self.env.carrying.color == color and self.env.carrying.type == shape:
+            return self.env.step(self.actions.done)
         # otherwise, generate a trajectory to the goal position
+
         bot = GotoBot(self.env, match.global_pos)
         actions, obss, rewards, truncateds, dones, infos = bot.generate_trajectory()
 
@@ -376,26 +483,30 @@ class GotoOptionsWrapper(Wrapper):
         return obs, reward, terminated, truncated, info
 
 def main():
-  from projects.human_sf.key_room import KeyRoom
+  from projects.human_sf.key_room_v3 import KeyRoom
   import minigrid
   import random
   from pprint import pprint
-  env = KeyRoom(num_dists=0, fixed_door_locs=False)
+  import json
+  json_file = 'projects/human_sf/maze_pairs.json'
+  with open(json_file, 'r') as file:
+      maze_configs = json.load(file)
+
+  env = KeyRoom(maze_config=maze_configs[0])
   env = minigrid.wrappers.DictObservationSpaceWrapper(env)
   env = GotoOptionsWrapper(env)
   env = minigrid.wrappers.RGBImgObsWrapper(env, tile_size=12)
 
 
-  obs, info = env.reset()
 
-  for t in range(100):
-      actions = list(range(obs['nactions']))
-      print(t, "="*10, f'{len(actions)} actions', "="*10)
-      print(actions)
-      pprint(info['actions'])
-      action = random.choice(actions)
-      print(f"Action taken {action}:", info['actions'][action])
-      obs, reward, done, truncated, info = env.step(action)
+  for idx in range(500):
+    print(idx)
+    obs, info = env.reset()
+    for t in range(100):
+        mask = obs['action_mask']
+        action = np.random.multinomial(1, pvals=mask/mask.sum(), size=1)
+        action = action[0].argmax(-1)
+        obs, reward, done, truncated, info = env.step(action)
 
 if __name__ == "__main__":
   main()
