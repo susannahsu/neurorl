@@ -7,7 +7,7 @@ python -m ipdb -c continue configs/catch_trainer.py \
   --parallel='none' \
   --run_distributed=False \
   --debug=True \
-  --use_wandb=False \
+  --use_wandb=True \
   --wandb_entity=wcarvalho92 \
   --wandb_project=catch_debug \
   --search='baselines'

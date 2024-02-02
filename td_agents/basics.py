@@ -56,8 +56,6 @@ import rlax
 import tree
 
 
-from library.utils import ActorObserver
-
 _PMAP_AXIS_NAME = 'data'
 
 Number = Union[int, float, np.float32, jnp.float32]
@@ -830,7 +828,7 @@ def get_actor_core(
     networks: r2d2_networks.R2D2Networks,
     config: Config,
     evaluation: bool = False,
-    linear_epsilon: bool = True,
+    linear_epsilon: bool = False,
     extract_q_values = lambda preds: preds
 ) -> r2d2_actor.R2D2Policy:
   """Returns ActorCore for R2D2."""

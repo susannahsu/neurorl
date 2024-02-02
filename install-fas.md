@@ -1,10 +1,6 @@
 # Install
 
 ## Setting up conda environment
-**Activate interactive terminal**
-```
-salloc -p gpu -t 0-06:00 --mem=8000 --gres=gpu:1
-```
 
 **load modules**
 ```
@@ -97,6 +93,14 @@ pip install dm-haiku==0.0.10
 # reset LD_LIBRARY PATH
 unset LD_LIBRARY
 unset PYTHONPATH
+
+# reset env
+mamba deactivate
+
+module load python/3.10.12-fasrc01
+module load cuda/11.8.0-fasrc01
+
+source activate neurorl
 
 # set environment variables
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib

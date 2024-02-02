@@ -65,8 +65,8 @@ import minigrid
 
 from td_agents import basics
 
+from envs.minigrid_wrappers import DictObservationSpaceWrapper
 from library.dm_env_wrappers import GymWrapper
-import library.env_wrappers as env_wrappers
 import library.experiment_builder as experiment_builder
 import library.parallel as parallel
 import library.utils as utils
@@ -101,7 +101,7 @@ def make_environment(seed: int,
   # environments: https://minigrid.farama.org/environments/babyai/
   env = gymnasium.make(level)
   env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
-  env = env_wrappers.DictObservationSpaceWrapper(env)
+  env = DictObservationSpaceWrapper(env)
 
   # convert to dm_env.Environment enironment
   env = GymWrapper(env)
@@ -140,13 +140,9 @@ def setup_experiment_inputs(
     config = q_learning.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      get_actor_core_fn=functools.partial(
-        basics.get_actor_core,
-        linear_epsilon=config.linear_epsilon,
-      ),
+      get_actor_core_fn=basics.get_actor_core,
       LossFn=q_learning.R2D2LossFn(
         discount=config.discount,
-        
         importance_sampling_exponent=config.importance_sampling_exponent,
         burn_in_length=config.burn_in_length,
         max_replay_size=config.max_replay_size,
