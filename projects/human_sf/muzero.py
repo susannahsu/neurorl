@@ -47,6 +47,7 @@ RootFn = Callable[[State], Tuple[State, PolicyLogits, ValueLogits]]
 ModelFn = Callable[[State], Tuple[State, RewardLogits, PolicyLogits, ValueLogits]]
 LARGE_NEGATIVE = -1e7
 
+
 @dataclasses.dataclass
 class Config(basics.Config):
   """Configuration options for MuZero agent."""
@@ -207,6 +208,17 @@ def model_step(params: networks_lib.Params,
   )
   reward = discretizer.logits_to_scalar(model_output.reward_logits)
   value = discretizer.logits_to_scalar(model_output.value_logits)
+  policy_logits = model_output.policy_logits
+  if model_output.objects_mask_logits is not None:
+    rng_key, model_key = jax.random.split(rng_key)
+    objects_mask = distrax.Bernoulli(
+      logits=model_output.objects_mask_logits).sample(seed=model_key)
+
+    batch_size, num_actions = policy_logits.shape
+    num_primitive_actions = num_actions - objects_mask.shape[-1]
+    action_mask = jnp.concatenate(
+      (jnp.ones((batch_size, num_primitive_actions)), objects_mask), axis=-1)
+    policy_logits = jnp.where(action_mask, policy_logits, LARGE_NEGATIVE)
 
   recurrent_fn_output = mctx.RecurrentFnOutput(
       reward=reward,

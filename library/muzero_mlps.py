@@ -151,6 +151,7 @@ class PredictionMlp(hk.Module):
                ln: bool = True,
                w_init: Optional[hk.initializers.Initializer] = None,
                output_init = None,
+               activation: str = 'relu',
                name="pred_mlp"):
     super().__init__(name=name)
     self._num_predictions = num_predictions
@@ -158,16 +159,17 @@ class PredictionMlp(hk.Module):
     self._w_init = w_init
     self._output_init = output_init
     self._ln = ln
+    self.activation = getattr(jax.nn, activation)
 
   def __call__(self, x):
     if self._ln:
       x = hk.LayerNorm(axis=(-1), create_scale=True, create_offset=True)(x)
-    x = jax.nn.relu(x)
+    x = self.activation(x)
     for l in self._mlp_layers:
       x = hk.Linear(l, w_init=self._w_init, with_bias=False)(x)
       if self._ln:
         x = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(x)
-      x = jax.nn.relu(x)
+      x = self.activation(x)
 
     return hk.Linear(self._num_predictions, w_init=self._output_init)(x)
 

@@ -42,6 +42,8 @@ class Config(basics.Config):
   sf_coeff: float = 1e3
   q_coeff: float = 1.0
   sf_loss: str = 'qlearning'
+  sf_activation: str = 'relu'
+  sf_mlp_type: str = 'hk'
 
 def cumulants_from_env(data, online_preds, online_state, target_preds, target_state):
   # [T, B, C]
@@ -311,6 +313,7 @@ class Observer(ActorObserver):
   def __init__(self,
                period=100,
                plot_success_only: bool = False,
+               colors=None,
                prefix: str = 'SFsObserver'):
     super(Observer, self).__init__()
     self.period = period
@@ -319,6 +322,7 @@ class Observer(ActorObserver):
     self.idx = -1
     self.logging = True
     self.plot_success_only = plot_success_only
+    self._colors = colors or plt.rcParams['axes.prop_cycle']
 
   def wandb_log(self, d: dict):
     if self.logging:
@@ -410,78 +414,105 @@ class Observer(ActorObserver):
     features_returns = n_step_return(state_features, discounts, sfs)
 
     ndims = sfs.shape[1]
-    group_size = 5
-    for i in range(0, ndims, group_size):
-        # Create a figure and axis
-        fig, ax = plt.subplots()
+    # group_size = 5
+    # for i in range(0, ndims, group_size):
+    #     # Create a figure and axis
+    #     fig, ax = plt.subplots()
 
-        # Determine the end of the current group
-        end = min(i + group_size, ndims)
+    #     # Determine the end of the current group
+    #     end = min(i + group_size, ndims)
 
-        # Plot each dimension in the group
-        nplotted = 0
-        default_cycler = iter(plt.rcParams['axes.prop_cycle'])
-        for j in range(i, end):
-          # Define a color for this pair of lines
-          color = next(default_cycler)['color']
+    #     # Plot each dimension in the group
+    #     nplotted = 0
+    #     default_cycler = iter(plt.rcParams['axes.prop_cycle'])
+    #     for j in range(i, end):
+    #       # Define a color for this pair of lines
+    #       color = next(default_cycler)['color']
 
-          # Plot state_features with a dashed line style
-          if state_features[:, j].sum() > 0:
-            nplotted += 1
+    #       # Plot state_features with a dashed line style
+    #       if state_features[:, j].sum() > 0:
+    #         nplotted += 1
 
-            # STATE FEATURES
-            ax.plot(state_features[:, j], label=f'$\\phi - {j}$', linestyle='--', color=color)
+    #         # STATE FEATURES
+    #         ax.plot(state_features[:, j], label=f'$\\phi - {j}$', linestyle='--', color=color)
 
-            # STATE FEATURE RETURNS
-            ax.plot(features_returns[:, j], label=f'$\\phi - {j} - R$', linestyle=':', color=color)
+    #         # STATE FEATURE RETURNS
+    #         ax.plot(features_returns[:, j], label=f'$\\phi - {j} - R$', linestyle=':', color=color)
 
-            # SUCCESSOR FEATURES
-            ax.plot(sfs[:, j], label=f'$\\psi - {j}$', color=color)
+    #         # SUCCESSOR FEATURES
+    #         ax.plot(sfs[:, j], label=f'$\\psi - {j}$', color=color)
 
-            ax.plot(rewards, label='rewards', linestyle='--', color='grey')
-            ax.plot(q_values, label='q_values', color='grey')
+    #         ax.plot(rewards, label='rewards', linestyle='--', color='grey')
+    #         ax.plot(q_values, label='q_values', color='grey')
 
-        # Add labels and title
-        ax.set_xlabel('Time')
-        # ax.set_ylabel('Value')
-        ax.set_title(f"Successor Feature Prediction (Dimensions {i} to {end-1})")
+    #     # Add labels and title
+    #     ax.set_xlabel('Time')
+    #     # ax.set_ylabel('Value')
+    #     ax.set_title(f"Successor Feature Prediction (Dimensions {i} to {end-1})")
 
-        # Log the plot to wandb
-        if nplotted > 0:
-          ax.legend()
-          self.wandb_log({f"{self.prefix}/sf-group-prediction-{i//group_size}": wandb.Image(fig)})
+    #     # Log the plot to wandb
+    #     if nplotted > 0:
+    #       ax.legend()
+    #       self.wandb_log({f"{self.prefix}/sf-group-prediction-{i//group_size}": wandb.Image(fig)})
 
-        # Close the plot
-        plt.close(fig)
+    #     # Close the plot
+    #     plt.close(fig)
 
-    ##################################
-    # q-values
-    ##################################
-    # if total_reward.sum():
-    #   q_values = (sfs*tasks[:-1]).sum(-1)
-    #   # Create a figure and axis
-    #   fig, ax = plt.subplots()
-    #   ax.plot(q_values, label='q_values')
-    #   ax.plot(rewards, label='rewards')
+    # Create a figure and axis
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 11))
+    default_cycler = iter(self._colors)
+    nplotted = 0
+    for j in range(0, ndims):
+        # Plot state_features with a dashed line style
+        if state_features[:, j].sum() > 0:
+          nplotted += 1
+          # Plot each dimension in the group
+          try:
+            color = next(default_cycler)['color']
+          except Exception:
+            raise RuntimeError(f"unexpectedly had {nplotted} cumulants active")
 
-    #   # Add labels and title if necessary
-    #   ax.set_xlabel('time')
-    #   ax.set_title(f"reward prediction: {task}\nR={total_reward}")
-    #   ax.legend()
+          # STATE FEATURES
+          ax1.plot(state_features[:, j], label=f'$\\phi - {j}$', linestyle='--', color=color)
 
-    #   # Log the plot to wandb
-    #   self.wandb_log({f"{self.prefix}/reward_prediction": wandb.Image(fig)})
+          # STATE FEATURE RETURNS
+          ax1.plot(features_returns[:, j], label=f'$\\phi - {j} - R$', linestyle=':', color=color)
 
-    #   # Close the plot
-    #   plt.close(fig)
+          # SUCCESSOR FEATURES
+          ax1.plot(sfs[:, j], label=f'$\\psi - {j}$', color=color)
 
+    # Log the plot to wandb
+    if nplotted > 0:
+      # ax.set_ylabel('Value')
+      ax1.set_title(f"Successor Feature Predictions")
+      ax1.legend()
+
+
+      ax2.plot(rewards, label='rewards', linestyle='--', color='grey')
+      ax2.plot(q_values, label='q_values', color='grey')
+      # Add labels and title
+      ax2.set_xlabel('Time')
+      # ax.set_ylabel('Value')
+      ax2.set_title(f"Reward Predictions")
+      ax2.legend()
+
+      self.wandb_log({f"{self.prefix}/sf-group-prediction": wandb.Image(fig)})
+    else:
+      if rewards.sum() > 0:
+        raise RuntimeError("there is reward but no cumulants active. this must be a bug")
+
+    # Close the plot
+    plt.close(fig)
     ##################################
     # get images
     ##################################
     # [T, H, W, C]
     frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
-    self.wandb_log({
-      f'{self.prefix}/episode-{task}': [wandb.Image(frame) for frame in frames]})
+    # self.wandb_log({
+    #   f'{self.prefix}/episode-{task}': [wandb.Image(frame) for frame in frames]})
+    wandb.log({f'{self.prefix}/episode-{task}':
+               wandb.Video(np.transpose(frames, (0, 3, 1, 2)), fps=.1)})
+
 
 class USFAPreds(NamedTuple):
   q_values: jnp.ndarray  # q-value
@@ -495,7 +526,9 @@ class MonolithicSfHead(hk.Module):
                layers: Tuple[int],
                num_actions: int,
                state_features_dim: int,
+               activation: str = 'relu',
                combine_policy: str = 'sum',
+               mlp_type: str='hk',
                policy_layers : Tuple[int]=(32,),
                name: Optional[str] = None):
     super(MonolithicSfHead, self).__init__(name=name)
@@ -505,8 +538,25 @@ class MonolithicSfHead(hk.Module):
     else:
       self.policy_net = lambda x: x
 
-    self.sf_net = hk.nets.MLP(
-        tuple(layers)+(num_actions * state_features_dim,))
+    if mlp_type == 'hk':
+      self.sf_net = hk.Sequential([
+        hk.nets.MLP(tuple(layers), 
+                    activation=getattr(jax.nn, activation),
+                    activate_final=True,
+                    with_bias=False),
+        hk.Linear((num_actions * state_features_dim), w_init=jnp.zeros, with_bias=False),
+      ])
+    elif mlp_type == 'muzero':
+      from library.muzero_mlps import PredictionMlp
+      self.sf_net = PredictionMlp(
+        mlp_layers=tuple(layers),
+        num_predictions=num_actions * state_features_dim,
+        w_init=jnp.zeros,
+        activation=activation,
+      )
+    else: raise NotImplementedError
+
+
     self.layers = layers
     self.num_actions = num_actions
     self.state_features_dim = state_features_dim
@@ -549,12 +599,7 @@ class MonolithicSfHead(hk.Module):
     # [A, C]
     sf = jnp.reshape(sf, (self.num_actions, self.state_features_dim))
 
-    def dot(a, b): return jnp.sum(a*b).sum()
-
-    # dot-product: A
-    q_values = jax.vmap(
-        dot, in_axes=(0, None), out_axes=0)(sf, task)
-
+    q_values = (sf*task[: None]).sum(-1)
     assert q_values.shape[0] == self.num_actions, 'wrong shape'
     return sf, q_values
 
@@ -797,8 +842,8 @@ class UsfaArch(hk.RNNCore):
       state: hk.LSTMState  # [T, ...]
   ) -> Tuple[USFAPreds, hk.LSTMState]:
     """Efficient unroll that applies torso, core, and duelling mlp in one pass."""
-    torso_outputs = hk.BatchApply(self._torso)(inputs)  # [T, B, D+A+1]
 
+    torso_outputs = hk.BatchApply(self._torso)(inputs)  # [T, B, D+A+1]
     memory_input = jnp.concatenate(
       (torso_outputs.image, torso_outputs.action), axis=-1)
 
@@ -844,8 +889,9 @@ def make_minigrid_networks(
       num_actions=num_actions,
       policy_layers=config.policy_layers,
       combine_policy=config.combine_policy,
+      activation=config.sf_activation,
+      mlp_type=config.sf_mlp_type,
       )
-    
 
     usfa_head = SfGpiHead(
       num_actions=num_actions,

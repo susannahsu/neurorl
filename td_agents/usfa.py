@@ -427,9 +427,6 @@ class Observer(ActorObserver):
             # SUCCESSOR FEATURES
             ax.plot(sfs[:, j], label=f'$\\psi - {j}$', color=color)
 
-            ax.plot(rewards, label='rewards', linestyle='--', color='grey')
-            ax.plot(q_values, label='q_values', color='grey')
-
         # Add labels and title
         ax.set_xlabel('Time')
         # ax.set_ylabel('Value')
@@ -437,6 +434,8 @@ class Observer(ActorObserver):
 
         # Log the plot to wandb
         if nplotted > 0:
+          ax.plot(rewards, label='rewards', linestyle='--', color='grey')
+          ax.plot(q_values, label='q_values', color='grey')
           ax.legend()
           self.wandb_log({f"{self.prefix}/sf-group-prediction-{i//group_size}": wandb.Image(fig)})
 

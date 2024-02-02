@@ -282,8 +282,12 @@ class GotoOptionsWrapper(Wrapper):
         self.prior_objects = None
         self.prior_visible_objects = None
         self.prior_object_mask = None
-        env.reset()
-        max_options = max(max_options, len(env.all_objects))
+
+        max_options = max(max_options, len(self.unwrapped.env_objects))
+
+        self.object_types = [tuple(o) for o in self.unwrapped.env_objects]
+        self.object_types.sort()
+        self.object2idx = { o : i for i, o in  enumerate(self.object_types)}
 
         self.primitive_actions_arr = np.array(
            [int(a) for a in self.primitive_actions], dtype=np.uint8)
@@ -389,7 +393,8 @@ class GotoOptionsWrapper(Wrapper):
       obs['actions'] = np.array(self.primitive_actions_arr)
       obs['objects'] = np.array(object_info)
       obs['objects_mask'] = np.array(object_mask)
-      obs['action_mask'] = np.concatenate((np.ones(len(self.primitive_actions_arr)), object_mask))
+      obs['action_mask'] = np.concatenate(
+         (np.ones(len(self.primitive_actions_arr)), object_mask)).astype(np.uint8)
 
       # info['nactions'] = len(self.primitive_actions_arr) + nobjects
       # info['nobjects'] = nobjects
@@ -412,10 +417,6 @@ class GotoOptionsWrapper(Wrapper):
     def reset(self, *args, **kwargs):
       self.prior_action = None
       obs, info = self.env.reset(*args, **kwargs)
-      self.object_types = [(o.type, o.color) for o in self.env.all_objects]
-      self.object_types.sort()
-      self.object2idx = { o : i for i, o in  enumerate(self.object_types)}
-      assert len(self.object2idx) == len(self.object_types), 'does not work with repeating objects'
 
       self.post_env_iter_update(obs, info)
       return obs, info

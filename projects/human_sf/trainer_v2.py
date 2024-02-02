@@ -120,23 +120,23 @@ class ObjectQlearningConfig(object_q_learning.Config):
 class UsfaConfig(usfa.Config):
 
   # arch
-  state_dim: int = 256
-  final_conv_dim: int = 16
-  conv_flat_dim: Optional[int] = 0
-  sf_layers : Tuple[int]=(256, 256)
-  policy_layers : Tuple[int]=(128, 128)
+  # state_dim: int = 256
+  # final_conv_dim: int = 16
+  # conv_flat_dim: Optional[int] = 0
+  # sf_layers : Tuple[int]=(1024, 1024)
+  # policy_layers : Tuple[int]=(128, 128)
 
   # learner
   importance_sampling_exponent: float = 0.0
   samples_per_insert: float = 10.0
-  sf_coeff: float = 1e4
-  q_coeff: float = 1.0
+  # sf_coeff: float = 1e3
+  # q_coeff: float = 1.0
 
-  combine_policy: str = 'sum'
-  head: str = 'monolithic'
+  # combine_policy: str = 'sum'
+  # head: str = 'monolithic'
 
-  # eval actor
-  eval_task_support: str = "train"  # options:
+  # # eval actor
+  # eval_task_support: str = "train"  # options:
 
 @dataclasses.dataclass
 class MuZeroConfig(muzero.Config):
@@ -241,6 +241,9 @@ def setup_experiment_inputs(
   task_encoder = lambda obs: hk.nets.MLP(
     (128, 128), activate_final=True)(obs['task'])
 
+  q_observer  = q_learning.Observer(period=1 if debug else 2000)
+  sf_observer = usfa.Observer(plot_success_only=True, period=1 if debug else 2000)
+
   if agent == 'flat_q':
     # has no mechanism to select from object options since dependent on what agent sees
     env_kwargs['object_options'] = False
@@ -249,10 +252,7 @@ def setup_experiment_inputs(
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=basics.get_actor_core,
-      ActorCls=functools.partial(
-        basics.BasicActor,
-        observers=[q_learning.Observer(period=1 if debug else 2000)]
-      ),
+      ActorCls=functools.partial(basics.BasicActor, observers=[q_observer]),
       LossFn=q_learning.R2D2LossFn(
         discount=config.discount,
         importance_sampling_exponent=config.importance_sampling_exponent,
@@ -273,10 +273,7 @@ def setup_experiment_inputs(
     config = UsfaConfig(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      ActorCls=functools.partial(
-        basics.BasicActor,
-        observers=[usfa.Observer(plot_success_only=True, period=1 if debug else 2000)]
-      ),
+      ActorCls=functools.partial(basics.BasicActor, observers=[sf_observer]),
       get_actor_core_fn=functools.partial(
         usfa.get_actor_core,
         extract_q_values=lambda preds: preds.q_values,
@@ -367,6 +364,7 @@ def setup_experiment_inputs(
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=object_q_learning.get_actor_core,
+      ActorCls=functools.partial(basics.BasicActor, observers=[q_observer]),
       LossFn=q_learning.R2D2LossFn(
         discount=config.discount,
         importance_sampling_exponent=config.importance_sampling_exponent,
@@ -387,6 +385,7 @@ def setup_experiment_inputs(
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=object_usfa.get_actor_core,
+      ActorCls=functools.partial(basics.BasicActor, observers=[sf_observer]),
       LossFn=usfa.UsfaLossFn(
         discount=config.discount,
         importance_sampling_exponent=config.importance_sampling_exponent,
@@ -398,10 +397,8 @@ def setup_experiment_inputs(
         loss_fn=config.sf_loss,
         q_coeff=config.q_coeff,
       ))
-    # NOTE: main differences below
     network_factory = functools.partial(
-      object_usfa.make_minigrid_networks,
-      config=config)
+      object_usfa.make_minigrid_networks, config=config)
 
   elif agent == 'object_usfa_att':
     env_kwargs['object_options'] = True  # has no mechanism to select from object options since dependent on what agent sees
@@ -411,6 +408,7 @@ def setup_experiment_inputs(
     # builder = basics.Builder(
     #   config=config,
     #   get_actor_core_fn=object_usfa.get_actor_core,
+    #   ActorCls=functools.partial(basics.BasicActor, observers=[sf_observer]),
     #   LossFn=usfa.UsfaLossFn(
     #     discount=config.discount,
     #     importance_sampling_exponent=config.importance_sampling_exponent,
@@ -768,13 +766,16 @@ def sweep(search: str = 'default'):
     space = [
         {
             "num_steps": tune.grid_search([5e6]),
-            "agent": tune.grid_search(['object_usfa']),
+            "agent": tune.grid_search(['object_usfa', 'usfa']),
             "seed": tune.grid_search([5]),
             "group": tune.grid_search(['usfa-9']),
-            "env.basic_only": tune.grid_search([1]),
-            "combine_policy": tune.grid_search(['sum']),
-            "sf_coeff": tune.grid_search([0.0]),
-            "sf_layers": tune.grid_search([[1024, 1024]]),
+            # "env.basic_only": tune.grid_search([1]),
+            "env.num_task_rooms": tune.grid_search([1]),
+            "sf_activation": tune.grid_search(['relu', 'leaky_relu']),
+            "sf_mlp_type": tune.grid_search(['hk', 'muzero']),
+            # "combine_policy": tune.grid_search(['sum']),
+            # "sf_coeff": tune.grid_search([0.0]),
+            # "sf_layers": tune.grid_search([[1024, 1024]]),
         },
     ]
   elif search == 'q':
@@ -804,11 +805,17 @@ def sweep(search: str = 'default'):
         {
             "num_steps": tune.grid_search([30e6]),
             "agent": tune.grid_search([
-              'object_muzero', 'object_usfa', 'object_q',
-              'flat_muzero', 'flat_usfa']),
+              'object_muzero',
+              'object_q',
+              'object_usfa',
+              # 'flat_q',
+              'flat_usfa',
+              # 'flat_muzero',
+              ]),
             "seed": tune.grid_search([6]),
-            "group": tune.grid_search(['benchmark-4']),
-            "env.basic_only": tune.grid_search([0]),
+            "group": tune.grid_search(['benchmark-6-1room']),
+            # "env.basic_only": tune.grid_search([0]),
+            "env.num_task_rooms": tune.grid_search([1]),
             # "trace_length": tune.grid_search([20]),
             # "out_conv_dim": tune.grid_search([16, 0]),
         },

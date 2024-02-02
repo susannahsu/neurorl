@@ -281,14 +281,7 @@ def make_minigrid_networks(
         state = model_base_transformation(state)
         policy_logits = model_policy_fn(state)
         value_logits = model_value_fn(state)
-
         objects_mask_logits = model_objects_mask_fn(state)
-        objects_mask = distrax.Bernoulli(
-          logits=objects_mask_logits).sample(
-            seed=hk.next_rng_key())
-
-        action_mask = make_action_mask(objects_mask)
-        policy_logits = jnp.where(action_mask, policy_logits, LARGE_NEGATIVE)
 
         return ModelOutput(
             new_state=state,

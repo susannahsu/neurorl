@@ -333,7 +333,9 @@ class KeyRoom(LevelGen):
       maze_config['pairs'] = maze_config['pairs'][:num_task_rooms]
 
       self.maze_config = maze_config
-      self.maze_swap_config = swap_test_pairs(maze_config)
+      if swap_episodes:
+        assert len(maze_config['keys']) > 1, f'increase num_task_rooms. currently {num_task_rooms}'
+        self.maze_swap_config = swap_test_pairs(maze_config)
       self.flat_task = flat_task
       self.swap_episodes = swap_episodes
       self.training = training
@@ -343,15 +345,17 @@ class KeyRoom(LevelGen):
       self.train_objects = [p[0] for p in maze_config['pairs']]
       self.test_objects = [p[1] for p in maze_config['pairs']]
 
-      self.all_final_objects = self.train_objects + self.test_objects
+      self.all_finalroom_objects = self.train_objects + self.test_objects
 
-      self.all_possible_objects = self.all_final_objects + maze_config['keys']
+      self.all_possible_task_objects = self.all_finalroom_objects + maze_config['keys']
+      self.all_possible_objects = self.all_possible_task_objects + [['door', k[1]] for k in maze_config['keys']]
+
 
       colors = ["red", "green", "blue", "purple", "yellow", "grey"]
       object_types = ["key", "ball", "box"]
       all_pairs = [(obj_type, color) for obj_type in object_types for color in colors]
 
-      self.potential_distractors = [pair for pair in all_pairs if pair not in self.all_possible_objects]
+      self.potential_distractors = [pair for pair in all_pairs if pair not in self.all_possible_task_objects]
 
       self.color_rooms = color_rooms
       self.num_task_rooms = num_task_rooms
@@ -445,6 +449,10 @@ class KeyRoom(LevelGen):
       )
 
     @property
+    def env_objects(self):
+      return self.all_possible_objects
+
+    @property
     def task_class(self):
       if self.flat_task:
           return FlatTaskRep
@@ -462,11 +470,13 @@ class KeyRoom(LevelGen):
          return self.single_room_placement()
       if self.training:
         choice = random.choice([0, 1, 2])
+        self.task_setting = choice
         if choice == 0:
           return self.single_room_placement()
         else:
           return self.multi_room_placement()
       else:
+        self.task_setting = 0
         if self.swapped:
           return self.multi_room_placement(
             maze_config=self.maze_swap_config)
@@ -476,6 +486,8 @@ class KeyRoom(LevelGen):
     @property
     def task_name(self):
       name = self.task.task_name
+      setting = '1room' if self.task_setting > 0 else 'multi'
+      name += f" - {setting}"
       if self.swapped:
         name += " - swapped"
       return name
@@ -584,11 +596,15 @@ class KeyRoom(LevelGen):
                 self.all_objects.append(distractor)
                 self.place_in_room(*room, distractor)
 
-      task_idx = random.sample(indices, 1)[0]
       if self.training:
-         task_object = self.train_objects[task_idx]
+        object_idxs = range(len(self.train_objects))
+        task_idx = random.sample(object_idxs, 1)[0]
+        task_object = self.train_objects[task_idx]
+
       else:
-         task_object = self.test_objects[task_idx]
+        object_idxs = range(len(self.all_finalroom_objects))
+        task_idx = random.sample(object_idxs, 1)[0]
+        task_object = self.all_finalroom_objects[task_idx]
 
       target_room_color = room_colors[task_idx] if self.training else None
       self.task = self.task_class(
@@ -632,7 +648,7 @@ class KeyRoom(LevelGen):
         # if carrying and one of the "final" objects, terminate
         shape, color = self.carrying.type, self.carrying.color
         if self.terminate_failure:
-          if [shape, color] in self.all_final_objects:
+          if [shape, color] in self.all_finalroom_objects:
             terminated = True
         else:
           target_shape = self.task.target_type
