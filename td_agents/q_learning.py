@@ -149,12 +149,10 @@ class Observer(basics.ActorObserver):
     self.logging = True
 
   def wandb_log(self, d: dict):
-    if self.logging:
-      if wandb.run is not None:
-        wandb.log(d)
-      else:
-        self.logging = False
-        self.period = np.inf
+    if wandb.run is not None:
+      wandb.log(d)
+    else:
+      pass
 
   def observe_first(self, state: basics.ActorState, timestep: dm_env.TimeStep) -> None:
     """Observes the initial state and initial time-step.

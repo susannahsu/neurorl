@@ -30,6 +30,7 @@ except:
    LevelAvgObserver = object
 
 Number = Union[int, float, np.float32]
+START_ROOM_COLOR = 'start'
 
 class DummyInstr(Instr):
     """
@@ -53,8 +54,8 @@ def construct(shape: str, color: str):
   else:
     raise NotImplementedError(f"shape {shape} not supported")
 
-def name(o):
-   return f"{o.color} {o.type}"
+def name(color: str, type: str):
+   return f"{color} {type}"
 
 
 class BaseTaskRep:
@@ -151,7 +152,7 @@ class FlatTaskRep(BaseTaskRep):
 
     if self.target_room_color:
       target_room_idx = self.get_vector_index(self.target_room_color, 'room')
-      vector[target_room_idx] = 0.5
+      vector[target_room_idx] = 0.25
 
       target_key_idx = self.get_vector_index(self.target_room_color, 'key')
       vector[target_key_idx] = 0.1
@@ -181,7 +182,7 @@ class FlatTaskRep(BaseTaskRep):
         state_vector[idx] = 1
 
     current_room_color = self.current_room(env)
-    if current_room_color != 'start':
+    if current_room_color != START_ROOM_COLOR:
         room_idx = self.get_vector_index(current_room_color, 'room')
         state_vector[room_idx] = 1
 
@@ -240,7 +241,7 @@ class StructuredTaskRep(BaseTaskRep):
 
     # Check the color of the current room
     current_room_color = self.current_room(env)
-    if current_room_color != 'start':
+    if current_room_color != START_ROOM_COLOR:
         room_color_idx = self.colors.index(current_room_color)
         room_shape_idx = self.types.index('room')
         state_array[room_color_idx, room_shape_idx] = 1
@@ -295,13 +296,15 @@ class KeyRoom(LevelGen):
       unblocking=False,
       rooms_locked=True,
       basic_only: int = 0,
-      task_set: int = 1,
       flat_task: bool = True,
       swap_episodes: int = 0,
       terminate_failure: bool = True,
       num_task_rooms: int = 2,
       color_rooms: bool = True,
+      ignore_task: bool = False,
       training=True,
+      test_itermediary_rewards: bool = False,
+      train_basic_objects: bool = True,
       # include_task_signals=False,
       max_steps_per_room: int = 100,
       implicit_unlock=True,
@@ -329,28 +332,29 @@ class KeyRoom(LevelGen):
           include_task_signals (bool): Whether to include task-specific signals (i.e. room color, indicator object).
       """
 
+      ###############
+      # preparing maze
+      ###############
+      # limit number of rooms
       maze_config['keys'] = maze_config['keys'][:num_task_rooms]
       maze_config['pairs'] = maze_config['pairs'][:num_task_rooms]
 
       self.maze_config = maze_config
+
+      # create swap if will be swapping objects after some number of episodes
       if swap_episodes:
         assert len(maze_config['keys']) > 1, f'increase num_task_rooms. currently {num_task_rooms}'
         self.maze_swap_config = swap_test_pairs(maze_config)
-      self.flat_task = flat_task
-      self.swap_episodes = swap_episodes
-      self.training = training
-      self.room_size = room_size
-      self.num_dists = num_dists
-      self.terminate_failure = terminate_failure
+
+      # summarizing maze objects
       self.train_objects = [p[0] for p in maze_config['pairs']]
       self.test_objects = [p[1] for p in maze_config['pairs']]
-
       self.all_finalroom_objects = self.train_objects + self.test_objects
 
       self.all_possible_task_objects = self.all_finalroom_objects + maze_config['keys']
       self.all_possible_objects = self.all_possible_task_objects + [['door', k[1]] for k in maze_config['keys']]
 
-
+      # gather full list of possible objects and types
       colors = ["red", "green", "blue", "purple", "yellow", "grey"]
       object_types = ["key", "ball", "box"]
       all_pairs = [(obj_type, color) for obj_type in object_types for color in colors]
@@ -360,7 +364,7 @@ class KeyRoom(LevelGen):
       self.color_rooms = color_rooms
       self.num_task_rooms = num_task_rooms
       self.types = set(['key', 'room'])
-      self.colors = set(['start'])
+      self.colors = set([START_ROOM_COLOR])
       for key in maze_config['keys']:
          self.colors.add(key[1])
       for pairs in maze_config['pairs']:
@@ -368,42 +372,37 @@ class KeyRoom(LevelGen):
           self.colors.add(p[1])
           self.types.add(p[0])
 
+      # sort them so always have same order across processed
       self.colors = list(self.colors)
       self.types = list(self.types)
 
       self.colors.sort()
       self.types.sort()
 
+      ###############
+      # task settings
+      ###############
+      self.flat_task = flat_task
+      self.test_itermediary_rewards = test_itermediary_rewards
+      self.task_setting = 'multi'
+
+      ###############
+      # training settings
+      ###############
+      self.ignore_task = ignore_task
+      self.train_basic_objects = train_basic_objects
+      self.swap_episodes = swap_episodes
+      self.training = training
+      self.room_size = room_size
+      self.num_dists = num_dists
+      self.terminate_failure = terminate_failure
+
       self.rooms_locked = rooms_locked
       self.basic_only = basic_only
-
-      both_objects = []
-      first_objects = []
-      for idx, (type, color) in enumerate(maze_config['keys']):
-        train_object, test_object = maze_config['pairs'][idx]
-
-        train_task = self.task_class(
-            types=self.types,
-            colors=self.colors,
-            target=train_object)
-        first_objects.append(train_task)
-        both_objects.append(train_task)
-
-        test_task = self.task_class(
-            types=self.types,
-            colors=self.colors,
-            target=test_object)
-        both_objects.append(test_task)
-
-      # all_task_arrays = np.array([t.task_array for t in both_objects])
-      # train_task_arrays = np.array([t.task_array for t in first_objects])
-      if task_set == 0:
-        self.task_set = np.array([t.task_array for t in first_objects])
-      elif task_set == 1:
-        self.task_set = np.array([t.task_array for t in both_objects])
-        
       self.episodes = 0
+      self.max_steps_per_room = max_steps_per_room
 
+      self.initiated = False
       super().__init__(
           room_size=room_size,
           num_rows=num_rows,
@@ -414,12 +413,57 @@ class KeyRoom(LevelGen):
           implicit_unlock=implicit_unlock,
           **kwargs,
       )
+      self.reset()
+      self.initiated = True
+      # self.colors_to_room_coords = self.get_colors_to_room_coords(
+      #    maze_config, num_rows=num_rows, num_cols=num_cols)
 
-      if self.basic_only == 0:
-        self._max_steps = max_steps_per_room*self.num_navs_needed()
-      else:
-        self._max_steps = max_steps_per_room
+      ####################
+      # Collect the target colors associated with different objects
+      ####################
+      self.object_to_target_color = dict()
+      for idx, (type, room_color) in enumerate(maze_config['keys']):
+        train_object, test_object = maze_config['pairs'][idx]
 
+        self.object_to_target_color[tuple(train_object)] = room_color  # train
+        self.object_to_target_color[tuple(test_object)] = room_color  # test
+        self.object_to_target_color[(type, room_color)] = room_color  # key
+
+      ####################
+      # Collect the train tasks
+      ####################
+      train_tasks = []
+      for idx, (type, room_color) in enumerate(maze_config['keys']):
+        train_object, test_object = maze_config['pairs'][idx]
+
+        if self.train_basic_objects:
+          train_tasks.append(
+            self.make_task(task_object=train_object, intermediary_reward=False))
+          train_tasks.append(
+            self.make_task(task_object=train_object, intermediary_reward=False))
+
+        train_tasks.append(
+           self.make_task(task_object=train_object, intermediary_reward=True))
+
+      self.task_set = np.array([t.task_array for t in train_tasks])
+
+      ####################
+      # action space settings
+      ####################
+      self.primitive_actions = [
+        self.actions.left,
+        self.actions.right,
+        self.actions.forward,
+        self.actions.pickup,
+        self.actions.drop,
+        self.actions.toggle,
+        self.actions.done,  # does nothing
+      ]
+      self.action_names = [a.name for a in self.primitive_actions]
+
+      ####################
+      # gym spaces
+      ####################
       task_array = self.task_set[0]
       cumulants_space = spaces.Box(
           low=0,
@@ -433,18 +477,18 @@ class KeyRoom(LevelGen):
           shape=self.task_set.shape,  # number of cells
           dtype="float32",
       )
-      # all_task_arrays = spaces.Box(
-      #     low=0,
-      #     high=100.0,
-      #     shape=self.all_task_arrays.shape,  # number of cells
-      #     dtype="float32",
-      # )
+      context_array = spaces.Box(
+          low=0,
+          high=100.0,
+          shape=(2,),  # number of cells
+          dtype="float32",
+      )
       self.observation_space = spaces.Dict(
           {**self.observation_space.spaces,
            "state_features": cumulants_space,
            "task": copy.deepcopy(cumulants_space),  # equivalent specs
            "train_tasks": train_task_arrays,
-          #  "all_tasks": all_task_arrays,
+           "context": context_array,
            }
       )
 
@@ -452,12 +496,25 @@ class KeyRoom(LevelGen):
     def env_objects(self):
       return self.all_possible_objects
 
-    @property
-    def task_class(self):
+    def make_task(
+          self,
+          task_object: Union[List[str], Tuple[str, str]],
+          colors_to_room: Optional[Dict] = None,
+          intermediary_reward: bool = True):
       if self.flat_task:
-          return FlatTaskRep
+          TaskCls = FlatTaskRep
       else:
-          return StructuredTaskRep
+          TaskCls = StructuredTaskRep
+
+      target_room_color = self.object_to_target_color[tuple(task_object)]
+      target_room_color = target_room_color if intermediary_reward else None
+      return TaskCls(
+        types=self.types,
+        colors=self.colors,
+        colors_to_room=colors_to_room,
+        target=task_object,
+        target_room_color=target_room_color
+    )
 
     def gen_mission(self):
       """_summary_
@@ -466,17 +523,17 @@ class KeyRoom(LevelGen):
       # Returns:
       #     _type_: _description_
       # """
-      if self.basic_only:
+
+      if self.basic_only > 0:
          return self.single_room_placement()
+
       if self.training:
         choice = random.choice([0, 1, 2])
-        self.task_setting = choice
-        if choice == 0:
+        if choice == 0 and self.train_basic_objects:
           return self.single_room_placement()
         else:
           return self.multi_room_placement()
       else:
-        self.task_setting = 0
         if self.swapped:
           return self.multi_room_placement(
             maze_config=self.maze_swap_config)
@@ -486,8 +543,7 @@ class KeyRoom(LevelGen):
     @property
     def task_name(self):
       name = self.task.task_name
-      setting = '1room' if self.task_setting > 0 else 'multi'
-      name += f" - {setting}"
+      name += f" - {self.task_setting}"
       if self.swapped:
         name += " - swapped"
       return name
@@ -496,8 +552,29 @@ class KeyRoom(LevelGen):
     def swapped(self):
       return self.swap_episodes and self.episodes >= self.swap_episodes
 
+    def get_colors_to_room_coords(self, maze_config, num_rows, num_cols):
+      center_room_coords = (num_rows//2, num_cols//2)
+      # right room, bottom room, left room, upper room. in that order
+      goal_room_coords = [(2, 1), (1, 2), (0, 1), (1, 0)]
+      keys = maze_config['keys']
+      room_colors = [k[1] for k in keys]
+      indices = list(range(len(keys)))
+      colors_to_room_coords = {}
+
+      start_room_color = START_ROOM_COLOR
+      colors_to_room_coords[start_room_color] = center_room_coords
+
+      for idx in indices:
+          room_color = room_colors[idx]
+          room_coord = goal_room_coords[idx]
+          colors_to_room_coords[room_color] = room_coord
+
+      return colors_to_room_coords
+
     def single_room_placement(self):
-      self.instrs = DummyInstr()
+      self.context = np.zeros((2))
+      self.context[1] = 1
+      self.task_setting = '1room'
       ###########################
       # Place agent in center room
       ###########################
@@ -505,16 +582,10 @@ class KeyRoom(LevelGen):
       self.place_agent(*center_room_coords)
       _ = self.room_from_pos(*self.agent_pos)
 
-      colors_to_room = {}
-      start_room_color = 'start'
-      center_room = self.get_room(*center_room_coords)
-      colors_to_room[start_room_color] = center_room
-
       ###########################################
       # Place objects
       ###########################################
       # starts to the right for some reason
-      self.all_objects = []
       potential_objects = self.train_objects+self.test_objects
       if self.basic_only == 2:
          potential_objects = potential_objects[:1]
@@ -522,21 +593,21 @@ class KeyRoom(LevelGen):
       for object in potential_objects:
        # Assuming construct is a function that creates an object based on the type and color
         obj = construct(*object)
-        self.all_objects.append(obj)
         self.place_in_room(*center_room_coords, obj)
 
       # Sample random task object
       task_object = random.choice(potential_objects)
       # Assuming 'colors_to_room' is defined elsewhere or is not needed for flat tasks
-      self.task = self.task_class(
-          types=self.types,
-          colors=self.colors,
-          target=task_object,
-          colors_to_room=colors_to_room,
-      )
+      self.task = self.make_task(
+         task_object=task_object,
+         intermediary_reward=False,
+         colors_to_room={START_ROOM_COLOR:
+                         self.get_room(*center_room_coords)})
 
     def multi_room_placement(self, maze_config=None):
-      self.instrs = DummyInstr()
+      self.task_setting = 'multi'
+      self.context = np.zeros((2))
+      self.context[0] = 1
       maze_config = maze_config or self.maze_config
       ###########################
       # Place agent in center room
@@ -549,7 +620,6 @@ class KeyRoom(LevelGen):
       # Place objects
       ###########################################
       # starts to the right for some reason
-      self.all_objects = []
       goal_room_coords = [(2, 1), (1, 2), (0, 1), (1, 0)]
       keys = maze_config['keys']
       room_colors = [k[1] for k in keys]
@@ -557,7 +627,7 @@ class KeyRoom(LevelGen):
       indices = list(range(len(keys)))
       colors_to_room = {}
 
-      start_room_color = 'start'
+      start_room_color = START_ROOM_COLOR
       center_room = self.get_room(*center_room_coords)
       colors_to_room[start_room_color] = center_room
 
@@ -568,15 +638,12 @@ class KeyRoom(LevelGen):
 
 
           key = Key(key_color)
-          self.all_objects.append(key)
           self.place_in_room(*center_room_coords, key)
           door, door_pos = self.add_door(*center_room_coords, door_idx=idx, color=key_color, locked=self.rooms_locked)
-          self.all_objects.append(door)
 
           pair1, pair2 = pairs[idx]
           obj1 = construct(*pair1)
           obj2 = construct(*pair2)
-          self.all_objects.extend([obj1, obj2])
           self.place_in_room(*room, obj1)
           self.place_in_room(*room, obj2)
 
@@ -587,45 +654,51 @@ class KeyRoom(LevelGen):
             for _ in range(width*width):
               self.place_in_room(*room, init_floor)
 
-          if self.num_dists and not self.training:
-            # Place distractors in the room
-            for _ in range(self.num_dists):
-                # Assuming you have a method 'construct_distractor' to create a distractor
-                distractor_type, distractor_color = random.choice(self.potential_distractors)
-                distractor = construct(distractor_type, distractor_color)
-                self.all_objects.append(distractor)
-                self.place_in_room(*room, distractor)
+          # if self.num_dists and not self.training:
+          #   # Place distractors in the room
+          #   for _ in range(self.num_dists):
+          #       # Assuming you have a method 'construct_distractor' to create a distractor
+          #       distractor_type, distractor_color = random.choice(self.potential_distractors)
+          #       distractor = construct(distractor_type, distractor_color)
+          #       self.place_in_room(*room, distractor)
 
+      room_idxs = range(len(keys))
+      room_idx = random.sample(room_idxs, 1)[0]
+      target_room_color = room_colors[room_idx]
       if self.training:
-        object_idxs = range(len(self.train_objects))
-        task_idx = random.sample(object_idxs, 1)[0]
-        task_object = self.train_objects[task_idx]
-
+        task_object = self.train_objects[room_idx]
       else:
-        object_idxs = range(len(self.all_finalroom_objects))
-        task_idx = random.sample(object_idxs, 1)[0]
-        task_object = self.all_finalroom_objects[task_idx]
+        if random.sample((0, 1), 1)[0] == 0:
+          task_object = self.train_objects[room_idx]
+        else:
+          task_object = self.test_objects[room_idx]
 
-      target_room_color = room_colors[task_idx] if self.training else None
-      self.task = self.task_class(
-          types=self.types,
-          colors=self.colors,
-          target=task_object,
-          target_room_color=target_room_color,
-          colors_to_room=colors_to_room)
+      assert self.object_to_target_color[tuple(task_object)] == target_room_color
+
+      self.task = self.make_task(
+         task_object=task_object,
+         colors_to_room=colors_to_room,
+         intermediary_reward=self.training or self.test_itermediary_rewards)
 
     def update_obs(self, obs):
       obs['task'] = self.task.task_array
       obs['state_features'] = self.task.state_features
       obs['train_tasks'] = self.task_set
-      # obs['all_tasks'] = self.all_task_arrays
+      obs['context'] = np.array(self.context)
+
+      if self.ignore_task:
+         obs['task'] = obs['task']*0.0
 
     def reset(self, *args, **kwargs):
       obs, info = super().reset(*args, **kwargs)
+      if not self.initiated:
+        return obs, info
+
       self.update_obs(obs)
 
       # reset object counts
-      self.object_counts = {name(o):0 for o in self.all_objects}
+      self.object_counts = {
+         name(color=o[1], type=o[0]):0 for o in self.all_possible_task_objects}
       self.carrying_first_time = False
       self.episodes += 1
       return obs, info
@@ -639,9 +712,12 @@ class KeyRoom(LevelGen):
 
       # was not carrying an object before but am now
       if not self.carrying_first_time and self.carrying:
-         self.carrying_first_time = True
-         # first time, log it
-         self.object_counts[name(self.carrying)] += 1
+        self.carrying_first_time = True
+        # first time, log it
+        key = name(type=self.carrying.type, color=self.carrying.color)
+        self.object_counts[key] += 1
+        if self.object_counts[key] > 1:
+           raise RuntimeError
 
       terminated = False
       if self.carrying:
@@ -657,7 +733,7 @@ class KeyRoom(LevelGen):
             terminated = True
 
       truncated = False
-      if self.step_count >= self._max_steps:
+      if self.step_count >= self.max_episode_steps:
           truncated = True
           terminated = True
 
@@ -669,6 +745,9 @@ class KeyRoom(LevelGen):
         while True:
             try:
                 super(RoomGridLevel, self)._gen_grid(width, height)
+                self.instrs = DummyInstr()
+                if not self.initiated:
+                   return
 
                 # Generate the mission
                 self.gen_mission()
@@ -691,8 +770,16 @@ class KeyRoom(LevelGen):
         # self.mission = self.surface
 
     def num_navs_needed(self, instr: str = None) -> int:
-        return 2
+        if self.task_setting == 'multi':
+           return 2
+        elif self.task_setting == '1room':
+           return 1
+        else: 
+           raise NotImplementedError
 
+    @property
+    def max_episode_steps(self):
+       return self.max_steps_per_room*self.num_navs_needed()
 
 def dict_mean(dict_list):
     mean_dict = {}
@@ -773,8 +860,7 @@ class ObjectCountObserver(LevelAvgObserver):
           wandb.log({f"{self.prefix}/counts_{key}": wandb.Image(fig)})
           plt.close(fig)
         except wandb.errors.Error as e:
-          self.logging = False
-          logging.warning(f"{self.prefix}: turning off logging.")
+          pass
 
 
     return {}

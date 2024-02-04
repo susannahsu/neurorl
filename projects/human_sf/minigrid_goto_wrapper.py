@@ -283,11 +283,14 @@ class GotoOptionsWrapper(Wrapper):
         self.prior_visible_objects = None
         self.prior_object_mask = None
 
+
         max_options = max(max_options, len(self.unwrapped.env_objects))
 
         self.object_types = [tuple(o) for o in self.unwrapped.env_objects]
         self.object_types.sort()
         self.object2idx = { o : i for i, o in  enumerate(self.object_types)}
+
+        self.action_names = [a.name for a in self.primitive_actions] + [f'go to {o[1]} {o[0]}' for o in self.object_types]
 
         self.primitive_actions_arr = np.array(
            [int(a) for a in self.primitive_actions], dtype=np.uint8)

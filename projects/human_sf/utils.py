@@ -2,9 +2,16 @@ from typing import Optional, Callable, NamedTuple
 from acme.wrappers import observation_action_reward
 import haiku as hk
 
+import dm_env
 import jax
 import jax.numpy as jnp
+import numpy as np
+import matplotlib.pyplot as plt
+
 import rlax
+import wandb
+
+from library.utils import LevelAvgObserver
 
 Array = jax.Array
 
@@ -141,3 +148,94 @@ class TaskAwareRecurrentFn(hk.RNNCore):
 
     return state, state
 
+def plot_frames_dynamically(task_name, frames, rewards, actions_taken, H, W):
+  """
+  Dynamically plots frames in multiple figures based on the specified grid layout (H, W).
+
+  :param frames: 4D numpy array of shape (T, H, W, C) containing the frames to plot.
+  :param H: Number of rows in each plot's grid.
+  :param W: Number of columns in each plot's grid.
+  """
+  T = frames.shape[0]  # Total number of frames
+  frames_per_plot = H * W  # Calculate the number of frames per plot based on the grid layout
+  num_plots = T // frames_per_plot + int(T % frames_per_plot != 0)  # Number of plots needed
+
+  width=3
+  for plot_index in range(num_plots):
+      fig, axs = plt.subplots(H, W, figsize=(W*width, H*width))
+      # fig.suptitle(f'{task_name}: plot {plot_index + 1}')
+      # Flatten the axes array for easy iteration if it's multidimensional
+      if H * W > 1:
+          axs = axs.ravel()
+      for i in range(frames_per_plot):
+          frame_index = plot_index * frames_per_plot + i
+          if frame_index < T:
+              if H * W == 1:  # If there's only one subplot, don't try to index axs
+                  ax = axs
+              else:
+                  ax = axs[i]
+              ax.imshow(frames[frame_index])
+              ax.axis('off')  # Hide the axis
+              if frame_index < len(actions_taken):
+                if frame_index == 0:
+                  ax.set_title(task_name)
+                else:
+                  ax.set_title(f"{actions_taken[frame_index]}, r={rewards[frame_index]}")
+          else:  # Hide unused subplots
+              if H * W > 1:  # Only if there are multiple subplots
+                  axs[i].axis('off')
+
+      plt.tight_layout()
+      yield fig
+
+class LevelEpisodeObserver(LevelAvgObserver):
+  """Metric: Average return over many episodes"""
+
+  def __init__(self, *args, get_action_names = None, **kwargs):
+    super(LevelEpisodeObserver, self).__init__(*args, **kwargs)
+    if get_action_names is None:
+      get_action_names = lambda env: None
+
+    self.get_action_names = get_action_names
+
+  def observe_first(self, env: dm_env.Environment, timestep: dm_env.TimeStep
+                    ) -> None:
+    """Observes the initial state __after__ reset."""
+    self.idx += 1
+    self.task_name = self.current_task(env)
+    self.action_names = self.get_action_names(env)
+    self.timesteps = [timestep]
+    self.actions = []
+
+  def observe(self,
+              env: dm_env.Environment,
+              timestep: dm_env.TimeStep,
+              action: np.ndarray) -> None:
+    """Records one environment step."""
+    self.timesteps.append(timestep)
+    self.actions.append(action)
+
+
+  def wandb_log(self, d: dict):
+    if wandb.run is not None:
+      wandb.log(d)
+    else:
+      pass
+      # self.reset = np.inf
+
+  def get_metrics(self):
+    """Returns metrics collected for the current episode."""
+    result = {}
+
+    if self.idx % self.reset != 0:
+      return result
+
+    # [T, H, W, C]
+    frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
+    rewards = np.stack([t.reward for t in self.timesteps[1:]])
+    actions_taken = [self.action_names[int(a)] for a in self.actions]
+    for fig in plot_frames_dynamically(self.task_name, frames, rewards, actions_taken, H=10, W=10):
+       self.wandb_log({f"{self.prefix}/episode": wandb.Image(fig)})
+       plt.close(fig)
+
+    return result

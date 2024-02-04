@@ -150,7 +150,7 @@ class PredictionMlp(hk.Module):
                num_predictions,
                ln: bool = True,
                w_init: Optional[hk.initializers.Initializer] = None,
-               output_init = None,
+               output_init: Optional[hk.initializers.Initializer] = None,
                activation: str = 'relu',
                name="pred_mlp"):
     super().__init__(name=name)

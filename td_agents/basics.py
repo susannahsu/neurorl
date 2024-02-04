@@ -706,7 +706,8 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
       observers: Optional[List[ActorObserver]] = (),
       jit: bool = True,
       backend: Optional[str] = 'cpu',
-      per_episode_update: bool = False
+      per_episode_update: bool = False,
+      observe_training: bool = False,
   ):
     """Initializes a feed forward actor.
 
@@ -726,8 +727,15 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
       adders = [adders]
 
     self._adders = adders
-    self._observers = observers
     self._state = None
+    is_training = adders is not None
+
+    self._observers = ()
+    if is_training:
+      if observe_training:
+        self._observers = observers
+    else:
+      self._observers = observers
 
     # Unpack ActorCore, jitting if requested.
     if jit:
@@ -860,7 +868,6 @@ class Builder(r2d2.R2D2Builder):
         variable_source,
         key='actor_variables',
         update_period=self._config.variable_update_period)
-
     return self.ActorCls(
         policy, random_key, variable_client, adder, backend='cpu')
 

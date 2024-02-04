@@ -91,8 +91,9 @@ class ObjectOrientedUsfaArch(hk.RNNCore):
   ) -> Tuple[usfa.USFAPreds, hk.LSTMState]:
     
     torso_outputs = self._torso(inputs)  # [D+A+1]
+    context = inputs.observation['context'].astype(torso_outputs.image.dtype)
     memory_input = jnp.concatenate(
-      (torso_outputs.image, torso_outputs.action), axis=-1)
+      (torso_outputs.image, torso_outputs.action, context), axis=-1)
     core_outputs, new_state = self._memory(memory_input, state)
 
     objects_mask = inputs.observation['objects_mask'].astype(core_outputs.dtype)
@@ -120,8 +121,9 @@ class ObjectOrientedUsfaArch(hk.RNNCore):
     """Efficient unroll that applies torso, core, and duelling mlp in one pass."""
 
     torso_outputs = hk.BatchApply(self._torso)(inputs)  # [T, B, D+A+1]
+    context = inputs.observation['context'].astype(torso_outputs.image.dtype)
     memory_input = jnp.concatenate(
-      (torso_outputs.image, torso_outputs.action), axis=-1)
+      (torso_outputs.image, torso_outputs.action, context), axis=-1)
 
     core_outputs, new_states = hk.static_unroll(
       self._memory, memory_input, state)

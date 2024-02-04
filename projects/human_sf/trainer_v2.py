@@ -89,6 +89,7 @@ from projects.human_sf import object_muzero
 from projects.human_sf import scalar_muzero
 from projects.human_sf import usfa
 from projects.human_sf import object_usfa
+from projects.human_sf import utils as human_proj_utils
 
 from projects.human_sf import key_room_v3 as key_room
 
@@ -157,6 +158,8 @@ def make_keyroom_env(
     maze_idx: int = 0,
     num_task_rooms: int = 2,
     color_rooms: bool = False,
+    basic_only: int = 0,
+    debug: bool = False,
     **kwargs) -> dm_env.Environment:
   """Loads environments.
   
@@ -167,6 +170,10 @@ def make_keyroom_env(
       dm_env.Environment: Multitask environment is returned.
   """
   del seed
+  if debug:
+    steps_per_room = 20
+    basic_only = 0
+    num_task_rooms = 4
 
   json_file = 'projects/human_sf/maze_pairs.json'
   with open(json_file, 'r') as file:
@@ -182,6 +189,7 @@ def make_keyroom_env(
     num_task_rooms=num_task_rooms,
     swap_episodes=swap_episodes,
     color_rooms=color_rooms,
+    basic_only=basic_only,
     training= not evaluation,
     **kwargs)
 
@@ -242,7 +250,9 @@ def setup_experiment_inputs(
     (128, 128), activate_final=True)(obs['task'])
 
   q_observer  = q_learning.Observer(period=1 if debug else 2000)
-  sf_observer = usfa.Observer(plot_success_only=True, period=1 if debug else 2000)
+  sf_observer = usfa.Observer(
+    plot_success_only=False if debug else True,
+    period=1 if debug else 2000)
 
   if agent == 'flat_q':
     # has no mechanism to select from object options since dependent on what agent sees
@@ -287,6 +297,8 @@ def setup_experiment_inputs(
         bootstrap_n=config.bootstrap_n,
         sf_coeff=config.sf_coeff,
         loss_fn=config.sf_loss,
+        lambda_=config.sf_lambda,
+        sum_cumulants=config.sum_cumulants,
         q_coeff=config.q_coeff,
       ))
     network_factory = functools.partial(
@@ -395,6 +407,8 @@ def setup_experiment_inputs(
         bootstrap_n=config.bootstrap_n,
         sf_coeff=config.sf_coeff,
         loss_fn=config.sf_loss,
+        lambda_=config.sf_lambda,
+        sum_cumulants=config.sum_cumulants,
         q_coeff=config.q_coeff,
       ))
     network_factory = functools.partial(
@@ -418,6 +432,8 @@ def setup_experiment_inputs(
     #     bootstrap_n=config.bootstrap_n,
     #     sf_coeff=config.sf_coeff,
     #     loss_fn=config.sf_loss,
+    #     lambda_=config.sf_lambda,
+    #     sum_cumulants=config.sum_cumulants,
     #     q_coeff=config.q_coeff,
     #   ))
     # # NOTE: main differences below
@@ -498,6 +514,7 @@ def setup_experiment_inputs(
 
   environment_factory = functools.partial(
     make_environment_fn,
+    debug=debug,
     **env_kwargs)
 
   # -----------------------
@@ -509,11 +526,17 @@ def setup_experiment_inputs(
       reset=50 if not debug else 5,
       get_task_name=env_get_task_name,
       ),
-    # key_room.ObjectCountObserver(
-    #   reset=1000 if not debug else 5,
-    #   prefix=f'Images',
-    #   agent_name=agent,
-    #   get_task_name=env_get_task_name),
+    human_proj_utils.LevelEpisodeObserver(
+      reset=2000 if not debug else 1,
+      prefix='EpisodeObserver',
+      get_task_name=env_get_task_name,
+      get_action_names=lambda e: e.unwrapped.action_names,
+    ),
+    key_room.ObjectCountObserver(
+      reset=1000 if not debug else 5,
+      prefix=f'Images',
+      agent_name=agent,
+      get_task_name=env_get_task_name),
   ]
 
   return experiment_builder.OnlineExperimentConfigInputs(
@@ -612,7 +635,7 @@ def run_single():
       samples_per_insert=1,
       min_replay_size=100,
       batch_size=3,
-      trace_length=7,
+      trace_length=2,
     ))
     env_kwargs.update(dict(
     ))
@@ -765,17 +788,15 @@ def sweep(search: str = 'default'):
   elif search == 'usfa':
     space = [
         {
-            "num_steps": tune.grid_search([5e6]),
-            "agent": tune.grid_search(['object_usfa', 'usfa']),
-            "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['usfa-9']),
+            # "num_steps": tune.grid_search([5e6]),
             # "env.basic_only": tune.grid_search([1]),
+            "num_steps": tune.grid_search([15e6]),
             "env.num_task_rooms": tune.grid_search([1]),
-            "sf_activation": tune.grid_search(['relu', 'leaky_relu']),
-            "sf_mlp_type": tune.grid_search(['hk', 'muzero']),
-            # "combine_policy": tune.grid_search(['sum']),
-            # "sf_coeff": tune.grid_search([0.0]),
-            # "sf_layers": tune.grid_search([[1024, 1024]]),
+            "agent": tune.grid_search(['flat_usfa']),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['usfa-25-double-check']),
+            "sf_coeff": tune.grid_search([10.0, 1.0]),
+            'env.test_itermediary_rewards': tune.grid_search([True, False]),
         },
     ]
   elif search == 'q':
@@ -806,17 +827,18 @@ def sweep(search: str = 'default'):
             "num_steps": tune.grid_search([30e6]),
             "agent": tune.grid_search([
               'object_muzero',
+              'flat_muzero',
               'object_q',
-              'object_usfa',
-              # 'flat_q',
-              'flat_usfa',
-              # 'flat_muzero',
+              'flat_q',
+              # 'object_usfa',
+              # 'flat_usfa',
               ]),
             "seed": tune.grid_search([6]),
-            "group": tune.grid_search(['benchmark-6-1room']),
+            "group": tune.grid_search(['benchmark-8-1room']),
             # "env.basic_only": tune.grid_search([0]),
             "env.num_task_rooms": tune.grid_search([1]),
             # "trace_length": tune.grid_search([20]),
+            'env.test_itermediary_rewards': tune.grid_search([True]),
             # "out_conv_dim": tune.grid_search([16, 0]),
         },
         # {
