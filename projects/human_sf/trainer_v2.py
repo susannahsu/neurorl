@@ -794,9 +794,9 @@ def sweep(search: str = 'default'):
             "env.num_task_rooms": tune.grid_search([1]),
             "agent": tune.grid_search(['flat_usfa']),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['usfa-25-double-check']),
-            "sf_coeff": tune.grid_search([10.0, 1.0]),
-            'env.test_itermediary_rewards': tune.grid_search([True, False]),
+            "group": tune.grid_search(['usfa-26-indicator_weights-2']),
+            "sf_coeff": tune.grid_search([1.0, 0.0]),
+            # 'env.test_itermediary_rewards': tune.grid_search([True, False]),
         },
     ]
   elif search == 'q':

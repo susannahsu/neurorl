@@ -211,6 +211,7 @@ class UsfaLossFn(basics.RecurrentLossFn):
   loss_fn : str = 'qlearning'
   lambda_: float  = .9
   sum_cumulants: bool = True
+  indicator_weights: bool = False
 
   def error(self, data, online_preds, online_state, target_preds, target_state, **kwargs):
     # ======================================================
@@ -313,8 +314,12 @@ class UsfaLossFn(basics.RecurrentLossFn):
     #---------------------
     task_td = self.extract_task_dim(sf_td_error)
     task_w = self.extract_task(data)[:-1]
+    task_weights = task_w
+    if self.indicator_weights:
+      task_weights = (jnp.abs(task_w) < 1e-5).astype(task_w.dtype)  # float
+
     # [T, B, C]*[T, B, C] = [T, B]
-    value_td_error = (task_td*task_w).sum(-1)
+    value_td_error = (task_td*task_weights).sum(-1)
 
     #---------------------
     # Compute average loss for SFs
@@ -902,10 +907,10 @@ class UsfaArch(hk.RNNCore):
       evaluation: bool = False,
   ) -> Tuple[USFAPreds, hk.LSTMState]:
     torso_outputs = self._torso(inputs)  # [D+A+1]
-    context = inputs.observation['context'].astype(torso_outputs.image.dtype)
-    state_features = inputs.observation['state_features'].astype(torso_outputs.image.dtype)
+    # context = inputs.observation['context'].astype(torso_outputs.image.dtype)
+    # state_features = inputs.observation['state_features'].astype(torso_outputs.image.dtype)
     memory_input = jnp.concatenate(
-      (torso_outputs.image, torso_outputs.action, context, state_features), axis=-1)
+      (torso_outputs.image, torso_outputs.action), axis=-1)
 
     core_outputs, new_state = self._memory(memory_input, state)
 
@@ -935,10 +940,10 @@ class UsfaArch(hk.RNNCore):
     """Efficient unroll that applies torso, core, and duelling mlp in one pass."""
 
     torso_outputs = hk.BatchApply(self._torso)(inputs)  # [T, B, D+A+1]
-    context = inputs.observation['context'].astype(torso_outputs.image.dtype)
-    state_features = inputs.observation['state_features'].astype(torso_outputs.image.dtype)
+    # context = inputs.observation['context'].astype(torso_outputs.image.dtype)
+    # state_features = inputs.observation['state_features'].astype(torso_outputs.image.dtype)
     memory_input = jnp.concatenate(
-      (torso_outputs.image, torso_outputs.action, context, state_features), axis=-1)
+      (torso_outputs.image, torso_outputs.action), axis=-1)
 
     core_outputs, new_states = hk.static_unroll(
       self._memory, memory_input, state)

@@ -22,10 +22,11 @@ import library.networks as networks
 
 from td_agents import basics
 from projects.human_sf import utils
-from projects.human_sf import usfa
+from projects.human_sf import usfa_offtask as usfa
 from projects.human_sf import object_q_learning
 
 Array = acme_types.NestedArray
+Config = usfa.Config
 
 LARGE_NEGATIVE = -1e7
 
@@ -65,12 +66,14 @@ class ObjectOrientedUsfaArch(hk.RNNCore):
   def __init__(self,
                torso: networks.OarTorso,
                memory: hk.RNNCore,
-               sf_head: usfa.SfGpiHead,
+               head: usfa.SfGpiHead,
+               learning_support: str,
                name: str = 'usfa_arch'):
     super().__init__(name=name)
     self._torso = torso
     self._memory = memory
-    self._sf_head = sf_head
+    self._head = head
+    self._learning_support = learning_support
 
     # process_inputs = functools.partial(
     #   utils.process_inputs,
@@ -98,13 +101,13 @@ class ObjectOrientedUsfaArch(hk.RNNCore):
 
     objects_mask = inputs.observation['objects_mask'].astype(core_outputs.dtype)
     if evaluation:
-      predictions = self._sf_head.evaluate(
+      predictions = self._head.evaluate(
         task=inputs.observation['task'],
         usfa_input=core_outputs,
         train_tasks=inputs.observation['train_tasks']
         )
     else:
-      predictions = self._sf_head(
+      predictions = self._head(
         usfa_input=core_outputs,
         task=inputs.observation['task'],
       )
@@ -128,9 +131,20 @@ class ObjectOrientedUsfaArch(hk.RNNCore):
     core_outputs, new_states = hk.static_unroll(
       self._memory, memory_input, state)
 
-    predictions = jax.vmap(jax.vmap(self._sf_head))(
-        core_outputs,                # [T, B, D]
+    if self._learning_support == 'train_tasks':
+      # [T, B, N, D]
+      support = inputs.observation['train_tasks']
+    elif self._learning_support == 'eval':
+      # [T, B, 1, D]
+      support = jnp.expand_dims(inputs.observation['task'], axis=-2)
+    else:
+      raise NotImplementedError(self._learning_support)
+
+    # treat T,B like this don't exist with vmap
+    predictions = jax.vmap(jax.vmap(self._head.evaluate))(
         inputs.observation['task'],  # [T, B]
+        core_outputs,                # [T, B, D]
+        support,
       )
 
     objects_mask = inputs.observation['objects_mask'].astype(core_outputs.dtype)
@@ -153,7 +167,14 @@ def make_minigrid_networks(
 
   def make_core_module() -> ObjectOrientedUsfaArch:
 
-    sf_net = usfa.MonolithicSfHead(
+    if config.head == 'independent':
+      SfNetCls = usfa.IndependentSfHead
+    elif config.head == 'monolithic':
+      SfNetCls = usfa.MonolithicSfHead
+    else:
+      raise NotImplementedError
+
+    sf_net = SfNetCls(
       layers=config.sf_layers,
       state_features_dim=state_features_dim,
       num_actions=num_actions,
@@ -161,7 +182,9 @@ def make_minigrid_networks(
       combine_policy=config.combine_policy,
       activation=config.sf_activation,
       mlp_type=config.sf_mlp_type,
-    )
+      out_init_value=config.out_init_value,
+      )
+
     usfa_head = usfa.SfGpiHead(
       num_actions=num_actions,
       nsamples=config.nsamples,
@@ -178,7 +201,8 @@ def make_minigrid_networks(
         output_fn=networks.TorsoOutput,
       ),
       memory=hk.LSTM(config.state_dim),
-      sf_head=usfa_head)
+      head=usfa_head,
+      learning_support=config.learning_support)
 
   return networks_lib.make_unrollable_network(
     env_spec, make_core_module)

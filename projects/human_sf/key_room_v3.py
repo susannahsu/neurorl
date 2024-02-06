@@ -303,7 +303,7 @@ class KeyRoom(LevelGen):
       color_rooms: bool = True,
       ignore_task: bool = False,
       training=True,
-      test_itermediary_rewards: bool = False,
+      test_itermediary_rewards: bool = True,
       train_basic_objects: bool = True,
       # include_task_signals=False,
       max_steps_per_room: int = 100,
