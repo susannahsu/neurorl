@@ -114,3 +114,64 @@ python configs/catch_trainer.py \
   --use_wandb=False \
   --search='baselines'
 ```
+
+
+# Setup conda activate/deactivate
+
+**ONE TIME CHANGE TO MAKE YOUR LIFE EASIER**. if you want to avoid having to load modules and set environment variables each time you load this environment, you can add loading things to the activation file. Below is how.
+
+```
+# first activate env
+source activate neurorl
+
+# make activation/deactivation directories
+activation_dir=$CONDA_PREFIX/etc/conda/activate.d
+mkdir -p $activation_dir
+mkdir -p $CONDA_PREFIX/etc/conda/deactivate.d
+
+# module loading added to activation
+echo 'module load cuda/11.8.0-fasrc01  ' > $activation_dir/env_vars.sh
+echo 'module load cudnn/8.9.2.26_cuda11-fasrc01' >> $activation_dir/env_vars.sh
+
+# setting PYTHONPATH added to activation
+echo 'export PYTHONPATH=$PYTHONPATH:.' >> $activation_dir/env_vars.sh
+
+# setting LD_LIBRARY_PATH added to activation
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib/' >> $activation_dir/env_vars.sh
+
+# undoing LD_LIBRARY_PATH added to deactivation
+echo 'unset LD_LIBRARY_PATH' >> $CONDA_PREFIX/etc/conda/deactivate.d/env_vars.sh
+```
+
+For automatically setting the LD library path to point to the current cudnn directory do the following
+```
+# general
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/path/to/cudnn/lib' >> $activation_dir/env_vars.sh
+# mine
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/n/sw/helmod-rocky8/apps/Core/cudnn/8.9.2.26_cuda11-fasrc01/lib/' >> $activation_dir/env_vars.sh
+```
+
+
+
+## (Optionally) permanently set the results directory
+```
+echo 'export RL_RESULTS_DIR=${results_dir}' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
+```
+example:
+```
+echo 'export RL_RESULTS_DIR=$HOME/rl_results' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
+```
+
+Otherwise, can set each time run experiment
+```
+RL_RESULTS_DIR=${results_dir} python trainer.py
+```
+
+## (Optional) setup wandb
+```
+pip install wandb
+wandb login
+```
+Once you set up a wandb project and have logged runs, group them by the following settings:
+- Group: name of search run
+- Name: name of individual runs (this aggregates all seeds together)
