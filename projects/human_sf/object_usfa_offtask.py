@@ -47,9 +47,10 @@ def mask_predictions(
   action_mask = make_action_mask(objects_mask, num_actions)
 
   mask = lambda x: jnp.where(action_mask, x, LARGE_NEGATIVE)
-
   q_values = mask(predictions.q_values)  # [A]
 
+
+  mask = lambda x: jnp.where(action_mask, x, 0.0)
   # vmap over dims 0 and 2
   mask = jax.vmap(mask)
   mask = jax.vmap(mask, 2, 2)
