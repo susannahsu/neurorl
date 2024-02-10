@@ -67,7 +67,8 @@ class Config(basics.Config):
   weight_type: str = 'reg'
   combination: str = 'loss'
 
-def cumulants_from_env(data, online_preds, online_state, target_preds, target_state):
+def cumulants_from_env(
+    data, online_preds=None, online_state=None, target_preds=None, target_state=None):
   # [T, B, C]
   cumulants = data.observation.observation['state_features']
 
@@ -399,9 +400,7 @@ class MultitaskUsfaLossFn(basics.RecurrentLossFn):
     # cumulants
     #---------------
     # pseudo rewards, [T/T+1, B, C]
-    cumulants = self.extract_cumulants(
-      data=data, online_preds=online_preds, online_state=online_state,
-      target_preds=target_preds, target_state=target_state)
+    cumulants = self.extract_cumulants(data=data)
     cumulants = cumulants.astype(online_sf.dtype)
 
     #---------------

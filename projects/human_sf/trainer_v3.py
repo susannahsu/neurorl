@@ -88,6 +88,7 @@ from projects.human_sf import muzero
 from projects.human_sf import object_muzero
 from projects.human_sf import scalar_muzero
 from projects.human_sf import usfa_offtask as usfa
+from projects.human_sf import usfa_dyna_offtask as usfa_dyna
 from projects.human_sf import object_usfa_offtask as object_usfa
 from projects.human_sf import utils as human_proj_utils
 
@@ -171,7 +172,7 @@ def make_keyroom_env(
   """
   del seed
   if debug:
-    steps_per_room = 5
+    # steps_per_room = 30
     basic_only = 0
     num_task_rooms = 4
 
@@ -234,7 +235,9 @@ def make_q_loss_fn(config):
           max_priority_weight=config.max_priority_weight,
           bootstrap_n=config.bootstrap_n,
         )
-def make_sf_loss_fn(config):
+
+
+def make_sf_loss_fn(config, **kwargs):
   return usfa.MultitaskUsfaLossFn(
     discount=config.discount,
     importance_sampling_exponent=config.importance_sampling_exponent,
@@ -250,6 +253,34 @@ def make_sf_loss_fn(config):
     combination=config.combination,
     off_task_weight=config.off_task_weight,
     q_coeff=config.q_coeff,
+    **kwargs
+  )
+
+
+def make_sf_dyna_loss_fn(config, **kwargs):
+  return usfa_dyna.MtrlDynaUsfaLossFn(
+    discount=config.discount,
+    importance_sampling_exponent=config.importance_sampling_exponent,
+    burn_in_length=config.burn_in_length,
+    max_replay_size=config.max_replay_size,
+    max_priority_weight=config.max_priority_weight,
+    bootstrap_n=config.bootstrap_n,
+    task_coeff=config.task_coeff,
+    dyna_coeff=config.dyna_coeff,
+    model_coeff=config.model_coeff,
+    n_dyna_actions=config.n_dyna_actions,
+    n_dyna_tasks=config.n_dyna_tasks,
+    weighted_coeff=config.weighted_coeff,
+    unweighted_coeff=config.unweighted_coeff,
+    simulation_steps=config.simulation_steps,
+    **kwargs,
+    # loss_fn=config.loss_fn,
+    # lambda_=config.sf_lambda,
+    # sum_cumulants=config.sum_cumulants,
+    # weight_type=config.weight_type,
+    # combination=config.combination,
+    # off_task_weight=config.off_task_weight,
+    # q_coeff=config.q_coeff,
   )
 
 def setup_experiment_inputs(
@@ -309,6 +340,19 @@ def setup_experiment_inputs(
       LossFn=make_sf_loss_fn(config))
     network_factory = functools.partial(
             usfa.make_minigrid_networks, config=config)
+
+  elif agent == 'flat_usfa_dyna':
+    # has no mechanism to select from object options since dependent on what agent sees
+    env_kwargs['object_options'] = False
+
+    config = usfa_dyna.Config(**config_kwargs)
+    builder = basics.Builder(
+      config=config,
+      ActorCls=functools.partial(basics.BasicActor, observers=[sf_observer]),
+      get_actor_core_fn=usfa_dyna.get_actor_core,
+      LossFn=make_sf_dyna_loss_fn(config))
+    network_factory = functools.partial(
+            usfa_dyna.make_minigrid_networks, config=config)
 
   elif agent == 'flat_muzero':
     # has no mechanism to select from object options since dependent on what agent sees
@@ -609,8 +653,8 @@ def run_single():
     agent_config_kwargs.update(dict(
       samples_per_insert=1,
       min_replay_size=40,
-      batch_size=1,
-      trace_length=30,
+      batch_size=2,
+      trace_length=5,
     ))
     env_kwargs.update(dict(
     ))
@@ -782,6 +826,27 @@ def sweep(search: str = 'default'):
               ]),
             # 'sf_coeff': tune.grid_search([1.0, 0.0]),
             # 'loss_fn': tune.grid_search(['qlearning', 'qlambda']),
+        },
+    ]
+  elif search == 'usfa_dyna':
+    space = [
+        {
+            # "num_steps": tune.grid_search([5e6]),
+            # "env.basic_only": tune.grid_search([1]),
+            "num_steps": tune.grid_search([20e6]),
+            "env.num_task_rooms": tune.grid_search([1]),
+            "agent": tune.grid_search([
+              # 'object_usfa',
+              'flat_usfa_dyna'
+            ]),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['usfa_dyna-1']),
+            "unweighted_coeff": tune.grid_search([1, .1]),
+            # "task_coeff": tune.grid_search([1, .1]),
+            "model_coeff": tune.grid_search([1, .1]),
+            "dyna_coeff": tune.grid_search([0.]),
+            'n_dyna_actions': tune.grid_search([2]),
+            'n_dyna_tasks': tune.grid_search([3]),
         },
     ]
   elif search == 'q':
