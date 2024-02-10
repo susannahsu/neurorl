@@ -75,7 +75,7 @@ class Config(basics.Config):
   samples_per_insert: float = 10.0
   trace_length: int = 20
   weighted_coeff: float = 1.0
-  unweighted_coeff: float = 0.1
+  unweighted_coeff: float = 1.0
 
   # Online loss
   task_coeff: float = 1.0
@@ -289,7 +289,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   # Shared
   bootstrap_n: int = 5
   weighted_coeff: float = 1.0
-  unweighted_coeff: float = 0.1
+  unweighted_coeff: float = 1.0
 
   # Online loss
   task_coeff: float = 1.0
@@ -356,7 +356,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       # update
       total_batch_td_error += dyna_td_error*self.dyna_coeff
       total_batch_loss += dyna_batch_loss*self.dyna_coeff
-      metrics.update({f'1.dyna.{k}': v for k, v in dyna_metrics.items()})
+      metrics.update({f'2.dyna.{k}': v for k, v in dyna_metrics.items()})
 
     #==========================
     # Online SF-learning loss
@@ -375,7 +375,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
       total_batch_td_error += ontask_batch_td_error*self.task_coeff
       total_batch_loss += ontask_batch_loss*self.task_coeff
-      metrics.update({f'0.online.{k}': v for k, v in ontask_metrics.items()})
+      metrics.update({f'1.online.{k}': v for k, v in ontask_metrics.items()})
 
     # ==========================
     # Model loss
@@ -400,8 +400,9 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         )
 
       total_batch_loss += model_batch_loss*self.model_coeff
-      metrics.update({f'2.model.{k}': v for k, v in model_metrics.items()})
+      metrics.update({f'3.model.{k}': v for k, v in model_metrics.items()})
 
+    metrics['0.total_loss'] = total_batch_loss
     # remove last time-step since invalid for RL loss
     total_batch_td_error = total_batch_td_error[:-1]
     return total_batch_td_error, total_batch_loss, metrics
@@ -573,21 +574,24 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       key, sample_key = jax.random.split(key)
       sampled_actions = jax.random.choice(
         sample_key, num_actions, shape=(self.n_dyna_actions,), replace=True)
-      q_values = (sf*task[:, None]).sum(-1)
+
+      q_values = (sf*task[None]).sum(-1)
       optimal_q_action = jnp.argmax(q_values, axis=-1)
 
       # [K+1]
       sampled_actions = jnp.concatenate(
         (sampled_actions, optimal_q_action[None]))
+      nactions = len(sampled_actions)
 
       #-----------------------
       # apply model K times for params and target_params
       #-----------------------
-      key, model_keys = split_key(key, N=self.n_dyna_actions)
+      key, model_keys = split_key(key, N=nactions)
       # [K, ...]
       model_outputs, _ = apply_model(
           model_keys, online_state, sampled_actions)
-      key, model_keys = split_key(key, N=self.n_dyna_actions)
+
+      key, model_keys = split_key(key, N=nactions)
       # [K, ...]
       target_model_outputs, _ = apply_target_model(
           model_keys, target_state, sampled_actions)
@@ -601,7 +605,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       #-----------------------
       # [K, A, C]
       # using regular params, this will be used for Q-value action-selection
-      key, sf_keys = split_key(key, N=self.n_dyna_actions)
+      key, sf_keys = split_key(key, N=nactions)
       next_sf_predictions = jax.vmap(
         compute_sfs,
         in_axes=(0, 0, None), out_axes=0)(
@@ -610,7 +614,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       next_q_values = next_sf_predictions.q_values
 
       # using target params, this will define the targets
-      key, sf_keys = split_key(key, N=self.n_dyna_actions)
+      key, sf_keys = split_key(key, N=nactions)
       target_next_sf_predictions = jax.vmap(
         compute_target_sfs,
         in_axes=(0, 0, None), out_axes=0)(

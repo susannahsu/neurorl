@@ -256,7 +256,6 @@ def make_sf_loss_fn(config, **kwargs):
     **kwargs
   )
 
-
 def make_sf_dyna_loss_fn(config, **kwargs):
   return usfa_dyna.MtrlDynaUsfaLossFn(
     discount=config.discount,
@@ -273,15 +272,7 @@ def make_sf_dyna_loss_fn(config, **kwargs):
     weighted_coeff=config.weighted_coeff,
     unweighted_coeff=config.unweighted_coeff,
     simulation_steps=config.simulation_steps,
-    **kwargs,
-    # loss_fn=config.loss_fn,
-    # lambda_=config.sf_lambda,
-    # sum_cumulants=config.sum_cumulants,
-    # weight_type=config.weight_type,
-    # combination=config.combination,
-    # off_task_weight=config.off_task_weight,
-    # q_coeff=config.q_coeff,
-  )
+    **kwargs)
 
 def setup_experiment_inputs(
     make_environment_fn: Callable,
@@ -309,8 +300,8 @@ def setup_experiment_inputs(
 
   q_observer  = q_learning.Observer(period=1 if debug else 5000)
   sf_observer = usfa.Observer(
-    # plot_success_only=False if debug else True,
-    period=1 if debug else 10000)
+    plot_success_only=False if debug else True,
+    period=1 if debug else 5000)
 
 
   if agent == 'flat_q':
@@ -840,13 +831,12 @@ def sweep(search: str = 'default'):
               'flat_usfa_dyna'
             ]),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['usfa_dyna-1']),
-            "unweighted_coeff": tune.grid_search([1, .1]),
+            "group": tune.grid_search(['usfa_dyna-3']),
             # "task_coeff": tune.grid_search([1, .1]),
-            "model_coeff": tune.grid_search([1, .1]),
-            "dyna_coeff": tune.grid_search([0.]),
-            'n_dyna_actions': tune.grid_search([2]),
-            'n_dyna_tasks': tune.grid_search([3]),
+            # "model_coeff": tune.grid_search([1]),
+            "dyna_coeff": tune.grid_search([1., .1]),
+            # 'n_dyna_actions': tune.grid_search([2]),
+            'n_dyna_tasks': tune.grid_search([5, 10]),
         },
     ]
   elif search == 'q':
