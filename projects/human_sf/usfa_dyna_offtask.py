@@ -23,6 +23,7 @@ from acme.wrappers import observation_action_reward
 from library.utils import episode_mean
 from library.utils import make_episode_mask
 from library.utils import rolling_window
+from library.utils import scale_gradient
 from library import muzero_mlps
 import library.networks as networks
 
@@ -79,32 +80,25 @@ class Config(basics.Config):
 
   # Online loss
   task_coeff: float = 1.0
-  loss_fn : str = 'qlambda'
+  loss_fn : str = 'qlearning'
   lambda_: float  = .9
 
   # Dyna loss
   dyna_coeff: float = 0.1
-  n_dyna_actions: int = 1
-  n_dyna_tasks: int = 5
+  n_actions_dyna: int = 1
+  n_tasks_dyna: int = 5
 
   # Model loss
   simulation_steps: int = 5
   feature_coeff: float = 1.0
   sf_coeff: float = 1.0
   model_coeff: float = 1.0
+  scale_grad: float = .5
 
 
 ###################################
 # DATA CLASSES
 ###################################
-class Predictions(NamedTuple):
-  state: jax.Array
-  q_values: jnp.ndarray  # q-value
-  sf: jnp.ndarray # successor features
-  policy: jnp.ndarray  # policy vector
-  task: jnp.ndarray  # task vector (potentially embedded)
-  action_mask: Optional[jax.Array] = None
-
 @dataclasses.dataclass
 class MbrlSfNetworks:
   """Network that can unroll state-fn and apply model or SFs over an input sequence."""
@@ -115,11 +109,22 @@ class MbrlSfNetworks:
   apply_model: ModelFn
   compute_sfs: ModelFn
 
+
+class Predictions(NamedTuple):
+  state: jax.Array
+  q_values: jnp.ndarray  # q-value
+  sf: jnp.ndarray # successor features
+  policy: jnp.ndarray  # policy vector
+  task: jnp.ndarray  # task vector (potentially embedded)
+  action_mask: Optional[jax.Array] = None
+
+
 @chex.dataclass(frozen=True)
 class ModelOuputs:
   state: jax.Array
   state_features: Optional[jax.Array] = None
   action_mask: Optional[jax.Array] = None
+  action_mask_logits: Optional[jax.Array] = None
 
 
 ###################################
@@ -138,6 +143,24 @@ def split_key(key, N):
   key = keys[0]
   return key, key_set
 
+def mask_predictions(
+    predictions: Predictions,
+    action_mask: jax.Array):
+
+  mask = lambda x: jnp.where(action_mask, x, LARGE_NEGATIVE)
+  q_values = mask(predictions.q_values)  # [A]
+
+
+  mask = lambda x: jnp.where(action_mask, x, 0.0)
+  # vmap over dims 0 and 2
+  mask = jax.vmap(mask)
+  mask = jax.vmap(mask, 2, 2)
+  sf = mask(predictions.sf)   # [N, A, Cumulants]
+
+  return predictions._replace(
+    q_values=q_values,
+    sf=sf,
+    action_mask=action_mask)
 
 ###################################
 # Loss functions
@@ -167,23 +190,19 @@ def one_step_sf_td(
 @dataclasses.dataclass
 class SFTDError:
   bootstrap_n: int = 5
-  loss_fn : str = 'qlambda'
+  loss_fn : str = 'qlearning'
 
   def __call__(
     self,
     online_sf: jax.Array,
     online_actions: jax.Array,
-    task_w: jax.Array,
     cumulants: jax.Array,
     discounts: jax.Array,
     target_sf: jax.Array,
     lambda_: jax.Array,
+    selector_actions: jax.Array,
     ):
 
-    # Get selector actions from online Q-values for double Q-learning.
-    online_q =  (online_sf*task_w[:, None]).sum(axis=-1) # [T+1, A]
-    selector_actions = jnp.argmax(online_q, axis=-1) # [T+1]
-    # import ipdb; ipdb.set_trace()
     if self.loss_fn == 'qlearning':
       error_fn = functools.partial(
         rlax.transformed_n_step_q_learning,
@@ -293,16 +312,16 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
   # Online loss
   task_coeff: float = 1.0
-  loss_fn : str = 'qlambda'
+  loss_fn : str = 'qlearning'
   lambda_: float  = .9
 
   # Dyna loss
   dyna_coeff: float = 1.0
-  n_dyna_actions: int = 1
-  n_dyna_tasks: int = 5
+  n_actions_dyna: int = 1
+  n_tasks_dyna: int = 5
 
   # Model loss
-  simulation_steps: int = 1
+  simulation_steps: int = 5
   feature_coeff: float = 1.0
   sf_coeff: float = 1.0
   model_coeff: float = 1.0
@@ -326,7 +345,6 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
     # mask of 1s for all time-steps except for terminal
     episode_mask = make_episode_mask(data, include_final=False)
-
     # ==========================
     # Dyna SF-learning loss
     # =========================
@@ -343,9 +361,10 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       T, B = data.discount.shape[:2]
       key_grad, loss_keys = split_key(key_grad, N=T*B)
       loss_keys = loss_keys.reshape(T, B, 2)
+      discounts = data.discount
       # [T, B], [B], [B]
       dyna_td_error, dyna_batch_loss, dyna_metrics = multitask_dyna_loss(
-            data.discount,
+            discounts,
             online_preds,
             target_preds,
             train_tasks,
@@ -443,17 +462,20 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     #---------------
     # loss
     #---------------
+    # Get selector actions from online Q-values for double Q-learning.
+    selector_actions = jnp.argmax(online_preds.q_values, axis=-1) # [T+1]
+
     td_fn = SFTDError(loss_fn=self.loss_fn)
     batch_axis = 1
     # [T, B, C]
     td_errors = jax.vmap(td_fn, batch_axis, batch_axis)(
       online_sf[:-1],      # [T, B, A, C]
       data.action[:-1],    # [T, B]
-      online_preds.task[:-1],
       cumulants,
       discounts[:-1],
       target_sf[1:],
       lambda_[:-1],
+      selector_actions[1:]
     )
 
     # vmap over time + batch dimensions
@@ -553,6 +575,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       online_state: jax.Array,
       target_state: jax.Array,
       sf: jax.Array,
+      q_values: jax.Array,
       task: jax.Array,
       discounts_: jax.Array,
       key: networks_lib.PRNGKey,
@@ -570,13 +593,12 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       Returns:
           _type_: _description_
       """
+      optimal_q_action = jnp.argmax(q_values, axis=-1)
+
       # sample K random actions. append the optimal action by current Q-values
       key, sample_key = jax.random.split(key)
       sampled_actions = jax.random.choice(
-        sample_key, num_actions, shape=(self.n_dyna_actions,), replace=True)
-
-      q_values = (sf*task[None]).sum(-1)
-      optimal_q_action = jnp.argmax(q_values, axis=-1)
+        sample_key, num_actions, shape=(self.n_actions_dyna,), replace=True)
 
       # [K+1]
       sampled_actions = jnp.concatenate(
@@ -596,8 +618,6 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       target_model_outputs, _ = apply_target_model(
           model_keys, target_state, sampled_actions)
 
-      next_state_features = jax.lax.stop_gradient(
-        model_outputs.state_features)
 
       #-----------------------
       # successor features from model at t+1
@@ -606,21 +626,19 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       # [K, A, C]
       # using regular params, this will be used for Q-value action-selection
       key, sf_keys = split_key(key, N=nactions)
-      next_sf_predictions = jax.vmap(
+      next_predictions = jax.vmap(
         compute_sfs,
         in_axes=(0, 0, None), out_axes=0)(
           # [K, 2], [K, D], [C]
           sf_keys, model_outputs.state, task)
-      next_q_values = next_sf_predictions.q_values
 
       # using target params, this will define the targets
       key, sf_keys = split_key(key, N=nactions)
-      target_next_sf_predictions = jax.vmap(
+      target_next_predictions = jax.vmap(
         compute_target_sfs,
         in_axes=(0, 0, None), out_axes=0)(
           # [K, 2], [K, D], [C]
           sf_keys, target_model_outputs.state, task)
-      target_next_sf = target_next_sf_predictions.sf
 
       #-----------------------
       # TD error
@@ -630,10 +648,13 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         one_step_sf_td,
         in_axes=(None, 0, 0, 0, None, 0))
 
+      next_state_features = model_outputs.state_features
+      next_q_values = next_predictions.q_values
+      target_next_sf = target_next_predictions.sf
       return td_error_fn(
         sf,                   # [A, C]
         sampled_actions,      # [K]
-        next_state_features,  # [K, C]
+        jax.lax.stop_gradient(next_state_features),  # [K, C]
         jax.lax.stop_gradient(target_next_sf),             # [K, A, C]
         discounts_,                                # []
         jax.lax.stop_gradient(next_q_values),             # [A]
@@ -644,12 +665,14 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     #---------------
     # [M, C]
     rng_key, sample_key = jax.random.split(rng_key)
+    max_tasks = tasks.shape[0]
+    ntasks = min(max_tasks, self.n_tasks_dyna)
     sampled_tasks = jax.random.choice(
-      sample_key, tasks, shape=(self.n_dyna_tasks,), replace=True)
+      sample_key, tasks, shape=(ntasks,), replace=False)
 
     # [M, A, C]
-    rng_key, sf_keys = split_key(rng_key, N=self.n_dyna_tasks)
-    task_sf_predictions = jax.vmap(
+    rng_key, sf_keys = split_key(rng_key, N=ntasks)
+    predictions = jax.vmap(
       compute_sfs,
       in_axes=(0, None, 0), out_axes=0)(
         # [M, 2], [D], [M, C]
@@ -659,13 +682,14 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     # get sf_dyna td-errors for each of the K task SFs
     #---------------
     loss_fn = jax.vmap(sf_dyna_td,
-      in_axes=(None, None, 0, 0, None, 0))
+      in_axes=(None, None, 0, 0, 0, None, 0))
 
-    rng_key, task_keys = split_key(rng_key, N=self.n_dyna_tasks)
+    rng_key, task_keys = split_key(rng_key, N=ntasks)
     td_errors = loss_fn(
       online_preds.state,                    # [D]
       target_preds.state,                    # [D]
-      task_sf_predictions.sf,                              # [M, A, C]
+      predictions.sf,                              # [M, A, C]
+      predictions.q_values,                              # [M, A, C]
       sampled_tasks,                    # [M, C]
       discounts,               # []
       task_keys,                # [M]
@@ -685,7 +709,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     batch_loss = (task_weighted_loss * self.weighted_coeff + 
                   unweighted_loss * self.unweighted_coeff)
 
-    td_errors = td_errors.sum(axis=2).mean()
+    td_errors = td_errors.mean()
     batch_loss = batch_loss.mean()
 
     metrics = {
@@ -710,6 +734,9 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     params: networks_lib.Params,
     ):
 
+    # TODO: move this outside of this loss function
+    discounts = data.discount*self.discount
+
     assert self.simulation_steps < len(online_preds.state)
     def shorten(struct):
       return jax.tree_map(lambda x:x[:-self.simulation_steps], struct)
@@ -723,7 +750,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     roll = functools.partial(rolling_window, size=self.simulation_steps)
 
     #----------------------
-    # MODEL ACTIONS + LOSS, [T', ...]
+    # MODEL ACTIONS [T', ...]
     #----------------------
     model_actions = roll(actions[:-1])
 
@@ -733,17 +760,18 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     vmap_roll = jax.vmap(roll, 1, 2)
     state_features = self.extract_cumulants(data)
     state_features_target = vmap_roll(state_features)
+
     state_features_mask = episode_mask[:-1]
     state_features_mask_rolled = roll(state_features_mask)
 
 
     #----------------------
-    # SUCCESSOR FEATURES
+    # SUCCESSOR FEATURE TARGETS
     #----------------------
     # [T, A, C] --> [T, C] for chosen ones
-    target_net_sfs = target_preds.sf[1:]
+    target_net_sfs = target_preds.sf
     index = jax.vmap(rlax.batched_index, in_axes=(2, None), out_axes=1)
-    target_net_sfs = index(target_net_sfs, actions[1:])
+    target_net_sfs = index(target_net_sfs, actions)
 
     # compute return
     # [T, C]
@@ -753,24 +781,22 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       in_axes=(1, None, 1),
       out_axes=1)(
         # [T, C], [T], [T, C]
-        state_features, data.discount[:-1], target_net_sfs)
+        state_features, discounts[:-1], target_net_sfs[1:])
 
     # index starting at next-timestep since learning model
     num_sf_targets = sf_targets.shape[0] - 1
     zeros = jnp.zeros((1, sf_targets.shape[-1]))
     sf_targets = jnp.concatenate((sf_targets[1:], zeros))
 
+    # [T, C] --> [T', k, C] for unrolls
+    sf_targets = vmap_roll(sf_targets)
+    sf_targets = jax.lax.stop_gradient(sf_targets)
+
     # [T] --> [T', k] for unrolls
     sf_mask = jnp.concatenate(
       (episode_mask[1:num_sf_targets], jnp.zeros(2)))
     sf_mask_rolled = roll(sf_mask)
 
-    # [T, C] --> [T', k, C] for unrolls
-    sf_targets = vmap_roll(sf_targets)
-
-    # [T, C] --> [T', k, C]
-    task = online_preds.task[1:]
-    task = vmap_roll(task)
 
     # ------------
     # unrolls the model from each time-step in parallel
@@ -803,16 +829,23 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     compute_sfs = jax.vmap(compute_sfs)  # over time dimension
     compute_sfs = jax.vmap(compute_sfs)  # over simulation dimension
 
+    # PREP TASK
+    # [T, C] --> [T', k, C]
+    task = online_preds.task[1:]
+    task = vmap_roll(task)
+
+    # PREP PRNGkeys
     T = task.shape[0]
     rng_key, sf_keys = split_key(
       rng_key, N=T * self.simulation_steps)
     sf_keys = sf_keys.reshape(T, self.simulation_steps, 2)
 
+    # COMPUTE PREDICTIONS
     predictions = compute_sfs(sf_keys, model_outputs.state, task)
 
     # ------------
     # now that computed, select out the SF for the action taken in the env.
-    # this will be what we will predict
+    # this will be our prediction
     # ------------
     predicted_sfs = predictions.sf         # [T', k, A, C]
     next_step_actions = roll(actions[1:])  # [T', k, A]
@@ -837,7 +870,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       features_loss = episode_mean(features_l2, state_features_mask_)  # []
 
       sf_l2 = rlax.l2_loss(predicted_sf_, sf_target_)  # [k, C]
-      sf_l2 = sf_l2.mean(-1)  # [k]
+      sf_l2 = sf_l2.sum(-1)  # [k]
       sf_loss = episode_mean(sf_l2, sf_mask_)  # []
 
       return features_loss, sf_loss
@@ -1033,7 +1066,7 @@ class UsfaArch(hk.RNNCore):
       self,
       state: State,  # [B, D]
       action: jax.Array,  # [B]
-  ) -> Tuple[jax.Array, State]:
+  ) -> Tuple[ModelOuputs, State]:
     # [B, D], [B, D]
     model_predictions, new_state = self._transition_fn(action, state)
     return model_predictions, new_state
@@ -1116,6 +1149,7 @@ def make_minigrid_networks(
             channels=config.state_dim,
             num_blocks=config.transition_blocks)(
             action_onehot, state)
+        new_state = scale_gradient(new_state, config.scale_grad)
 
         state_features = muzero_mlps.PredictionMlp(
           config.feature_layers,
@@ -1126,7 +1160,6 @@ def make_minigrid_networks(
           state=new_state,
           state_features=state_features)
 
-        # out = utils.scale_gradient(out, config.scale_grad)
         return outputs, new_state
 
       if action_onehot.ndim == 2:
