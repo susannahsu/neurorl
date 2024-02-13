@@ -90,6 +90,7 @@ from projects.human_sf import scalar_muzero
 from projects.human_sf import usfa_offtask as usfa
 from projects.human_sf import usfa_dyna_offtask as usfa_dyna
 from projects.human_sf import object_usfa_offtask as object_usfa
+from projects.human_sf import object_usfa_dyna_offtask as object_usfa_dyna
 from projects.human_sf import utils as human_proj_utils
 
 from projects.human_sf import key_room_v3 as key_room
@@ -267,11 +268,18 @@ def make_sf_dyna_loss_fn(config, **kwargs):
     task_coeff=config.task_coeff,
     dyna_coeff=config.dyna_coeff,
     model_coeff=config.model_coeff,
-    n_dyna_actions=config.n_dyna_actions,
-    n_dyna_tasks=config.n_dyna_tasks,
+    model_sf_coeff=config.model_sf_coeff,
+    # task_weighted_cumulant_loss=config.task_weighted_cumulant_loss,
+    mask_zero_features=config.mask_zero_features,
+    feature_coeff=config.feature_coeff,
+    loss_fn=config.loss_fn,
+    n_actions_dyna=config.n_actions_dyna,
+    n_tasks_dyna=config.n_tasks_dyna,
+    binary_feature_loss=config.binary_feature_loss,
     weighted_coeff=config.weighted_coeff,
     unweighted_coeff=config.unweighted_coeff,
     simulation_steps=config.simulation_steps,
+    cat_coeff=config.cat_coeff,
     **kwargs)
 
 def setup_experiment_inputs(
@@ -302,7 +310,9 @@ def setup_experiment_inputs(
   sf_observer = usfa.Observer(
     plot_success_only=False if debug else True,
     period=1 if debug else 5000)
-
+  sf_dyna_observer = usfa_dyna.Observer(
+    plot_success_only=False if debug else True,
+    period=1 if debug else 5000)
 
   if agent == 'flat_q':
     # has no mechanism to select from object options since dependent on what agent sees
@@ -339,7 +349,7 @@ def setup_experiment_inputs(
     config = usfa_dyna.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      ActorCls=functools.partial(basics.BasicActor, observers=[sf_observer]),
+      ActorCls=functools.partial(basics.BasicActor, observers=[sf_dyna_observer]),
       get_actor_core_fn=usfa_dyna.get_actor_core,
       LossFn=make_sf_dyna_loss_fn(config))
     network_factory = functools.partial(
@@ -435,6 +445,18 @@ def setup_experiment_inputs(
       LossFn=make_sf_loss_fn(config))
     network_factory = functools.partial(
       object_usfa.make_minigrid_networks, config=config)
+
+  elif agent == 'object_usfa_dyna':
+    env_kwargs['object_options'] = True  # has no mechanism to select from object options since dependent on what agent sees
+
+    config = usfa_dyna.Config(**config_kwargs)
+    builder = basics.Builder(
+      config=config,
+      get_actor_core_fn=object_usfa_dyna.get_actor_core,
+      ActorCls=functools.partial(basics.BasicActor, observers=[sf_dyna_observer]),
+      LossFn=make_sf_dyna_loss_fn(config, action_mask=True))
+    network_factory = functools.partial(
+      object_usfa_dyna.make_minigrid_networks, config=config)
 
   elif agent == 'object_usfa_att':
     env_kwargs['object_options'] = True  # has no mechanism to select from object options since dependent on what agent sees
@@ -827,16 +849,19 @@ def sweep(search: str = 'default'):
             "num_steps": tune.grid_search([20e6]),
             "env.num_task_rooms": tune.grid_search([1]),
             "agent": tune.grid_search([
-              # 'object_usfa',
-              'flat_usfa_dyna'
+              'object_usfa_dyna',
+              # 'flat_usfa_dyna',
             ]),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['usfa_dyna-3']),
-            # "task_coeff": tune.grid_search([1, .1]),
-            # "model_coeff": tune.grid_search([1]),
-            "dyna_coeff": tune.grid_search([1., .1]),
-            # 'n_dyna_actions': tune.grid_search([2]),
-            'n_dyna_tasks': tune.grid_search([5, 10]),
+            "group": tune.grid_search(['usfa_dyna-10-test_itermediary_rewards']),
+            "model_coeff": tune.grid_search([1.]),
+            "dyna_coeff": tune.grid_search([1e-2, 1.]),
+            "feature_coeff": tune.grid_search([1.0]),
+            "binary_feature_loss": tune.grid_search([True]),
+            "mask_zero_features": tune.grid_search([.75, 0.0]),
+            'n_actions_dyna': tune.grid_search([5]),
+            'n_tasks_dyna': tune.grid_search([10]),
+            'env.test_itermediary_rewards': tune.grid_search([False, True]),
         },
     ]
   elif search == 'q':
