@@ -62,7 +62,7 @@ class Config(basics.Config):
   conv_flat_dim: Optional[int] = 0
   sf_layers : Tuple[int]=(128, 128)
   policy_layers : Tuple[int]=(128, 128)
-  feature_layers: Tuple[int]=(512, 512)
+  feature_layers: Tuple[int]=(128, 128)
   transition_blocks: int = 6
   combine_policy: str = 'sum'
 
@@ -136,6 +136,83 @@ class ModelOuputs:
 ###################################
 # Helper functions
 ###################################
+def index_sf(sfs, action):
+    index = jax.vmap(rlax.batched_index, in_axes=(2, None), out_axes=1)
+    # [B, A, C] --> [B, C]
+    sfs = index(sfs, action)
+    return sfs
+
+def q_learning_lambda_target(
+    r_t: jax.Array,
+    discount_t: jax.Array,
+    q_t: jax.Array,
+    a_t: jax.Array,
+    lambda_: jax.Array,
+    stop_target_gradients: bool = True,
+) -> jax.Array:
+  """Calculates Peng's or Watkins' Q(lambda) temporal difference error.
+
+  See "Reinforcement Learning: An Introduction" by Sutton and Barto.
+  (http://incompleteideas.net/book/ebook/node78.html).
+
+  Args:
+    q_tm1: sequence of Q-values at time t-1.
+    a_tm1: sequence of action indices at time t-1.
+    r_t: sequence of rewards at time t.
+    discount_t: sequence of discounts at time t.
+    q_t: sequence of Q-values at time t.
+    a_t: action index at times [[1, ... , T]] used to select target q-values to bootstrap from; max(target_q_t) for normal Q-learning, max(q_t) for double Q-learning.
+    lambda_: mixing parameter lambda, either a scalar (e.g. Peng's Q(lambda)) or
+      a sequence (e.g. Watkin's Q(lambda)).
+    stop_target_gradients: bool indicating whether or not to apply stop gradient
+      to targets.
+
+  Returns:
+    Q(lambda) temporal difference error.
+  """
+  v_t = rlax.batched_index(q_t, a_t)
+  target_tm1 = rlax.lambda_returns(r_t, discount_t, v_t, lambda_)
+
+  target_tm1 = jax.lax.select(stop_target_gradients,
+                              jax.lax.stop_gradient(target_tm1), target_tm1)
+  return target_tm1
+
+def n_step_q_learning_target(
+    target_q_t: jax.Array,
+    a_t: jax.Array,
+    r_t: jax.Array,
+    discount_t: jax.Array,
+    n: int = 5,
+    stop_target_gradients: bool = True,
+    tx_pair: rlax.TxPair = rlax.IDENTITY_PAIR,
+) -> jax.Array:
+  """Calculates transformed n-step TD errors.
+
+  See "Recurrent Experience Replay in Distributed Reinforcement Learning" by
+  Kapturowski et al. (https://openreview.net/pdf?id=r1lyTjAqYX).
+
+  Args:
+    q_tm1: Q-values at times [0, ..., T - 1].
+    a_tm1: action index at times [0, ..., T - 1].
+    target_q_t: target Q-values at time [1, ..., T].
+    a_t: action index at times [[1, ... , T]] used to select target q-values to
+      bootstrap from; max(target_q_t) for normal Q-learning, max(q_t) for double
+      Q-learning.
+    r_t: reward at times [1, ..., T].
+    discount_t: discount at times [1, ..., T].
+    n: number of steps over which to accumulate reward before bootstrapping.
+    stop_target_gradients: bool indicating whether or not to apply stop gradient
+      to targets.
+    tx_pair: TxPair of value function transformation and its inverse.
+
+  Returns:
+    Transformed N-step TD error.
+  """
+  v_t = rlax.batched_index(target_q_t, a_t)
+  target_tm1 = rlax.transformed_n_step_returns(
+      tx_pair, r_t, discount_t, v_t, n,
+      stop_target_gradients=stop_target_gradients)
+  return target_tm1
 
 def zero_entries_mask(x, key, mask_zero_probs=.25, eps=1e-5):
   """
@@ -474,7 +551,7 @@ def non_zero_elements_to_string(arr):
     return result
 
 def plot_sfgpi(sfs: np.array, train_tasks: np.array, frames: np.array, max_cols: int = 10, title:str = ''):
-    max_len = min(sfs.shape[0], 25)
+    max_len = min(sfs.shape[0], 100)
     sfs = sfs[:max_len]
     train_tasks = train_tasks[:max_len]
     frames = frames[:max_len]
@@ -841,6 +918,50 @@ class SFTDError:
     else:
       raise NotImplementedError
 
+@dataclasses.dataclass
+class SFTargetFn:
+  bootstrap_n: int = 5
+  loss_fn : str = 'qlearning'
+
+  def __call__(
+    self,
+    cumulants: jax.Array,
+    discounts: jax.Array,
+    target_sf: jax.Array,
+    lambda_: jax.Array,
+    selector_actions: jax.Array,
+    ):
+
+    if self.loss_fn == 'qlearning':
+      target_fn = functools.partial(
+        n_step_q_learning_target,
+        n=self.bootstrap_n)
+      # vmap over cumulant dimension (C), return in dim=3
+      target_fn = jax.vmap(
+        target_fn,
+        in_axes=(2, None, 1, None), out_axes=1)
+      targets = target_fn(
+        target_sf,  # [T, A, C]
+        selector_actions,  # [T]      
+        cumulants,  # [T, C]      
+        discounts)  # [T]         
+
+    elif self.loss_fn == 'qlambda':
+      target_fn = jax.vmap(q_learning_lambda_target,
+        in_axes=(1, None, 2, None, None), out_axes=1)
+
+      targets = target_fn(
+        cumulants,         # [T, C]    (vmap 1)
+        discounts,         # [T]       (vmap None)
+        target_sf,         # [T, A, C] (vmap 2)
+        selector_actions,  # [T]      
+        lambda_,           # [T]       (vmap None)
+      )
+    else:
+      raise NotImplementedError
+
+    return targets
+
 
 @dataclasses.dataclass
 class TaskWeightedSFLossFn:
@@ -933,7 +1054,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   model_sf_coeff: float = 1.0
   model_coeff: float = 1.0
   action_coeff: float = 1.0
-  cat_coeff: float = 1e-2
+  cat_coeff: float = 1.0
   binary_feature_loss: bool = True
   task_weighted_model: bool = True
   mask_zero_features: float = 0.0
@@ -955,47 +1076,47 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     total_batch_td_error = jnp.zeros((T, B))
     total_batch_loss = jnp.zeros(B)
 
+    #==========================
+    # Prepare SF-targets
+    # =========================
     # mask of 1s for all time-steps except for terminal
     episode_mask = make_episode_mask(data, include_final=False)
-    discounts = (data.discount*self.discount).astype(online_preds.q_values.dtype)
-    # ==========================
-    # Dyna SF-learning loss
-    # =========================
-    if self.dyna_coeff > 0:
-      multitask_dyna_loss = functools.partial(
-        self.multitask_dyna_loss,
-        networks=networks,
-        params=params,
-        target_params=target_params,
-        )
-      train_tasks = self.extract_tasks(data)
+    if self.action_mask:
+      action_mask = data.observation.observation.get('action_mask', None)
+    else:
+      num_actions = online_preds.q_values.shape[-1]
+      action_mask = jnp.ones((T, B, num_actions))
 
-      multitask_dyna_loss = jax.vmap(jax.vmap(multitask_dyna_loss))
-      T, B = data.discount.shape[:2]
-      key_grad, loss_keys = split_key(key_grad, N=T*B)
-      loss_keys = loss_keys.reshape(T, B, 2)
-      # [T, B], [B], [B]
+    #---------------
+    # SFs
+    #---------------
+    # all are [T+1, B, A, C]
+    # A = actions, C = cumulant dim
+    target_sf = target_preds.sf  # [T+1, B, A, C]
+    target_sf = target_sf*episode_mask[:,:, None, None]
 
-      if self.action_mask:
-        action_mask = data.observation.observation.get('action_mask', None)
-      else:
-        num_actions = online_preds.q_values.shape[-1]
-        action_mask = jnp.ones((T, B, num_actions))
+    #---------------
+    # discounts + lambda
+    #---------------
+    discounts = (data.discount*self.discount).astype(online_preds.sf.dtype)
+    lambda_ = (episode_mask*self.lambda_).astype(online_preds.sf.dtype)
 
-      dyna_td_error, dyna_batch_loss, dyna_metrics = multitask_dyna_loss(
-            discounts,
-            online_preds,
-            target_preds,
-            train_tasks,
-            action_mask,
-            loss_keys)
+    #---------------
+    # cumulants
+    #---------------
+    # pseudo rewards, [T/T+1, B, C]
+    cumulants = self.extract_cumulants(data=data).astype(online_preds.sf.dtype)
+    selector_actions = jnp.argmax(online_preds.q_values, axis=-1) # [T+1]
 
-      dyna_batch_loss = episode_mean(dyna_batch_loss, episode_mask)
+    sf_target_fn = SFTargetFn(loss_fn=self.loss_fn)
+    sf_target_fn = jax.vmap(sf_target_fn, 1, 1)  # over batch axis
 
-      # update
-      total_batch_td_error += dyna_td_error*self.dyna_coeff
-      total_batch_loss += dyna_batch_loss*self.dyna_coeff
-      metrics.update({f'2.dyna.{k}': v for k, v in dyna_metrics.items()})
+    sf_targets = sf_target_fn(
+      cumulants,
+      discounts[:-1],
+      target_preds.sf[1:],
+      lambda_[:-1],
+      selector_actions[1:])
 
     #==========================
     # Online SF-learning loss
@@ -1005,8 +1126,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       ontask_batch_td_error, ontask_batch_loss, ontask_metrics = self.ontask_loss(
           data=data,
           online_preds=online_preds,
-          target_preds=target_preds,
-          discounts=discounts,
+          sf_targets=sf_targets,
           episode_mask=episode_mask)
 
       # [T-1, B] --> [T, B]
@@ -1015,7 +1135,8 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
       total_batch_td_error += ontask_batch_td_error*self.task_coeff
       total_batch_loss += ontask_batch_loss*self.task_coeff
-      metrics.update({f'1.online.{k}': v for k, v in ontask_metrics.items()})
+      metrics.update(
+        {f'1.online.{k}': v for k, v in ontask_metrics.items()})
 
     # ==========================
     # Model loss
@@ -1034,14 +1155,44 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       model_batch_loss, model_metrics = model_loss_fn(
         data,
         online_preds,
-        target_preds,
-        data.action,
-        discounts,
         episode_mask,
-        )
+        sf_targets)
 
       total_batch_loss += model_batch_loss*self.model_coeff
       metrics.update({f'3.model.{k}': v for k, v in model_metrics.items()})
+
+    # ==========================
+    # Dyna SF-learning loss
+    # =========================
+    if self.dyna_coeff > 0:
+      multitask_dyna_loss = functools.partial(
+        self.multitask_dyna_loss,
+        networks=networks,
+        params=params,
+        target_params=target_params,
+        )
+      train_tasks = self.extract_tasks(data)
+
+      multitask_dyna_loss = jax.vmap(jax.vmap(multitask_dyna_loss))
+      T, B = data.discount.shape[:2]
+      key_grad, loss_keys = split_key(key_grad, N=T*B)
+      loss_keys = loss_keys.reshape(T, B, 2)
+      # [T, B], [B], [B]
+
+      dyna_td_error, dyna_batch_loss, dyna_metrics = multitask_dyna_loss(
+            discounts,
+            online_preds,
+            target_preds,
+            train_tasks,
+            action_mask,
+            loss_keys)
+
+      dyna_batch_loss = episode_mean(dyna_batch_loss, episode_mask)
+
+      # update
+      total_batch_td_error += dyna_td_error*self.dyna_coeff
+      total_batch_loss += dyna_batch_loss*self.dyna_coeff
+      metrics.update({f'2.dyna.{k}': v for k, v in dyna_metrics.items()})
 
     metrics['0.total_loss'] = total_batch_loss
     # remove last time-step since invalid for RL loss
@@ -1052,53 +1203,17 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     self,
     data: jax.Array,
     online_preds: jax.Array,
-    target_preds: jax.Array,
-    discounts: jax.Array,
+    sf_targets: jax.Array,
     episode_mask: jax.Array,
     ):
-    #---------------
-    # SFs
-    #---------------
-    # all are [T+1, B, A, C]
-    # A = actions, C = cumulant dim
+    # prepare online sfs
     online_sf = online_preds.sf  # [T+1, B, A, C]
-    target_sf = target_preds.sf  # [T+1, B, A, C]
-
-    # [T, B]
     online_sf = online_sf*episode_mask[:,:, None, None]
-    target_sf = target_sf*episode_mask[:,:, None, None]
+    online_sf = jax.vmap(index_sf, 1, 1)(
+      online_sf[:-1], data.action[:-1])
 
-    #---------------
-    # cumulants
-    #---------------
-    # pseudo rewards, [T/T+1, B, C]
-    cumulants = self.extract_cumulants(
-      data=data)
-    cumulants = cumulants.astype(online_sf.dtype)
-
-    #---------------
-    # discounts + lambda
-    #---------------
-    lambda_ = (data.discount * self.lambda_).astype(online_sf.dtype) 
-
-    #---------------
-    # loss
-    #---------------
-    # Get selector actions from online Q-values for double Q-learning.
-    selector_actions = jnp.argmax(online_preds.q_values, axis=-1) # [T+1]
-
-    td_fn = SFTDError(loss_fn=self.loss_fn)
-    batch_axis = 1
     # [T, B, C]
-    td_errors = jax.vmap(td_fn, batch_axis, batch_axis)(
-      online_sf[:-1],      # [T, B, A, C]
-      data.action[:-1],    # [T, B]
-      cumulants,
-      discounts[:-1],
-      target_sf[1:],
-      lambda_[:-1],
-      selector_actions[1:]
-    )
+    td_errors = sf_targets - online_sf
 
     # vmap over time + batch dimensions
     loss_fn = jax.vmap(jax.vmap(TaskWeightedSFLossFn()))
@@ -1116,12 +1231,256 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       '1.unweighted_loss': unweighted_loss,
       '1.task_weighted_loss': task_weighted_loss,
       '2.td_error': jnp.abs(td_errors),
-      '3.cumulants': cumulants,
       '3.sf_mean': online_sf,
       '3.sf_var': online_sf.var(axis=-1),
       }
 
     return td_errors, batch_loss, metrics
+
+  def model_loss(
+    self,
+    data: NestedArray,
+    online_preds: jax.Array,
+    episode_mask: jax.Array,
+    sf_targets: jax.Array,
+    rng_key: networks_lib.PRNGKey,
+    networks: MbrlSfNetworks,
+    params: networks_lib.Params,
+    ):
+
+    assert self.simulation_steps < len(online_preds.state)
+    def shorten(struct):
+      return jax.tree_map(lambda x:x[:-self.simulation_steps], struct)
+
+    # [T', D]
+    start_states = shorten(online_preds.state)
+    actions = data.action
+
+    # for every timestep t=0,...T,  we have predictions for t+1, ..., t+k where k = simulation_steps
+    # use rolling window to create T x k prediction targets
+    # this will shorten the data from T to T'=T-k+1
+    roll = functools.partial(rolling_window, size=self.simulation_steps)
+    # vmap over feature dim but but at 2nd dim __after__ simulation dim
+    vmap_roll = jax.vmap(roll, 1, 2)
+
+    #----------------------
+    # MODEL ACTIONS [T', ...]
+    #----------------------
+    model_actions = roll(actions[:-1])
+
+    #----------------------
+    # STATE FEATURES, [T', C]
+    #----------------------
+    state_features = self.extract_cumulants(data)
+    state_features_target = vmap_roll(state_features)
+
+    # mask over just time [T]
+    state_features_mask_T = episode_mask[:-1]
+
+    # mask over individual entries [T, C]
+    state_features_mask = state_features_mask_T[:,None]*jnp.ones_like(state_features)
+    if self.mask_zero_features > 0.0:
+      # if masking zeros out, mask out some proportion of when state features are 0.
+      # helps with data imbalance problem
+      rng_key, sample_key = jax.random.split(rng_key)
+      new_mask = zero_entries_mask(
+        x=state_features,
+        key=sample_key,
+        # if mask_zero_features=0.0, keep 100%
+        # if mask_zero_features=1.0, keep 0%.
+        mask_zero_probs=1.0-self.mask_zero_features)
+      state_features_mask = state_features_mask*new_mask
+
+    # [T', k, C]
+    state_features_mask_rolled = vmap_roll(state_features_mask)
+
+    #----------------------
+    # SUCCESSOR FEATURE TARGETS
+    #----------------------
+    # index starting at next-timestep since learning model
+    num_sf_targets = sf_targets.shape[0] - 1
+    zeros = jnp.zeros((1, sf_targets.shape[-1]))
+    sf_targets = jnp.concatenate((sf_targets[1:], zeros))
+
+    # [T, C] --> [T', k, C] for unrolls
+    sf_targets = vmap_roll(sf_targets)
+    sf_targets = jax.lax.stop_gradient(sf_targets)
+
+    # [T] --> [T', k] for unrolls
+    sf_mask = jnp.concatenate(
+      (episode_mask[1:num_sf_targets], jnp.zeros(2)))
+    sf_mask_rolled = roll(sf_mask)
+
+
+    # ------------
+    # unrolls the model from each time-step in parallel
+    # ------------
+    model_unroll_fn = functools.partial(
+      model_unroll, networks=networks, params=params)
+    model_unroll_fn = jax.vmap(model_unroll_fn)
+
+    rng_key, model_keys = split_key(rng_key, N=len(start_states))
+    # [T, K, ...]
+    model_outputs = model_unroll_fn(
+        model_keys, start_states, model_actions,
+    )
+
+    # ------------
+    # get action mask
+    # ------------
+    action_mask_target = state_features_target
+    action_mask_logits = model_outputs.state_feature_logits
+    action_loss_mask = state_features_mask_T
+    action_loss_mask_rolled = state_features_mask_rolled
+    if self.action_mask:
+      action_mask = data.observation.observation.get('action_mask', None)
+      assert action_mask is not None, 'need action_mask for prediction'
+
+      action_mask_target = vmap_roll(action_mask[1:])
+      action_mask_logits = model_outputs.action_mask_logits
+      assert action_mask_logits is not None, 'need action_mask_logits'
+      action_loss_mask = make_episode_mask(data, include_final=True)
+      action_loss_mask_rolled = roll(action_loss_mask[1:])
+
+
+    # ------------
+    # compute SFs for future time-steps
+    # ------------
+    def compute_sfs(*args, **kwargs):
+      return networks.compute_sfs(params, *args, **kwargs)
+    compute_sfs = jax.vmap(compute_sfs)  # over time dimension
+    compute_sfs = jax.vmap(compute_sfs)  # over simulation dimension
+
+    # PREP TASK
+    # [T, C] --> [T', k, C]
+    task = online_preds.task[1:]
+    task = vmap_roll(task)
+
+    # PREP PRNGkeys
+    T = task.shape[0]
+    rng_key, sf_keys = split_key(
+      rng_key, N=T * self.simulation_steps)
+    sf_keys = sf_keys.reshape(T, self.simulation_steps, 2)
+
+    # COMPUTE PREDICTIONS
+    # [T', k, ...]
+    predictions = compute_sfs(sf_keys, model_outputs.state, task)
+
+    if self.action_mask:
+      # these predictions begin at t+1 since for output of applying model
+      # action_mask targets also begin at t+1
+      # this means you can use the action mask targets to mask the predictions
+      predictions = jax.vmap(batch_mask_predictions)(
+        predictions, action_mask_target)
+
+    # ------------
+    # now that computed, select out the SF for the action taken in the env.
+    # this will be our prediction
+    # ------------
+    predicted_sfs = predictions.sf         # [T', k, A, C]
+    next_step_actions = roll(actions[1:])  # [T', k, A]
+    index = jax.vmap(jax.vmap(rlax.batched_index))  # vmap T', k
+    index = jax.vmap(index, in_axes=(3, None), out_axes=2)
+
+    # [T', k, C]
+    predicted_sfs = index(predicted_sfs, next_step_actions)
+    predicted_sfs = predicted_sfs*sf_mask_rolled[:,:,None]
+
+    def compute_losses(
+      predicted_features_logits,
+      features_target_,
+      features_mask_,
+      task_weights_,
+      #
+      predicted_sf_,
+      sf_target_,
+      sf_mask_,
+      #
+      action_mask_logits_,
+      action_mask_,
+      action_loss_mask_,
+      ):
+      def binary_cross_entropy(logits, target):
+        return -distrax.Bernoulli(logits).log_prob(target)
+      binary_cross_entropy = jax.vmap(binary_cross_entropy)
+
+      if self.binary_feature_loss:
+        features_loss = binary_cross_entropy(
+          predicted_features_logits, features_target_)
+        # features_loss = features_loss.sum(-1)  # [k]
+      else:
+        features_loss = rlax.l2_loss(
+          predicted_features_logits, features_target_)
+
+      # first mask out over cumulant dimension
+      features_loss = jax.vmap(episode_mean)(features_loss, features_mask_)
+
+      # then mask out over time-step simulation dimension
+      # mask is whenever any of the individual cumulant masks were on.
+      features_mask_T = (features_mask_.sum(-1) > 0).astype(features_mask_.dtype)
+      features_loss = episode_mean(features_loss, features_mask_T)  # []
+
+       # [k, C]
+      if self.task_weighted_model:
+        sf_td = sf_target_ - predicted_sf_
+        sf_loss_fn = jax.vmap(TaskWeightedSFLossFn())
+
+        # [k]
+        task_weighted_loss, unweighted_loss = sf_loss_fn(
+          sf_td, task_weights_)
+
+        sf_loss = (task_weighted_loss * self.weighted_coeff + 
+                      unweighted_loss * self.unweighted_coeff)
+        sf_loss = sf_loss.mean(-1)  # []
+      else:
+        sf_l2 = rlax.l2_loss(predicted_sf_, sf_target_)  # [k, C]
+        sf_l2 = sf_l2.sum(-1)  # [k]
+        sf_loss = episode_mean(sf_l2, sf_mask_)  # []
+
+      if self.action_mask:
+        mask_log_prob = binary_cross_entropy(
+          action_mask_logits_, action_mask_)
+        mask_log_prob = mask_log_prob.mean(-1)
+        action_mask_loss = episode_mean(mask_log_prob, action_loss_mask_)
+      else:
+        action_mask_loss = jnp.zeros_like(sf_loss)
+
+      return features_loss, sf_loss, action_mask_loss
+
+    feature_loss, sf_loss, action_mask_loss = jax.vmap(compute_losses)(
+      model_outputs.state_feature_logits,
+      state_features_target,
+      state_features_mask_rolled,
+      task,
+      predicted_sfs,
+      sf_targets,
+      sf_mask_rolled,
+      action_mask_logits,
+      action_mask_target,
+      action_loss_mask_rolled,
+      )
+
+    def apply_mask(loss, mask):
+      return episode_mean(loss, mask[:len(loss)])
+
+    feature_loss = apply_mask(feature_loss, state_features_mask_T)
+    sf_loss = apply_mask(sf_loss, sf_mask)
+    action_mask_loss = apply_mask(action_mask_loss, action_loss_mask)
+    action_mask_loss = action_mask_loss*float(self.action_mask)
+
+    metrics = {
+      "0.feature_loss": feature_loss,
+      "0.sf_loss": sf_loss,
+      "1.action_mask_loss": action_mask_loss,
+    }
+
+    total_loss = (
+      feature_loss * self.feature_coeff * self.cat_coeff + 
+      sf_loss * self.model_sf_coeff + 
+      action_mask_loss * self.action_coeff * self.cat_coeff
+      )
+
+    return total_loss, metrics
 
   def multitask_dyna_loss(
     self,
@@ -1364,268 +1723,6 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
     # [T], []
     return td_errors, batch_loss, metrics
-
-  def model_loss(
-    self,
-    data: NestedArray,
-    online_preds: jax.Array,
-    target_preds: jax.Array,
-    actions: jax.Array,
-    episode_mask: jax.Array,
-    discounts: jax.Array,
-    rng_key: networks_lib.PRNGKey,
-    networks: MbrlSfNetworks,
-    params: networks_lib.Params,
-    ):
-
-    assert self.simulation_steps < len(online_preds.state)
-    def shorten(struct):
-      return jax.tree_map(lambda x:x[:-self.simulation_steps], struct)
-
-    # [T', D]
-    start_states = shorten(online_preds.state)
-
-    # for every timestep t=0,...T,  we have predictions for t+1, ..., t+k where k = simulation_steps
-    # use rolling window to create T x k prediction targets
-    # this will shorten the data from T to T'=T-k+1
-    roll = functools.partial(rolling_window, size=self.simulation_steps)
-
-    #----------------------
-    # MODEL ACTIONS [T', ...]
-    #----------------------
-    model_actions = roll(actions[:-1])
-
-    #----------------------
-    # STATE FEATURES, [T', C]
-    #----------------------
-    vmap_roll = jax.vmap(roll, 1, 2)
-    state_features = self.extract_cumulants(data)
-    state_features_target = vmap_roll(state_features)
-
-    # mask over just time [T]
-    state_features_mask_T = episode_mask[:-1]
-
-    # mask over individual entries [T, C]
-    state_features_mask = state_features_mask_T[:,None]*jnp.ones_like(state_features)
-    if self.mask_zero_features > 0.0:
-      # if masking zeros out, mask out some proportion of when state features are 0.
-      # helps with data imbalance problem
-      rng_key, sample_key = jax.random.split(rng_key)
-      new_mask = zero_entries_mask(
-        x=state_features,
-        key=sample_key,
-        # if mask_zero_features=0.0, keep 100%
-        # if mask_zero_features=1.0, keep 0%.
-        mask_zero_probs=1.0-self.mask_zero_features)
-      state_features_mask = state_features_mask*new_mask
-
-    # [T', k, C]
-    state_features_mask_rolled = vmap_roll(state_features_mask)
-
-    #----------------------
-    # SUCCESSOR FEATURE TARGETS
-    #----------------------
-    # [T, A, C] --> [T, C] for chosen ones
-    selector_actions = jnp.argmax(online_preds.q_values, axis=-1)
-    # next_step_actions = roll(selector_actions[1:])  # [T', k, A]
-
-    target_net_sfs = target_preds.sf
-    index = jax.vmap(rlax.batched_index, in_axes=(2, None), out_axes=1)
-    target_net_sfs = index(target_net_sfs, selector_actions)
-
-    # compute return
-    # [T, C]
-    sf_targets = jax.vmap(
-      functools.partial(
-        rlax.n_step_bootstrapped_returns, n=self.bootstrap_n),
-      in_axes=(1, None, 1),
-      out_axes=1)(
-        # [T, C], [T], [T, C]
-        state_features, discounts[:-1], target_net_sfs[1:])
-
-    # index starting at next-timestep since learning model
-    num_sf_targets = sf_targets.shape[0] - 1
-    zeros = jnp.zeros((1, sf_targets.shape[-1]))
-    sf_targets = jnp.concatenate((sf_targets[1:], zeros))
-
-    # [T, C] --> [T', k, C] for unrolls
-    sf_targets = vmap_roll(sf_targets)
-    sf_targets = jax.lax.stop_gradient(sf_targets)
-
-    # [T] --> [T', k] for unrolls
-    sf_mask = jnp.concatenate(
-      (episode_mask[1:num_sf_targets], jnp.zeros(2)))
-    sf_mask_rolled = roll(sf_mask)
-
-
-    # ------------
-    # unrolls the model from each time-step in parallel
-    # ------------
-    model_unroll_fn = functools.partial(
-      model_unroll, networks=networks, params=params)
-    model_unroll_fn = jax.vmap(model_unroll_fn)
-
-    rng_key, model_keys = split_key(rng_key, N=len(start_states))
-    # [T, K, ...]
-    model_outputs = model_unroll_fn(
-        model_keys, start_states, model_actions,
-    )
-
-    # ------------
-    # get action mask
-    # ------------
-    action_mask_target = state_features_target
-    action_mask_logits = model_outputs.state_feature_logits
-    action_loss_mask = state_features_mask_T
-    action_loss_mask_rolled = state_features_mask_rolled
-    if self.action_mask:
-      action_mask = data.observation.observation.get('action_mask', None)
-      assert action_mask is not None, 'need action_mask for prediction'
-
-      action_mask_target = vmap_roll(action_mask[1:])
-      action_mask_logits = model_outputs.action_mask_logits
-      assert action_mask_logits is not None, 'need action_mask_logits'
-      action_loss_mask = make_episode_mask(data, include_final=True)
-      action_loss_mask_rolled = roll(action_loss_mask[1:])
-
-
-    # ------------
-    # compute SFs for future time-steps
-    # ------------
-    def compute_sfs(*args, **kwargs):
-      return networks.compute_sfs(params, *args, **kwargs)
-    compute_sfs = jax.vmap(compute_sfs)  # over time dimension
-    compute_sfs = jax.vmap(compute_sfs)  # over simulation dimension
-
-    # PREP TASK
-    # [T, C] --> [T', k, C]
-    task = online_preds.task[1:]
-    task = vmap_roll(task)
-
-    # PREP PRNGkeys
-    T = task.shape[0]
-    rng_key, sf_keys = split_key(
-      rng_key, N=T * self.simulation_steps)
-    sf_keys = sf_keys.reshape(T, self.simulation_steps, 2)
-
-    # COMPUTE PREDICTIONS
-    # [T', k, ...]
-    predictions = compute_sfs(sf_keys, model_outputs.state, task)
-
-    if self.action_mask:
-      # these predictions begin at t+1 since for output of applying model
-      # action_mask targets also begin at t+1
-      # this means you can use the action mask targets to mask the predictions
-      predictions = jax.vmap(batch_mask_predictions)(
-        predictions, action_mask_target)
-
-    # ------------
-    # now that computed, select out the SF for the action taken in the env.
-    # this will be our prediction
-    # ------------
-    predicted_sfs = predictions.sf         # [T', k, A, C]
-    next_step_actions = roll(actions[1:])  # [T', k, A]
-    index = jax.vmap(jax.vmap(rlax.batched_index))  # vmap T', k
-    index = jax.vmap(index, in_axes=(3, None), out_axes=2)
-
-    # [T', k, C]
-    predicted_sfs = index(predicted_sfs, next_step_actions)
-
-    def compute_losses(
-      predicted_features_logits,
-      features_target_,
-      features_mask_,
-      task_weights_,
-      #
-      predicted_sf_,
-      sf_target_,
-      sf_mask_,
-      #
-      action_mask_logits_,
-      action_mask_,
-      action_loss_mask_,
-      ):
-      def binary_cross_entropy(logits, target):
-        return -distrax.Bernoulli(logits).log_prob(target)
-      binary_cross_entropy = jax.vmap(binary_cross_entropy)
-
-      if self.binary_feature_loss:
-        features_loss = binary_cross_entropy(
-          predicted_features_logits, features_target_)
-        # features_loss = features_loss.sum(-1)  # [k]
-      else:
-        features_loss = rlax.l2_loss(
-          predicted_features_logits, features_target_)
-
-      # first mask out over cumulant dimension
-      features_loss = jax.vmap(episode_mean)(features_loss, features_mask_)
-
-      # then mask out over time-step simulation dimension
-      # mask is whenever any of the individual cumulant masks were on.
-      features_mask_T = (features_mask_.sum(-1) > 0).astype(features_mask_.dtype)
-      features_loss = episode_mean(features_loss, features_mask_T)  # []
-
-       # [k, C]
-      if self.task_weighted_model:
-        sf_td = sf_target_ - predicted_sf_
-        sf_loss_fn = jax.vmap(TaskWeightedSFLossFn())
-
-        # [k]
-        task_weighted_loss, unweighted_loss = sf_loss_fn(
-          sf_td, task_weights_)
-
-        sf_loss = (task_weighted_loss * self.weighted_coeff + 
-                      unweighted_loss * self.unweighted_coeff)
-        sf_loss = sf_loss.mean(-1)  # []
-      else:
-        sf_l2 = rlax.l2_loss(predicted_sf_, sf_target_)  # [k, C]
-        sf_l2 = sf_l2.sum(-1)  # [k]
-        sf_loss = episode_mean(sf_l2, sf_mask_)  # []
-
-      if self.action_mask:
-        mask_log_prob = binary_cross_entropy(
-          action_mask_logits_, action_mask_)
-        mask_log_prob = mask_log_prob.mean(-1)
-        action_mask_loss = episode_mean(mask_log_prob, action_loss_mask_)
-      else:
-        action_mask_loss = jnp.zeros_like(sf_loss)
-
-      return features_loss, sf_loss, action_mask_loss
-
-    feature_loss, sf_loss, action_mask_loss = jax.vmap(compute_losses)(
-      model_outputs.state_feature_logits,
-      state_features_target,
-      state_features_mask_rolled,
-      task,
-      predicted_sfs,
-      sf_targets,
-      sf_mask_rolled,
-      action_mask_logits,
-      action_mask_target,
-      action_loss_mask_rolled,
-      )
-
-    def apply_mask(loss, mask):
-      return episode_mean(loss, mask[:len(loss)])
-
-    feature_loss = apply_mask(feature_loss, state_features_mask_T)
-    sf_loss = apply_mask(sf_loss, sf_mask)
-    action_mask_loss = apply_mask(action_mask_loss, action_loss_mask)
-    action_mask_loss = action_mask_loss*float(self.action_mask)
-
-    metrics = {
-      "0.feature_loss": feature_loss,
-      "0.sf_loss": sf_loss,
-      "1.action_mask_loss": action_mask_loss,
-    }
-
-    total_loss = (
-      feature_loss * self.feature_coeff * self.cat_coeff + 
-      sf_loss * self.model_sf_coeff + 
-      action_mask_loss * self.action_coeff * self.cat_coeff
-      )
-
-    return total_loss, metrics
 
 ###################################
 # Architectures

@@ -167,6 +167,7 @@ def get_actor_core(
   return actor_core_lib.ActorCore(init=init, select_action=select_action,
                                   get_extras=get_extras)
 
+
 def q_learning_lambda(
     q_tm1: jax.Array,
     a_tm1: jax.Array,
