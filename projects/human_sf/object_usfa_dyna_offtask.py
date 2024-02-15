@@ -53,6 +53,7 @@ class ObjectOrientedUsfaArch(usfa.UsfaArch):
 
     predictions, new_state = super().__call__(inputs, state, evaluation)
     action_mask = inputs.observation['action_mask'].astype(predictions.sf.dtype)
+
     predictions = mask_predictions(predictions, action_mask)
 
     return predictions, new_state

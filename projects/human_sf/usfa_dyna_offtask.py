@@ -34,7 +34,6 @@ from td_agents.basics import ActorObserver, ActorState
 from projects.human_sf import usfa_offtask
 
 q_learning_lambda = usfa_offtask.q_learning_lambda
-get_actor_core = usfa_offtask.get_actor_core
 SFLossFn = usfa_offtask.SFLossFn
 Observer = usfa_offtask.Observer
 MonolithicSfHead = usfa_offtask.MonolithicSfHead
@@ -86,9 +85,9 @@ class Config(basics.Config):
   lambda_: float  = .9
 
   # Dyna loss
-  dyna_coeff: float = 0.1
-  n_actions_dyna: int = 1
-  n_tasks_dyna: int = 5
+  dyna_coeff: float = 1.0
+  n_actions_dyna: int = 5
+  n_tasks_dyna: int = 10
 
   # Model loss
   simulation_steps: int = 5
@@ -96,8 +95,8 @@ class Config(basics.Config):
   model_sf_coeff: float = 1.0
   model_coeff: float = 1.0
   scale_grad: float = .5
-  binary_feature_loss: bool = False
-  mask_zero_features: float = 0.0
+  binary_feature_loss: bool = True
+  mask_zero_features: float = 0.75
 
 
 ###################################
@@ -121,6 +120,7 @@ class Predictions(NamedTuple):
   policy: jnp.ndarray  # policy vector
   task: jnp.ndarray  # task vector (potentially embedded)
   action_mask: Optional[jax.Array] = None
+  model_predictions: Optional[jax.Array] = None
 
 
 @chex.dataclass(frozen=True)
@@ -130,11 +130,383 @@ class ModelOuputs:
   state_feature_logits: Optional[jax.Array] = None
   action_mask: Optional[jax.Array] = None
   action_mask_logits: Optional[jax.Array] = None
+  predictions: Optional[jax.Array] = None
 
+###################################
+# Helper functions
+###################################
+
+def zero_entries_mask(x, key, mask_zero_probs=.25, eps=1e-5):
+  """
+  Create masks from x.
+  
+  Parameters:
+  - x: A [T, N] shaped array of state features.
+  - key: A random key for JAX's random number generator.
+  
+  Returns:
+  - on_mask: A mask of 1s where x > 0.
+  - off_mask: A mask of 1s with a 25% chance wherever x == 0.
+  """
+  # First mask: 1s where x > 0
+  on_mask = (x > 0).astype(x.dtype)
+
+  # Generate random probabilities for the second mask
+  mask_zero_probs = (jnp.abs(x) < eps).astype(x.dtype)*mask_zero_probs
+  off_mask = jax.random.bernoulli(key, p=mask_zero_probs).astype(x.dtype)
+
+  return on_mask+off_mask
+
+def sample_K_times(x, K, key, replace=True):
+  indices = jax.random.choice(
+    key, len(x), shape=(K,), replace=replace)  # Sampling K indices with replacement
+  samples = x[indices]  # Selecting the actions
+  return samples
+
+def split_key(key, N):
+  keys = jax.random.split(key, num=N+1)
+  key_set = keys[1:]
+  key = keys[0]
+  return key, key_set
+
+def mask_predictions(
+    predictions: Predictions,
+    action_mask: jax.Array):
+
+  # mask out entries to large negative value
+  mask = lambda x: jnp.where(action_mask, x, LARGE_NEGATIVE)
+  q_values = mask(predictions.q_values)  # [A]
+
+  # mask out entries to 0, vmap over cumulant dimension
+  mask = lambda x: jnp.where(action_mask, x, 0.0)
+  has_actions = len(predictions.sf) == 3 # [N, A, C]
+
+  if has_actions:
+    # vmap [N, C]
+    mask = jax.vmap(mask)
+    mask = jax.vmap(mask, 2, 2)
+  else:
+    # vmap [C]
+    mask = jax.vmap(mask, 1, 1)
+  sf = mask(predictions.sf)   # [..., A, Cumulants]
+
+  return predictions._replace(
+    q_values=q_values,
+    sf=sf,
+    action_mask=action_mask)
+
+batch_mask_predictions = jax.vmap(mask_predictions)
+
+def sample_from_action_mask(action_mask, key, nsamples=1):
+  # Normalize action_mask if necessary to ensure it represents a probability distribution
+  # This step assumes action_mask might not sum to 1 across the action dimension
+  probabilities = action_mask / jnp.sum(action_mask, axis=-1, keepdims=True)
+  
+  # Create a categorical distribution based on the normalized probabilities
+  distribution = distrax.Categorical(probs=probabilities)
+  
+  # Sample from the distribution using the provided key
+  # This samples a single action for each element in the batch (each row in action_mask)
+  samples = distribution.sample(seed=key, sample_shape=(nsamples,))
+
+  return samples
+
+def model_unroll(key, state, actions, networks, params):
+  def fn(carry: jax.Array, a: jax.Array):
+    k, s = carry
+    k, model_key = jax.random.split(k)
+    model_output, new_state = networks.apply_model(
+        params, model_key, s, a)
+    return (k, new_state), model_output
+  carry = (key, state)
+  _, model_outputs = jax.lax.scan(fn, carry, actions)
+
+  return model_outputs
+
+def model_random_trajectory(
+    key, state, networks, params,
+    action_mask: jax.Array, T: int=1):
+
+  def fn(carry: jax.Array, ignore: jax.Array):
+    k, s, a_mask = carry
+    del ignore
+    k, model_key = jax.random.split(k)
+    a = sample_from_action_mask(a_mask, model_key)
+    a = jnp.squeeze(a)  # [1] --> []
+
+    model_output, new_state = networks.apply_model(
+        params, model_key, s, a)
+
+    a_mask = model_output.action_mask.astype(a_mask.dtype)
+    return (k, new_state, a_mask), model_output
+  carry = (key, state, action_mask)
+  _, model_outputs = jax.lax.scan(fn, carry, jnp.arange(T))
+
+  return model_outputs
+
+def model_optimal_trajectory(
+    key, state, networks, params,
+    action_mask: jax.Array,
+    task: jax.Array,
+    T: int=1):
+
+  def fn(carry: jax.Array, ignore: jax.Array):
+    key_, state_, a_mask = carry
+    del ignore
+
+    # first get optimal action for task
+    # steps:
+    #   1. get predictions
+    #   2. mask predictions
+    #   3. get action from best q-values
+    key_, sf_key = jax.random.split(key_)
+    predictions = networks.compute_sfs(
+      params, sf_key, state_, task)
+    predictions = mask_predictions(predictions, a_mask)
+    action = jnp.argmax(predictions.q_values)
+
+
+    # then unroll model
+    key_, model_key = jax.random.split(key_)
+    model_output, new_state = networks.apply_model(
+        params, model_key, state_, action)
+
+    # update action mask
+    if model_output.action_mask is not None:
+      # if doesn't predict action-mask then, don't update it
+      # assume input is all ones
+      a_mask = model_output.action_mask.astype(a_mask.dtype)
+
+    return (key_, new_state, a_mask), model_output
+
+  carry = (key, state, action_mask)
+  _, model_outputs = jax.lax.scan(fn, carry, jnp.arange(T))
+
+  return model_outputs
+
+###################################
+# Actor
+###################################
+
+def epsilon_greedy_sample(
+    q_values: jax.Array,
+    epsilon: float,
+    key,
+    action_mask: jax.Array):
+
+  def uniform(rng):
+    logits = jnp.where(action_mask, action_mask, LARGE_NEGATIVE)
+
+    return jax.random.categorical(rng, logits)
+
+  def exploit(rng):
+    return jnp.argmax(q_values)
+
+  # Generate a random number to decide explore or exploit
+  explore = jax.random.uniform(key) < epsilon
+  return jax.lax.cond(explore, uniform, exploit, key)
+
+def regular_select_action(
+    params: networks_lib.Params,
+    observation: networks_lib.Observation,
+    state: ActorState[actor_core_lib.RecurrentState],
+    networks: basics.NetworkFn,
+    evaluation: bool = False):
+
+    rng, policy_rng = jax.random.split(state.rng)
+    preds, recurrent_state = networks.apply(params, policy_rng, observation, state.recurrent_state, evaluation)
+
+    q_values = preds.q_values
+    # BELOW is very idiosyncratic to env
+    action_mask = observation.observation.get('action_mask', jnp.ones_like(q_values))
+
+    rng, q_rng = jax.random.split(rng)
+    action = epsilon_greedy_sample(
+      q_values=q_values, action_mask=action_mask,
+      key=q_rng, epsilon=state.epsilon)
+
+    return action, ActorState(
+        rng=rng,
+        epsilon=state.epsilon,
+        step=state.step + 1,
+        predictions=preds,
+        recurrent_state=recurrent_state,
+        prev_recurrent_state=state.recurrent_state)
+
+def select_action_unroll_model(
+    params: networks_lib.Params,
+    observation: networks_lib.Observation,
+    state: ActorState[actor_core_lib.RecurrentState],
+    networks: basics.NetworkFn,
+    num_actions: int = 2,
+    evaluation: bool = False,
+    unroll_model: bool = False):
+
+    rng, policy_rng = jax.random.split(state.rng)
+
+    preds, recurrent_state = networks.apply(params, policy_rng, observation, state.recurrent_state, evaluation)
+
+    ########################
+    # Generate action
+    ########################
+    q_values = preds.q_values
+    action_mask = observation.observation.get(
+      'action_mask', jnp.ones_like(q_values))
+
+    rng, q_rng = jax.random.split(rng)
+    action = epsilon_greedy_sample(
+      q_values=q_values,
+      action_mask=action_mask,
+      key=q_rng, epsilon=state.epsilon)
+
+    ########################
+    # Unroll model w/ current optimal policy for offtask_goal
+    ########################
+    if unroll_model:
+      offtask_goal = observation.observation['offtask_goal']
+
+      rng, model_rng = jax.random.split(rng)
+      # [T]
+      model_outputs = model_optimal_trajectory(
+          key=model_rng, state=state.recurrent_state.hidden,
+          networks=networks, params=params,
+          action_mask=action_mask,
+          # initial_action=action,
+          task=offtask_goal,
+          T=num_actions,
+      )
+
+      ########################
+      # compute predictions (repeats with above computation but OK)
+      # only done in eval so doesn't matter that expensive
+      ########################
+      # [T+1]
+      # compute current state with predicted states
+      states = jnp.concatenate(
+        (state.recurrent_state.hidden[None], model_outputs.state))
+
+      # compute sfs
+      def compute_sfs(*args, **kwargs):
+        return networks.compute_sfs(params, *args, **kwargs)
+
+      rng, sf_keys = split_key(rng, N=num_actions+1)
+      compute_sfs = jax.vmap(
+        compute_sfs, in_axes=(0, 0, None))  # vmap over time
+
+      # [T+1, ...]
+      offtask_predictions = compute_sfs(sf_keys, states, offtask_goal)
+
+      preds = preds._replace(
+        model_predictions=model_outputs.replace(predictions=offtask_predictions))
+
+    return action, ActorState(
+        rng=rng,
+        epsilon=state.epsilon,
+        step=state.step + 1,
+        predictions=preds,
+        recurrent_state=recurrent_state,
+        prev_recurrent_state=state.recurrent_state)
+
+
+def get_actor_core(
+    networks: basics.NetworkFn,
+    config: Config,
+    evaluation: bool = False,
+    extract_q_values = lambda preds: preds.q_values
+  ):
+  """Returns ActorCore for R2D2."""
+
+  if evaluation:
+    select_action = functools.partial(
+      select_action_unroll_model, networks=networks, evaluation=evaluation)
+  else:
+    select_action = functools.partial(
+      regular_select_action, networks=networks, evaluation=evaluation)
+  def init(
+      rng: networks_lib.PRNGKey
+  ) -> ActorState[actor_core_lib.RecurrentState]:
+    rng, epsilon_rng, state_rng = jax.random.split(rng, 3)
+    if not evaluation:
+      epsilon = jax.random.choice(epsilon_rng,
+                                  np.logspace(
+                                    start=config.epsilon_min,
+                                    stop=config.epsilon_max,
+                                    num=config.num_epsilons,
+                                    base=config.epsilon_base))
+    else:
+      epsilon = config.evaluation_epsilon
+    initial_core_state = networks.init_recurrent_state(state_rng, None)
+    return ActorState(
+        rng=rng,
+        epsilon=epsilon,
+        step=0,
+        recurrent_state=initial_core_state,
+        prev_recurrent_state=initial_core_state)
+
+  def get_extras(
+      state: ActorState[actor_core_lib.RecurrentState]
+  ) -> r2d2_actor.R2D2Extras:
+    return {'core_state': state.prev_recurrent_state}
+
+  return actor_core_lib.ActorCore(init=init, select_action=select_action,
+                                  get_extras=get_extras)
 
 ###################################
 # Actor Observer
 ###################################
+
+def plot_sfgpi(sfs: np.array, train_tasks: np.array, frames: np.array, max_cols: int = 10):
+    T, N, A, C = sfs.shape  # Time steps, N, Actions, Channels for sfs
+    T2, N2, C2 = train_tasks.shape  # Time steps, N, Channels for train_tasks
+
+    # Validate dimensions
+    if C != C2 or N != N2 or T != T2:
+        raise ValueError("Dimensions of sfs and train_tasks do not match as expected.")
+
+    # Compute train_q_values with corrected dimension alignment
+    train_q_values = (sfs * train_tasks[:, :, None]).sum(-1)  # [T, N, A]
+
+    # Determine the layout
+    cols = min(T, max_cols)
+    # Calculate total rows needed (2 rows for each pair of image and bar plots)
+    total_rows = (T // max_cols) * 2
+    if T % max_cols > 0:  # Add two more rows if there's a remainder
+        total_rows += 2
+
+    # Prepare the matplotlib figure
+    unit = 3
+    fig, axs = plt.subplots(total_rows, cols, figsize=(cols*unit, total_rows*unit), squeeze=False)
+
+    # Iterate over time steps and plot
+    total_plots = total_rows * cols
+    for t in range(total_plots):
+        # Calculate row and column index for current time step
+        row = (t // max_cols) * 2  # Determine row based on time step; images and bar plots have 2 rows each cycle
+        col = t % max_cols  # Column wraps every max_cols
+
+        if t < T:
+          axs[row, col].set_title(f"t={t+1}")
+
+          # Plot frames
+          axs[row, col].imshow(frames[t])
+          axs[row, col].axis('off')  # Turn off axis for images
+
+          # Plot bar plots
+          max_q_values = train_q_values[t].max(axis=-1)
+          max_index = max_q_values.argmax()
+          colors = ['red' if i == max_index else 'blue' for i in range(N)]
+          axs[row+1, col].bar(range(N), max_q_values, color=colors)
+          axs[row+1, col].axis('off')  # Turn off axis for images
+
+        else:
+          try:
+            fig.delaxes(axs[row, col])
+          except:
+            break
+
+    plt.tight_layout()
+    return fig
+
 class Observer(ActorObserver):
   def __init__(self,
                period=100,
@@ -145,6 +517,7 @@ class Observer(ActorObserver):
     self.period = period
     self.prefix = prefix
     self.successes = 0
+    self.failures = 0
     self.idx = -1
     self.logging = True
     self.plot_success_only = plot_success_only
@@ -188,31 +561,43 @@ class Observer(ActorObserver):
     """Returns metrics collected for the current episode."""
     rewards = jnp.stack([t.reward for t in self.timesteps])[1:]
     total_reward = rewards.sum()
-    if self.plot_success_only:
-      if not total_reward > 0:
-        return
+    if total_reward > 0:
+      self.successes += 1
+    else:
+      self.failures += 1
 
-    self.successes += 1
+    success_period = self.successes % self.period == 0
+    failure_period = self.failures % self.period == 0
 
-    count = self.successes if self.plot_success_only else self.idx
-
-    if not count % self.period == 0:
+    if not (success_period or failure_period):
       return
 
+    # [T, C]
     tasks = [t.observation.observation['task'] for t in self.timesteps]
     tasks = np.stack(tasks)
-    # task = tasks[0]
 
-    # NOTES:
-    # Actor states: T, starting at 0
-    # timesteps: T, starting at 0
-    # action: T-1, starting at 0
+    # [T, N, C]
+    train_tasks = [t.observation.observation['train_tasks'] for t in self.timesteps]
+    train_tasks = np.stack(train_tasks)
+    
+    sfs = [s.predictions.sf for s in self.actor_states[1:]]
+    sfs = np.stack(sfs)
+
+    frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
+
+    fig = plot_sfgpi(sfs=sfs, train_tasks=train_tasks[:-1], frames=frames)
+    self.wandb_log({f"{self.prefix}/sfgpi": wandb.Image(fig)})
+    plt.close(fig)
+
+    return
     ##################################
     # successor features
     ##################################
     # first prediction is empty (None)
-    # [T, A, C]
-    predictions = [s.predictions for s in self.actor_states[1:]]
+    import ipdb; ipdb.set_trace()
+    predictions = [s.predictions.sf for s in self.actor_states[1:]]
+
+    # [T, N, A, C]
     sfs = jnp.stack([p.sf for p in predictions])
 
     npreds = len(sfs)
@@ -285,6 +670,12 @@ class Observer(ActorObserver):
     # ##################################
     # # get images
     # ##################################
+    #
+    # import ipdb; ipdb.set_trace()
+    # model_predictions = [s.predictions.model_predictions.predictions for s in self.actor_states[1:]]
+
+    # # [T, sim, tasks, actions, cumulants]
+    # sfs = jnp.stack([p.sf for p in model_predictions])
     # # [T, H, W, C]
     # frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
     # # self.wandb_log({
@@ -292,63 +683,6 @@ class Observer(ActorObserver):
     # wandb.log({f'{self.prefix}/episode-{task}':
     #            wandb.Video(np.transpose(frames, (0, 3, 1, 2)), fps=.01)})
 
-
-###################################
-# Helper functions
-###################################
-
-def zero_entries_mask(x, key, mask_zero_probs=.25, eps=1e-5):
-  """
-  Create masks from x.
-  
-  Parameters:
-  - x: A [T, N] shaped array of state features.
-  - key: A random key for JAX's random number generator.
-  
-  Returns:
-  - on_mask: A mask of 1s where x > 0.
-  - off_mask: A mask of 1s with a 25% chance wherever x == 0.
-  """
-  # First mask: 1s where x > 0
-  on_mask = (x > 0).astype(x.dtype)
-
-  # Generate random probabilities for the second mask
-  mask_zero_probs = (jnp.abs(x) < eps).astype(x.dtype)*mask_zero_probs
-  off_mask = jax.random.bernoulli(key, p=mask_zero_probs).astype(x.dtype)
-
-  return on_mask+off_mask
-
-def sample_K_times(x, K, key, replace=True):
-  indices = jax.random.choice(
-    key, len(x), shape=(K,), replace=replace)  # Sampling K indices with replacement
-  samples = x[indices]  # Selecting the actions
-  return samples
-
-def split_key(key, N):
-  keys = jax.random.split(key, num=N+1)
-  key_set = keys[1:]
-  key = keys[0]
-  return key, key_set
-
-def mask_predictions(
-    predictions: Predictions,
-    action_mask: jax.Array):
-
-  # mask out entries to large negative value
-  mask = lambda x: jnp.where(action_mask, x, LARGE_NEGATIVE)
-  q_values = mask(predictions.q_values)  # [A]
-
-  # mask out entries to 0, vmap over cumulant dimension
-  mask = lambda x: jnp.where(action_mask, x, 0.0)
-  mask = jax.vmap(mask, 1, 1)
-  sf = mask(predictions.sf)   # [A, Cumulants]
-
-  return predictions._replace(
-    q_values=q_values,
-    sf=sf,
-    action_mask=action_mask)
-
-batch_mask_predictions = jax.vmap(mask_predictions)
 
 ###################################
 # Loss functions
@@ -557,9 +891,11 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       discounts = data.discount
       # [T, B], [B], [B]
 
-      action_mask = episode_mask
       if self.action_mask:
         action_mask = data.observation.observation.get('action_mask', None)
+      else:
+        num_actions = online_preds.q_values.shape[-1]
+        action_mask = jnp.ones((T, B, num_actions))
 
       dyna_td_error, dyna_batch_loss, dyna_metrics = multitask_dyna_loss(
             discounts,
@@ -778,6 +1114,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       q_values: jax.Array,
       task: jax.Array,
       discounts_: jax.Array,
+      action_mask_: jax.Array,
       key: networks_lib.PRNGKey,
       ):
       """For a single task, do K simulations with dyna and compute td-error.
@@ -797,9 +1134,11 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
       # sample K random actions. append the optimal action by current Q-values
       key, sample_key = jax.random.split(key)
-      nactions = min(self.n_actions_dyna, num_actions)
-      sampled_actions = jax.random.choice(
-        sample_key, num_actions, shape=(nactions,), replace=False)
+      # nactions = self.n_actions_dyna
+      # sampled_actions = jax.random.choice(
+      #   sample_key, num_actions, shape=(nactions,), replace=True)
+      sampled_actions = sample_from_action_mask(
+        action_mask_, sample_key, self.n_actions_dyna)
 
       # [K+1]
       sampled_actions = jnp.concatenate(
@@ -894,7 +1233,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     # get sf_dyna td-errors for each of the K task SFs
     #---------------
     loss_fn = jax.vmap(sf_dyna_td,
-      in_axes=(None, None, 0, 0, 0, None, 0))
+      in_axes=(None, None, 0, 0, 0, None, None, 0))
 
     rng_key, task_keys = split_key(rng_key, N=ntasks)
     td_errors = loss_fn(
@@ -904,6 +1243,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       predictions.q_values,      # [M, A, C]
       sampled_tasks,             # [M, C]
       discounts,                 # []
+      action_mask,               # [A]
       task_keys,                 # [M]
       )
 
@@ -1032,23 +1372,13 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     # ------------
     # unrolls the model from each time-step in parallel
     # ------------
-    def model_unroll(key, state, actions):
-      def fn(carry: jax.Array, a: jax.Array):
-        k, s = carry
-        k, model_key = jax.random.split(k)
-        model_output, new_state = networks.apply_model(
-            params, model_key, s, a)
-        return (k, new_state), model_output
-      carry = (key, state)
-      _, model_outputs = jax.lax.scan(fn, carry, actions)
-
-      return model_outputs
-
-    model_unroll = jax.vmap(model_unroll)
+    model_unroll_fn = functools.partial(
+      model_unroll, networks=networks, params=params)
+    model_unroll_fn = jax.vmap(model_unroll_fn)
 
     rng_key, model_keys = split_key(rng_key, N=len(start_states))
     # [T, K, ...]
-    model_outputs = model_unroll(
+    model_outputs = model_unroll_fn(
         model_keys, start_states, model_actions,
     )
 
@@ -1057,7 +1387,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     # ------------
     action_mask_target = state_features_target
     action_mask_logits = model_outputs.state_feature_logits
-    action_loss_mask = state_features_mask
+    action_loss_mask = state_features_mask_T
     action_loss_mask_rolled = state_features_mask_rolled
     if self.action_mask:
       action_mask = data.observation.observation.get('action_mask', None)

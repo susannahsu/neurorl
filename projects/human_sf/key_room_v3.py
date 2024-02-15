@@ -440,7 +440,7 @@ class KeyRoom(LevelGen):
           train_tasks.append(
             self.make_task(task_object=train_object, intermediary_reward=False))
           train_tasks.append(
-            self.make_task(task_object=train_object, intermediary_reward=False))
+            self.make_task(task_object=test_object, intermediary_reward=False))
 
         train_tasks.append(
            self.make_task(task_object=train_object, intermediary_reward=True))
@@ -487,6 +487,7 @@ class KeyRoom(LevelGen):
           {**self.observation_space.spaces,
            "state_features": cumulants_space,
            "task": copy.deepcopy(cumulants_space),  # equivalent specs
+           "offtask_goal": copy.deepcopy(cumulants_space),  # equivalent specs
            "train_tasks": train_task_arrays,
            "context": context_array,
            }
@@ -588,6 +589,7 @@ class KeyRoom(LevelGen):
       # starts to the right for some reason
       potential_objects = self.train_objects+self.test_objects
       if self.basic_only == 2:
+         raise NotImplementedError
          potential_objects = potential_objects[:1]
 
       for object in potential_objects:
@@ -597,12 +599,21 @@ class KeyRoom(LevelGen):
 
       # Sample random task object
       task_object = random.choice(potential_objects)
+
       # Assuming 'colors_to_room' is defined elsewhere or is not needed for flat tasks
       self.task = self.make_task(
          task_object=task_object,
          intermediary_reward=False,
          colors_to_room={START_ROOM_COLOR:
                          self.get_room(*center_room_coords)})
+
+      offtask_goal_object = [o for o in potential_objects if o != task_object][0]
+      self.offtask_goal = self.make_task(
+         task_object=offtask_goal_object,
+         intermediary_reward=False,
+         colors_to_room={START_ROOM_COLOR:
+                         self.get_room(*center_room_coords)})
+
 
     def multi_room_placement(self, maze_config=None):
       self.task_setting = 'multi'
@@ -667,11 +678,14 @@ class KeyRoom(LevelGen):
       target_room_color = room_colors[room_idx]
       if self.training:
         task_object = self.train_objects[room_idx]
+        offtask_goal_object = self.test_objects[room_idx]
       else:
-        if random.sample((0, 1), 1)[0] == 0:
+        if random.sample((0, 1), 1)[0] == 0:  # TRAINING
           task_object = self.train_objects[room_idx]
-        else:
+          offtask_goal_object = self.test_objects[room_idx]
+        else:  # TESTING
           task_object = self.test_objects[room_idx]
+          offtask_goal_object = self.train_objects[room_idx]
 
       assert self.object_to_target_color[tuple(task_object)] == target_room_color
 
@@ -680,14 +694,21 @@ class KeyRoom(LevelGen):
          colors_to_room=colors_to_room,
          intermediary_reward=self.training or self.test_itermediary_rewards)
 
+      self.offtask_goal = self.make_task(
+         task_object=offtask_goal_object,
+         colors_to_room=colors_to_room,
+         intermediary_reward=self.test_itermediary_rewards)
+
     def update_obs(self, obs):
       obs['task'] = self.task.task_array
+      obs['offtask_goal'] = self.offtask_goal.task_array
       obs['state_features'] = self.task.state_features
       obs['train_tasks'] = self.task_set
       obs['context'] = np.array(self.context)
 
       if self.ignore_task:
          obs['task'] = obs['task']*0.0
+         raise RuntimeError("test removal and delete")
 
     def reset(self, *args, **kwargs):
       obs, info = super().reset(*args, **kwargs)

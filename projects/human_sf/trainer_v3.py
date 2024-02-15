@@ -173,9 +173,10 @@ def make_keyroom_env(
   """
   del seed
   if debug:
+    pass
     # steps_per_room = 30
-    basic_only = 0
-    num_task_rooms = 4
+    # basic_only = 0
+    # num_task_rooms = 4
 
   json_file = 'projects/human_sf/maze_pairs.json'
   with open(json_file, 'r') as file:
@@ -452,7 +453,7 @@ def setup_experiment_inputs(
     config = usfa_dyna.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      get_actor_core_fn=object_usfa_dyna.get_actor_core,
+      get_actor_core_fn=usfa_dyna.get_actor_core,
       ActorCls=functools.partial(basics.BasicActor, observers=[sf_dyna_observer]),
       LossFn=make_sf_dyna_loss_fn(config, action_mask=True))
     network_factory = functools.partial(
@@ -843,25 +844,31 @@ def sweep(search: str = 'default'):
     ]
   elif search == 'usfa_dyna':
     space = [
+        # {
+        #     # "num_steps": tune.grid_search([5e6]),
+        #     # "env.basic_only": tune.grid_search([1]),
+        #     "num_steps": tune.grid_search([20e6]),
+        #     "env.num_task_rooms": tune.grid_search([1]),
+        #     "agent": tune.grid_search([
+        #       'object_usfa_dyna',
+        #       'flat_usfa_dyna',
+        #     ]),
+        #     "seed": tune.grid_search([5]),
+        #     "group": tune.grid_search(['usfa_dyna-11-fixed-eval']),
+        #     "dyna_coeff": tune.grid_search([0.0]),
+        #     "model_coeff": tune.grid_search([0.0]),
+        # },
         {
             # "num_steps": tune.grid_search([5e6]),
             # "env.basic_only": tune.grid_search([1]),
             "num_steps": tune.grid_search([20e6]),
             "env.num_task_rooms": tune.grid_search([1]),
             "agent": tune.grid_search([
+              'flat_usfa_dyna',
               'object_usfa_dyna',
-              # 'flat_usfa_dyna',
             ]),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['usfa_dyna-10-test_itermediary_rewards']),
-            "model_coeff": tune.grid_search([1.]),
-            "dyna_coeff": tune.grid_search([1e-2, 1.]),
-            "feature_coeff": tune.grid_search([1.0]),
-            "binary_feature_loss": tune.grid_search([True]),
-            "mask_zero_features": tune.grid_search([.75, 0.0]),
-            'n_actions_dyna': tune.grid_search([5]),
-            'n_tasks_dyna': tune.grid_search([10]),
-            'env.test_itermediary_rewards': tune.grid_search([False, True]),
+            "group": tune.grid_search(['usfa_dyna-11-fixed-eval-2']),
         },
     ]
   elif search == 'q':
