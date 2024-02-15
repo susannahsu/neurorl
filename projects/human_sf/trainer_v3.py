@@ -277,6 +277,7 @@ def make_sf_dyna_loss_fn(config, **kwargs):
     n_actions_dyna=config.n_actions_dyna,
     n_tasks_dyna=config.n_tasks_dyna,
     binary_feature_loss=config.binary_feature_loss,
+    task_weighted_model=config.task_weighted_model,
     weighted_coeff=config.weighted_coeff,
     unweighted_coeff=config.unweighted_coeff,
     simulation_steps=config.simulation_steps,
@@ -312,8 +313,8 @@ def setup_experiment_inputs(
     plot_success_only=False if debug else True,
     period=1 if debug else 5000)
   sf_dyna_observer = usfa_dyna.Observer(
-    plot_success_only=False if debug else True,
-    period=1 if debug else 5000)
+    # plot_success_only=False if debug else True,
+    period=1 if debug else 1000)
 
   if agent == 'flat_q':
     # has no mechanism to select from object options since dependent on what agent sees
@@ -842,22 +843,37 @@ def sweep(search: str = 'default'):
             # 'loss_fn': tune.grid_search(['qlearning', 'qlambda']),
         },
     ]
-  elif search == 'usfa_dyna':
+  elif search == 'flat_usfa_dyna':
     space = [
+        {
+            # "num_steps": tune.grid_search([5e6]),
+            # "env.basic_only": tune.grid_search([1]),
+            "num_steps": tune.grid_search([20e6]),
+            "env.num_task_rooms": tune.grid_search([1]),
+            "agent": tune.grid_search(['flat_usfa_dyna',]),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['flat_usfa_dyna-2']),
+            "model_coeff": tune.grid_search([1e-2]),
+            "dyna_coeff": tune.grid_search([.1, .01]),
+            "n_actions_dyna": tune.grid_search([1, 5]),
+            # "mask_zero_features": tune.grid_search([0.0, .75]),
+            "task_weighted_model": tune.grid_search([True, False]),
+        },
         # {
         #     # "num_steps": tune.grid_search([5e6]),
         #     # "env.basic_only": tune.grid_search([1]),
         #     "num_steps": tune.grid_search([20e6]),
         #     "env.num_task_rooms": tune.grid_search([1]),
         #     "agent": tune.grid_search([
-        #       'object_usfa_dyna',
         #       'flat_usfa_dyna',
+        #       # 'object_usfa_dyna',
         #     ]),
         #     "seed": tune.grid_search([5]),
-        #     "group": tune.grid_search(['usfa_dyna-11-fixed-eval']),
-        #     "dyna_coeff": tune.grid_search([0.0]),
-        #     "model_coeff": tune.grid_search([0.0]),
+        #     "group": tune.grid_search(['usfa_dyna-11-fixed-eval-2']),
         # },
+    ]
+  elif search == 'usfa_dyna':
+    space = [
         {
             # "num_steps": tune.grid_search([5e6]),
             # "env.basic_only": tune.grid_search([1]),
@@ -865,11 +881,25 @@ def sweep(search: str = 'default'):
             "env.num_task_rooms": tune.grid_search([1]),
             "agent": tune.grid_search([
               'flat_usfa_dyna',
-              'object_usfa_dyna',
             ]),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['usfa_dyna-11-fixed-eval-2']),
+            "group": tune.grid_search(['usfa_dyna-17']),
+            "dyna_coeff": tune.grid_search([.1]),
+            "model_coeff": tune.grid_search([.1]),
+            "task_weighted_model": tune.grid_search([True, False]),
         },
+        # {
+        #     # "num_steps": tune.grid_search([5e6]),
+        #     # "env.basic_only": tune.grid_search([1]),
+        #     "num_steps": tune.grid_search([20e6]),
+        #     "env.num_task_rooms": tune.grid_search([1]),
+        #     "agent": tune.grid_search([
+        #       'flat_usfa_dyna',
+        #       # 'object_usfa_dyna',
+        #     ]),
+        #     "seed": tune.grid_search([5]),
+        #     "group": tune.grid_search(['usfa_dyna-11-fixed-eval-2']),
+        # },
     ]
   elif search == 'q':
     space = [

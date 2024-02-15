@@ -96,6 +96,7 @@ class Config(basics.Config):
   model_coeff: float = 1.0
   scale_grad: float = .5
   binary_feature_loss: bool = True
+  task_weighted_model: bool = True
   mask_zero_features: float = 0.75
 
 
@@ -454,8 +455,32 @@ def get_actor_core(
 ###################################
 # Actor Observer
 ###################################
+def non_zero_elements_to_string(arr):
+    """
+    Generates a string that lists the indices and values of non-zero elements in a NumPy array.
+    
+    Parameters:
+    - arr: A NumPy array.
+    
+    Returns:
+    - A string in the format "{index1}={value1}, {index2}={value2},..." for non-zero elements.
+    """
+    # Find indices where the array is not equal to zero
+    non_zero_indices = np.nonzero(arr)[0]
+    # Extract the non-zero values based on the indices
+    non_zero_values = arr[non_zero_indices]
+    # Format the indices and their corresponding values into the requested string format
+    result = ", ".join(f"{index}:{value:.2g}" for index, value in zip(non_zero_indices, non_zero_values))
+    return result
 
-def plot_sfgpi(sfs: np.array, train_tasks: np.array, frames: np.array, max_cols: int = 10):
+def plot_sfgpi(sfs: np.array, train_tasks: np.array, frames: np.array, max_cols: int = 10, title:str = ''):
+    max_len = min(sfs.shape[0], 25)
+    sfs = sfs[:max_len]
+    train_tasks = train_tasks[:max_len]
+    frames = frames[:max_len]
+
+    max_sf = max(sfs.max(), .1)
+
     T, N, A, C = sfs.shape  # Time steps, N, Actions, Channels for sfs
     T2, N2, C2 = train_tasks.shape  # Time steps, N, Channels for train_tasks
 
@@ -465,45 +490,89 @@ def plot_sfgpi(sfs: np.array, train_tasks: np.array, frames: np.array, max_cols:
 
     # Compute train_q_values with corrected dimension alignment
     train_q_values = (sfs * train_tasks[:, :, None]).sum(-1)  # [T, N, A]
+    max_q = max(train_q_values.max(), .1)
 
     # Determine the layout
     cols = min(T, max_cols)
-    # Calculate total rows needed (2 rows for each pair of image and bar plots)
-    total_rows = (T // max_cols) * 2
-    if T % max_cols > 0:  # Add two more rows if there's a remainder
-        total_rows += 2
+    # Adjust total rows calculation to include an additional N rows for the heatmaps
+    total_rows = (T // max_cols) * (2 + N)  # 2 rows for images and bar plots, plus N rows for heatmaps
+    if T % max_cols > 0:  # Add additional rows if there's a remainder
+        total_rows += (2 + N)
 
     # Prepare the matplotlib figure
     unit = 3
     fig, axs = plt.subplots(total_rows, cols, figsize=(cols*unit, total_rows*unit), squeeze=False)
+    fig.suptitle(title, fontsize=16, y=1.03)
 
     # Iterate over time steps and plot
-    total_plots = total_rows * cols
+    total_plots = total_rows // (2 + N) * cols  # Recalculate total plots based on new row structure
     for t in range(total_plots):
-        # Calculate row and column index for current time step
-        row = (t // max_cols) * 2  # Determine row based on time step; images and bar plots have 2 rows each cycle
+        # Calculate base row index for current time step; adjusted for 2 rows per image/bar plot plus N rows for heatmaps
+        base_row = (t // max_cols) * (2 + N)
         col = t % max_cols  # Column wraps every max_cols
 
         if t < T:
-          axs[row, col].set_title(f"t={t+1}")
+            axs[base_row, col].set_title(f"t={t+1}")
 
-          # Plot frames
-          axs[row, col].imshow(frames[t])
-          axs[row, col].axis('off')  # Turn off axis for images
+            # Plot frames
+            axs[base_row, col].imshow(frames[t])
+            axs[base_row, col].axis('off')  # Turn off axis for images
 
-          # Plot bar plots
-          max_q_values = train_q_values[t].max(axis=-1)
-          max_index = max_q_values.argmax()
-          colors = ['red' if i == max_index else 'blue' for i in range(N)]
-          axs[row+1, col].bar(range(N), max_q_values, color=colors)
-          axs[row+1, col].axis('off')  # Turn off axis for images
+            # Plot bar plots
+            # [T, N, A] --> [T, N]
+            max_q_values = train_q_values[t].max(axis=-1)
+            max_index = max_q_values.argmax()  # best N
+
+            colors = ['red' if i == max_index else 'blue' for i in range(N)]
+            axs[base_row+1, col].bar(range(N), max_q_values, color=colors)
+            # axs[base_row+1, col].axis('off')  # Optionally turn off axis for clarity
+            task_labels = [non_zero_elements_to_string(i) for i in train_tasks[t]]
+            axs[base_row+1, col].set_xticks(range(N))  # Set tick positions
+            axs[base_row+1, col].set_xticklabels(task_labels, rotation=0)
+            axs[base_row+1, col].set_ylim(0, max_q * 1.1)  # Set y-axis limit to 1.
+            axs[base_row+1, col].set_title(f"Chosen={max_index}")  # Set y-axis limit to 1.
+
+            # Plot heatmaps for each N
+            for n in range(N):
+                # Identify the action with the highest Q-value for this N at time t
+                action_with_highest_q = train_q_values[t, n].argmax()
+                
+                # Extract SFs values for this action
+                sf_values_for_highest_q = sfs[t, n, action_with_highest_q, :]
+                
+                # Plot barplot of SFs for the highest Q-value action
+                axs[base_row+2+n, col].bar(range(C), sf_values_for_highest_q, color='skyblue')
+                axs[base_row+2+n, col].set_title(f"policy {n+1}, a = {action_with_highest_q+1}")
+
+                # # Optionally, add value labels on top of each bar
+                # for c, value in enumerate(sf_values_for_highest_q):
+                #     axs[base_row+2+n, col].text(c, value, f"{value:.2f}", ha="center", va="bottom", color="black")
+
+                axs[base_row+2+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
+                axs[base_row+2+n, col].axis('on')  # Optionally, turn on the axis if needed
+                # sf_values = sfs[t, n, :, :]  # Adjust to iterate over N and plot the heatmap for each action
+                # im = axs[base_row+2+n, col].imshow(sf_values, cmap='hot', interpolation='nearest')
+
+                # task = train_tasks[t, n]
+                # axs[base_row+2+n, col].set_title(non_zero_elements_to_string(task))
+
+                # # Annotate heatmap with SF values
+                # for i in range(sf_values.shape[0]):
+                #     for j in range(sf_values.shape[1]):
+                #         axs[base_row+2+n, col].text(j, i, f"{sf_values[i, j]:.2f}",
+                #                                     ha="center", va="center", color="white")
+
+                # axs[base_row+2+n, col].axis('off')  # Optionally turn off axis for clarity
 
         else:
-          try:
-            fig.delaxes(axs[row, col])
-          except:
-            break
+            # Remove unused axes
+            for r_offset in range(2 + N):
+                try:
+                    fig.delaxes(axs[base_row + r_offset, col])
+                except:
+                    break
 
+    axs[0, 0].set_title(title)
     plt.tight_layout()
     return fig
 
@@ -561,10 +630,13 @@ class Observer(ActorObserver):
     """Returns metrics collected for the current episode."""
     rewards = jnp.stack([t.reward for t in self.timesteps])[1:]
     total_reward = rewards.sum()
-    if total_reward > 0:
+    is_success = total_reward > 1.
+    if total_reward > 1:
       self.successes += 1
-    else:
+    elif total_reward > 1e-3:
       self.failures += 1
+    else:
+      return
 
     success_period = self.successes % self.period == 0
     failure_period = self.failures % self.period == 0
@@ -585,29 +657,38 @@ class Observer(ActorObserver):
 
     frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
 
-    fig = plot_sfgpi(sfs=sfs, train_tasks=train_tasks[:-1], frames=frames)
-    self.wandb_log({f"{self.prefix}/sfgpi": wandb.Image(fig)})
+
+    # e.g. "Success 4: 0=1, 4=.5, 5=.5"
+    task_str = non_zero_elements_to_string(tasks[0])
+    title_prefix = f'success {self.successes}' if is_success else f'failure {self.failures}'
+    title = f"{title_prefix}. Task: {task_str}"
+
+
+    fig = plot_sfgpi(
+      sfs=sfs,
+      train_tasks=train_tasks[:-1],
+      frames=frames,
+      title=title
+      )
+
+    wandb_suffix = 'success' if is_success else 'failure'
+    self.wandb_log({f"{self.prefix}/sfgpi-{wandb_suffix}": wandb.Image(fig)})
     plt.close(fig)
 
-    return
     ##################################
     # successor features
     ##################################
-    # first prediction is empty (None)
-    import ipdb; ipdb.set_trace()
-    predictions = [s.predictions.sf for s in self.actor_states[1:]]
-
-    # [T, N, A, C]
-    sfs = jnp.stack([p.sf for p in predictions])
-
     npreds = len(sfs)
     actions = jnp.stack(self.actions)[:npreds]
 
+    # sfs: [T, N, C]
     index = jax.vmap(rlax.batched_index, in_axes=(2, None), out_axes=1)
+    index = jax.vmap(index, in_axes=(1, None), out_axes=1)
 
-    sfs = index(sfs, actions)  # [T-1, C]
 
-    q_values = (sfs*tasks[:-1]).sum(-1)
+    sfs = index(sfs, actions)  # [T-1, N, C]
+
+    q_values = (sfs*tasks[:-1, None]).sum(-1).max(-1)  # gpi
 
     # ignore 0th (reset) time-step w/ 0 reward and last (terminal) time-step
     state_features = jnp.stack([t.observation.observation['state_features'] for t in self.timesteps])[1:]
@@ -626,7 +707,8 @@ class Observer(ActorObserver):
       width = 3*cols
       height = 3*rows
       fig, axs = plt.subplots(rows, cols, figsize=(width, height), squeeze=False)
-      default_cycler = iter(self._colors)
+
+      # fig.suptitle(title, fontsize=16, y=1.03)
 
       # Plot rewards in the first subplot
       axs[0, 0].plot(rewards, label='rewards', linestyle='--', color='grey')
@@ -641,14 +723,15 @@ class Observer(ActorObserver):
           row, col = divmod(subplot_idx, cols)
           ax = axs[row, col]
 
-          try:
-              color = next(default_cycler)['color']
-          except StopIteration:
-              raise RuntimeError(f"unexpectedly had {len(active_dims)} dimensions active")
-
+          default_cycler = iter(self._colors)
           # Plot state_features and sfs for each active dimension
-          ax.plot(state_features[:, j], label=f'$\\phi - {j}$', linestyle='--', color=color)
-          ax.plot(sfs[:, j], label=f'$\\psi - {j}$', color=color)
+          ax.plot(state_features[:, j], label=f'$\\phi_{j}$', linestyle='--')
+          for n in range(sfs.shape[1]):
+            # try:
+            #     color = next(default_cycler)['color']
+            # except StopIteration:
+            #     raise RuntimeError(f"too many policies?")
+            ax.plot(sfs[:, n, j], label=f'$\\pi_{n}, \\psi_{j}$')
           ax.set_title(f"Dimension {j}")
           ax.legend()
 
@@ -660,7 +743,8 @@ class Observer(ActorObserver):
           axs[row, col].axis('off')
 
       plt.tight_layout()
-      self.wandb_log({f"{self.prefix}/sf-group-prediction": wandb.Image(fig)})
+      axs[0, 0].set_title(title)
+      self.wandb_log({f"{self.prefix}/sf-predictions-{wandb_suffix}": wandb.Image(fig)})
       plt.close(fig)
     # else:
     #   if rewards.sum() > 0:
@@ -850,7 +934,8 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   model_coeff: float = 1.0
   action_coeff: float = 1.0
   cat_coeff: float = 1e-2
-  binary_feature_loss: bool = False
+  binary_feature_loss: bool = True
+  task_weighted_model: bool = True
   mask_zero_features: float = 0.0
 
   def error(self,
@@ -872,6 +957,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
     # mask of 1s for all time-steps except for terminal
     episode_mask = make_episode_mask(data, include_final=False)
+    discounts = (data.discount*self.discount).astype(online_preds.q_values.dtype)
     # ==========================
     # Dyna SF-learning loss
     # =========================
@@ -888,7 +974,6 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       T, B = data.discount.shape[:2]
       key_grad, loss_keys = split_key(key_grad, N=T*B)
       loss_keys = loss_keys.reshape(T, B, 2)
-      discounts = data.discount
       # [T, B], [B], [B]
 
       if self.action_mask:
@@ -921,6 +1006,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
           data=data,
           online_preds=online_preds,
           target_preds=target_preds,
+          discounts=discounts,
           episode_mask=episode_mask)
 
       # [T-1, B] --> [T, B]
@@ -950,6 +1036,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         online_preds,
         target_preds,
         data.action,
+        discounts,
         episode_mask,
         )
 
@@ -966,6 +1053,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     data: jax.Array,
     online_preds: jax.Array,
     target_preds: jax.Array,
+    discounts: jax.Array,
     episode_mask: jax.Array,
     ):
     #---------------
@@ -991,7 +1079,6 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     #---------------
     # discounts + lambda
     #---------------
-    discounts = (data.discount * self.discount).astype(online_sf.dtype) # [T, B]
     lambda_ = (data.discount * self.lambda_).astype(online_sf.dtype) 
 
     #---------------
@@ -1137,12 +1224,16 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       # nactions = self.n_actions_dyna
       # sampled_actions = jax.random.choice(
       #   sample_key, num_actions, shape=(nactions,), replace=True)
-      sampled_actions = sample_from_action_mask(
-        action_mask_, sample_key, self.n_actions_dyna)
+      if self.n_actions_dyna > 0:
+        sampled_actions = sample_from_action_mask(
+          action_mask_, sample_key, self.n_actions_dyna)
 
-      # [K+1]
-      sampled_actions = jnp.concatenate(
-        (sampled_actions, optimal_q_action[None]))
+        # [K+1]
+        sampled_actions = jnp.concatenate(
+          (sampled_actions, optimal_q_action[None]))
+      else:
+        sampled_actions = optimal_q_action[None]
+
       nactions = len(sampled_actions)
 
       #-----------------------
@@ -1281,13 +1372,11 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     target_preds: jax.Array,
     actions: jax.Array,
     episode_mask: jax.Array,
+    discounts: jax.Array,
     rng_key: networks_lib.PRNGKey,
     networks: MbrlSfNetworks,
     params: networks_lib.Params,
     ):
-
-    # TODO: move this outside of this loss function
-    discounts = data.discount*self.discount
 
     assert self.simulation_steps < len(online_preds.state)
     def shorten(struct):
@@ -1477,19 +1566,21 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       features_loss = episode_mean(features_loss, features_mask_T)  # []
 
        # [k, C]
-      sf_td = sf_target_ - predicted_sf_
-      sf_loss_fn = jax.vmap(TaskWeightedSFLossFn())
+      if self.task_weighted_model:
+        sf_td = sf_target_ - predicted_sf_
+        sf_loss_fn = jax.vmap(TaskWeightedSFLossFn())
 
-      # [k]
-      task_weighted_loss, unweighted_loss = sf_loss_fn(
-        sf_td, task_weights_)
+        # [k]
+        task_weighted_loss, unweighted_loss = sf_loss_fn(
+          sf_td, task_weights_)
 
-      sf_loss = (task_weighted_loss * self.weighted_coeff + 
-                    unweighted_loss * self.unweighted_coeff)
-      sf_loss = sf_loss.mean(-1)  # []
-      # sf_l2 = rlax.l2_loss(predicted_sf_, sf_target_)  # [k, C]
-      # sf_l2 = sf_l2.sum(-1)  # [k]
-      # sf_loss = episode_mean(sf_l2, sf_mask_)  # []
+        sf_loss = (task_weighted_loss * self.weighted_coeff + 
+                      unweighted_loss * self.unweighted_coeff)
+        sf_loss = sf_loss.mean(-1)  # []
+      else:
+        sf_l2 = rlax.l2_loss(predicted_sf_, sf_target_)  # [k, C]
+        sf_l2 = sf_l2.sum(-1)  # [k]
+        sf_loss = episode_mean(sf_l2, sf_mask_)  # []
 
       if self.action_mask:
         mask_log_prob = binary_cross_entropy(
