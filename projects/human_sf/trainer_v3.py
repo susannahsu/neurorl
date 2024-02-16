@@ -828,10 +828,10 @@ def sweep(search: str = 'default'):
             "env.num_task_rooms": tune.grid_search([1]),
             "agent": tune.grid_search([
               'object_usfa',
-              # 'flat_usfa'
+              'flat_usfa'
             ]),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['usfa-34-off_task-object']),
+            "group": tune.grid_search(['usfa-35-off_task-object']),
             # "sf_layers": tune.grid_search([[128, 128], [256, 256], [512, 512]]),
             "off_task_weight": tune.grid_search([.01, .05]),
             # "head": tune.grid_search(['monolithic', 'independent']),
@@ -853,10 +853,9 @@ def sweep(search: str = 'default'):
             "agent": tune.grid_search(['flat_usfa_dyna',]),
             "seed": tune.grid_search([5]),
             "group": tune.grid_search(['flat_usfa_dyna-3']),
-            "model_coeff": tune.grid_search([1e-2]),
-            "dyna_coeff": tune.grid_search([.1, .01]),
             "n_actions_dyna": tune.grid_search([5]),
-            "loss_fn": tune.grid_search(['qlambda', 'qlearning']),
+            "model_coeff": tune.grid_search([.1, 1e-2]),
+            "dyna_coeff": tune.grid_search([.1, .01, .001]),
             "task_weighted_model": tune.grid_search([False]),
         },
         # {
@@ -880,14 +879,14 @@ def sweep(search: str = 'default'):
             "num_steps": tune.grid_search([20e6]),
             "env.num_task_rooms": tune.grid_search([1]),
             "agent": tune.grid_search([
+              "object_usfa_dyna",
               'flat_usfa_dyna',
-              "object_usfa_dyna"
             ]),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['usfa_dyna-17']),
+            "group": tune.grid_search(['usfa_dyna-20']),
             # "n_actions_dyna": tune.grid_search([5]),
-            "model_coeff": tune.grid_search([1e-2]),
-            "dyna_coeff": tune.grid_search([.1, .01]),
+            "model_coeff": tune.grid_search([1]),
+            "dyna_coeff": tune.grid_search([1]),
             "loss_fn": tune.grid_search(['qlambda', 'qlearning']),
             "task_weighted_model": tune.grid_search([False]),
         },
