@@ -29,13 +29,13 @@ from library import muzero_mlps
 import library.networks as networks
 
 from td_agents import basics
-from td_agents.basics import ActorObserver, ActorState
-
+from projects.human_sf.utils import SFObserver
 from projects.human_sf import usfa_offtask
+from td_agents.basics import ActorObserver, ActorState
 
 q_learning_lambda = usfa_offtask.q_learning_lambda
 SFLossFn = usfa_offtask.SFLossFn
-Observer = usfa_offtask.Observer
+Observer = SFObserver
 MonolithicSfHead = usfa_offtask.MonolithicSfHead
 IndependentSfHead = usfa_offtask.IndependentSfHead
 cumulants_from_env = usfa_offtask.cumulants_from_env
@@ -116,6 +116,7 @@ class MbrlSfNetworks:
 
 class Predictions(NamedTuple):
   state: jax.Array
+  all_q_values: jnp.ndarray  # q-value
   q_values: jnp.ndarray  # q-value
   sf: jnp.ndarray # successor features
   policy: jnp.ndarray  # policy vector
@@ -1471,6 +1472,7 @@ class SfGpiHead(hk.Module):
       state=state,
       sf=sfs,       # [N, A, D_w]
       policy=policies_repeated,         # [N, A, D_w]
+      all_q_values=q_values,
       q_values=q_values,  # [N, A]
       task=task)         # [D_w]
 
@@ -1497,7 +1499,7 @@ class SfGpiHead(hk.Module):
 
     task = task.astype(state.dtype)
     policies = policies.astype(state.dtype)
-    sfs, q_values = jax.vmap(
+    sfs, all_q_values = jax.vmap(
       self.sf_net, in_axes=(None, 0, None), out_axes=0)(
         state,
         policies,
@@ -1506,7 +1508,7 @@ class SfGpiHead(hk.Module):
     # GPI
     # -----------------------
     # [N, A] --> [A]
-    q_values = jnp.max(q_values, axis=-2)
+    q_values = jnp.max(all_q_values, axis=0)
     num_actions = q_values.shape[-1]
 
     # [N, D] --> [N, A, D]
@@ -1517,6 +1519,7 @@ class SfGpiHead(hk.Module):
       sf=sfs,       # [N, A, D_w]
       policy=policies_repeated,         # [N, A, D_w]
       q_values=q_values,  # [N, A]
+      all_q_values=q_values,
       task=task)         # [D_w]
 
 
