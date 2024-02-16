@@ -58,7 +58,7 @@ class Config(basics.Config):
   head: str = 'independent'
   shared_ind_head: bool = True
   sf_coeff: float = 1e1
-  q_coeff: float = 1.0
+  q_coeff: float = 1e3
   sf_lambda: float = .9
   loss_fn: str = 'qlambda'
   sf_activation: str = 'relu'
@@ -300,6 +300,7 @@ class SFTargetFn:
 
     return targets
 
+
 @dataclasses.dataclass
 class UsfaLossFn(basics.RecurrentLossFn):
 
@@ -309,7 +310,7 @@ class UsfaLossFn(basics.RecurrentLossFn):
   extract_task_dim: Callable = lambda x: x[:, :, 0]
 
   sf_coeff: float = 1.0
-  q_coeff: float = 0.0
+  q_coeff: float = 1.0
   loss_fn : str = 'qlearning'
   lambda_: float  = .9
   sum_cumulants: bool = True
@@ -399,13 +400,13 @@ class UsfaLossFn(basics.RecurrentLossFn):
       loss = jax.vmap(rlax.categorical_cross_entropy)(
         target_probs, logits_action)
 
-      return loss.mean()
+      return loss
 
     compute_loss = jax.vmap(compute_loss, 0, 0)  # time
     compute_loss = jax.vmap(compute_loss, 1, 1)  # batch
     compute_loss = jax.vmap(compute_loss, in_axes=(2, 2, None), out_axes=2)  # policies
 
-    # [T, B, N]
+    # [T, B, N, C]
     sf_loss = compute_loss(
       sf_td_targets,          # [T, B, N, C]
       online_sf_logits[:-1],  # [T, B, N, A, C, M]
@@ -413,8 +414,19 @@ class UsfaLossFn(basics.RecurrentLossFn):
     )
     sf_loss = sf_loss.mean(POLICY_AXIS)
 
-    batch_loss = episode_mean(x=sf_loss, mask=episode_mask[:-1])
+    unweighted_loss = sf_loss.sum(-1)
 
+    batch_loss = episode_mean(x=unweighted_loss, mask=episode_mask[:-1])
+    if self.q_coeff > 0.0:
+      task_w = self.extract_task(data)[:-1]
+      task_weighted_loss = (sf_loss*task_w).sum(-1)
+      task_weighted_loss = episode_mean(
+        x=task_weighted_loss, mask=episode_mask[:-1])
+      batch_loss += self.q_coeff*task_weighted_loss
+
+    ###########
+    # TD Errors
+    ###########
     online_sf = online_preds.sf[:-1:, :, 0]
     online_sf_action = jax.vmap(index_sf, 1, 1)(
       online_sf, data.action[:-1])
@@ -431,7 +443,8 @@ class UsfaLossFn(basics.RecurrentLossFn):
 
     metrics = {
       '0.total_loss': batch_loss,
-      f'0.1.sf_loss_{self.loss_fn}': sf_loss,
+      '0.1.unweighted_loss': unweighted_loss,
+      '0.1.task_weighted_loss': task_weighted_loss,
       '2.sf_td_error': jnp.abs(sf_td_error),
       '3.cumulants': cumulants,
       '3.sf_mean': online_sf,
