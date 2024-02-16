@@ -21,7 +21,8 @@ from acme.wrappers import observation_action_reward
 from library.utils import episode_mean
 from library.utils import make_episode_mask
 from library.utils import expand_tile_dim
-
+from library.utils import Discretizer
+from library.muzero_mlps import PredictionMlp
 from td_agents import basics
 
 import library.networks as networks
@@ -33,6 +34,7 @@ BATCH_AXIS = 1
 POLICY_AXIS = 2
 ACTION_AXIS = 3
 CUMULANT_AXIS = 4
+LARGE_NEGATIVE = -1e7
 
 
 @dataclasses.dataclass
@@ -52,10 +54,11 @@ class Config(basics.Config):
   min_scalar_value: float = 0.0
 
   head: str = 'independent'
+  shared_ind_head: bool = True
   sf_coeff: float = 1e1
   q_coeff: float = 1.0
   sf_lambda: float = .9
-  sf_loss: str = 'qlambda'
+  loss_fn: str = 'qlambda'
   sf_activation: str = 'relu'
   sf_mlp_type: str = 'hk'
   out_init_value: Optional[float] = 0.0
@@ -68,24 +71,6 @@ def cumulants_from_env(data, online_preds, online_state, target_preds, target_st
   # ASSUMPTION: s' has cumulants for (s,a, r)
   cumulants = cumulants[1:].astype(jnp.float32)
   return cumulants
-
-def cumulants_from_preds(
-  data,
-  online_preds,
-  online_state,
-  target_preds,
-  target_state,
-  stop_grad=True,
-  use_target=False):
-
-  if use_target:
-    cumulants = target_preds.state_feature
-  else:
-    cumulants = online_preds.state_feature
-  if stop_grad:
-    return jax.lax.stop_gradient(cumulants) # [T, B, C]
-  else:
-    return cumulants # [T, B, C]
 
 def sample_gauss(mean: jax.Array,
                  var: float,
@@ -104,11 +89,39 @@ def sample_gauss(mean: jax.Array,
     samples = jnp.expand_dims(mean, axis=1) # [N, D]
   return samples
 
+def index_sf(sfs, action):
+  index = jax.vmap(rlax.batched_index, in_axes=(2, None), out_axes=1)
+  # [B, A, C] --> [B, C]
+  sfs = index(sfs, action)
+  return sfs
+
+###################################
+# Actor
+###################################
+
+def epsilon_greedy_sample(
+    q_values: jax.Array,
+    epsilon: float,
+    key,
+    action_mask: jax.Array):
+
+  def uniform(rng):
+    logits = jnp.where(action_mask, action_mask, LARGE_NEGATIVE)
+
+    return jax.random.categorical(rng, logits)
+
+  def exploit(rng):
+    return jnp.argmax(q_values)
+
+  # Generate a random number to decide explore or exploit
+  explore = jax.random.uniform(key) < epsilon
+  return jax.lax.cond(explore, uniform, exploit, key)
+
 def get_actor_core(
     networks: basics.NetworkFn,
     config: Config,
     evaluation: bool = False,
-    extract_q_values = lambda preds: preds.q_values
+    extract_q_values = lambda preds: preds.q_values,
   ):
   """Returns ActorCore for R2D2."""
 
@@ -120,9 +133,14 @@ def get_actor_core(
     preds, recurrent_state = networks.apply(params, policy_rng, observation, state.recurrent_state, evaluation)
 
     q_values = extract_q_values(preds)
+    # BELOW is very idiosyncratic to env
+    action_mask = observation.observation.get('action_mask', jnp.ones_like(q_values))
 
-    epsilon = state.epsilon
-    action = rlax.epsilon_greedy(epsilon).sample(policy_rng, q_values)
+    rng, q_rng = jax.random.split(rng)
+    action = epsilon_greedy_sample(
+      q_values=q_values, action_mask=action_mask,
+      key=q_rng, epsilon=state.epsilon)
+
     return action, ActorState(
         rng=rng,
         epsilon=state.epsilon,
@@ -164,9 +182,7 @@ def get_actor_core(
 # Loss functions
 ###################################
 
-def q_learning_lambda(
-    q_tm1: jax.Array,
-    a_tm1: jax.Array,
+def q_learning_lambda_target(
     r_t: jax.Array,
     discount_t: jax.Array,
     q_t: jax.Array,
@@ -194,22 +210,98 @@ def q_learning_lambda(
   Returns:
     Q(lambda) temporal difference error.
   """
-  chex.assert_rank([q_tm1, a_tm1, a_t, r_t, discount_t, q_t, lambda_],
-                   [2, 1, 1, 1, 1, 2, {0, 1}])
-  chex.assert_type([q_tm1, a_tm1, r_t, discount_t, q_t, lambda_],
-                   [float, int, float, float, float, float])
-
-  qa_tm1 = rlax.batched_index(q_tm1, a_tm1)
   v_t = rlax.batched_index(q_t, a_t)
   target_tm1 = rlax.lambda_returns(r_t, discount_t, v_t, lambda_)
 
   target_tm1 = jax.lax.select(stop_target_gradients,
                               jax.lax.stop_gradient(target_tm1), target_tm1)
-  return target_tm1 - qa_tm1
+  return target_tm1
+
+def n_step_q_learning_target(
+    target_q_t: jax.Array,
+    a_t: jax.Array,
+    r_t: jax.Array,
+    discount_t: jax.Array,
+    n: int = 5,
+    stop_target_gradients: bool = True,
+    tx_pair: rlax.TxPair = rlax.IDENTITY_PAIR,
+) -> jax.Array:
+  """Calculates transformed n-step TD errors.
+
+  See "Recurrent Experience Replay in Distributed Reinforcement Learning" by
+  Kapturowski et al. (https://openreview.net/pdf?id=r1lyTjAqYX).
+
+  Args:
+    q_tm1: Q-values at times [0, ..., T - 1].
+    a_tm1: action index at times [0, ..., T - 1].
+    target_q_t: target Q-values at time [1, ..., T].
+    a_t: action index at times [[1, ... , T]] used to select target q-values to
+      bootstrap from; max(target_q_t) for normal Q-learning, max(q_t) for double
+      Q-learning.
+    r_t: reward at times [1, ..., T].
+    discount_t: discount at times [1, ..., T].
+    n: number of steps over which to accumulate reward before bootstrapping.
+    stop_target_gradients: bool indicating whether or not to apply stop gradient
+      to targets.
+    tx_pair: TxPair of value function transformation and its inverse.
+
+  Returns:
+    Transformed N-step TD error.
+  """
+  v_t = rlax.batched_index(target_q_t, a_t)
+  target_tm1 = rlax.transformed_n_step_returns(
+      tx_pair, r_t, discount_t, v_t, n,
+      stop_target_gradients=stop_target_gradients)
+  return target_tm1
+
+@dataclasses.dataclass
+class SFTargetFn:
+  bootstrap_n: int = 5
+  loss_fn : str = 'qlearning'
+
+  def __call__(
+    self,
+    cumulants: jax.Array,
+    discounts: jax.Array,
+    target_sf: jax.Array,
+    lambda_: jax.Array,
+    selector_actions: jax.Array,
+    ):
+
+    if self.loss_fn == 'qlearning':
+      target_fn = functools.partial(
+        n_step_q_learning_target,
+        n=self.bootstrap_n)
+      # vmap over cumulant dimension (C), return in dim=3
+      target_fn = jax.vmap(
+        target_fn,
+        in_axes=(2, None, 1, None), out_axes=1)
+      targets = target_fn(
+        target_sf,  # [T, A, C]
+        selector_actions,  # [T]      
+        cumulants,  # [T, C]      
+        discounts)  # [T]         
+
+    elif self.loss_fn == 'qlambda':
+      target_fn = jax.vmap(q_learning_lambda_target,
+        in_axes=(1, None, 2, None, None), out_axes=1)
+
+      targets = target_fn(
+        cumulants,         # [T, C]    (vmap 1)
+        discounts,         # [T]       (vmap None)
+        target_sf,         # [T, A, C] (vmap 2)
+        selector_actions,  # [T]      
+        lambda_,           # [T]       (vmap None)
+      )
+    else:
+      raise NotImplementedError
+
+    return targets
 
 @dataclasses.dataclass
 class UsfaLossFn(basics.RecurrentLossFn):
 
+  discretizer: Discretizer = Discretizer(min_value=0, max_value=5, num_bins=101)
   extract_cumulants: Callable = cumulants_from_env
   extract_task: Callable = lambda data: data.observation.observation['task']
   extract_task_dim: Callable = lambda x: x[:, :, 0]
@@ -227,87 +319,55 @@ class UsfaLossFn(basics.RecurrentLossFn):
     # ======================================================
     # all are [T+1, B, N, A, C]
     # N = num policies, A = actions, C = cumulant dim
-    online_sf = online_preds.sf
     online_z = online_preds.policy
     target_sf = target_preds.sf
     # pseudo rewards, [T/T+1, B, C]
     cumulants = self.extract_cumulants(
       data=data, online_preds=online_preds, online_state=online_state,
       target_preds=target_preds, target_state=target_state)
-    cumulants = cumulants.astype(online_sf.dtype)
+    cumulants = cumulants.astype(online_z.dtype)
 
     # [T, B]
-    episode_mask = make_episode_mask(data, include_final=True)
-    online_sf = online_sf*episode_mask[:,:, None, None, None]
+    episode_mask = make_episode_mask(data, include_final=False)
     target_sf = target_sf*episode_mask[:,:, None, None, None]
 
 
     # Get selector actions from online Q-values for double Q-learning.
-    online_q =  (online_sf*online_z).sum(axis=CUMULANT_AXIS) # [T+1, B, N, A]
-    selector_actions = jnp.argmax(online_q, axis=ACTION_AXIS) # [T+1, B, N]
-    online_actions = data.action # [T, B]
+    selector_actions = jnp.argmax(online_preds.all_q_values, axis=ACTION_AXIS) # [T+1, B, N]
 
     # Preprocess discounts & rewards.
-    discounts = (data.discount * self.discount).astype(online_q.dtype) # [T, B]
-    lambda_ = (data.discount * self.lambda_).astype(online_q.dtype) 
+    discounts = (data.discount * self.discount).astype(online_z.dtype) # [T, B]
+    lambda_ = (data.discount * self.lambda_).astype(online_z.dtype) 
 
     # ======================================================
     # Prepare loss (via vmaps)
     # ======================================================
-    def td_error_fn(
-      online_sf_,
-      online_actions_,
+    def td_targets_fn(
       target_sf_,
       selector_actions_,
       cumulants_,
       discounts_,
       lambda__,
     ):
-      if self.loss_fn == 'qlearning':
-        error_fn = functools.partial(
-                rlax.transformed_n_step_q_learning,
-                n=self.bootstrap_n)
-        # vmap over cumulant dimension (C), return in dim=3
-        error_fn = jax.vmap(
-          error_fn,
-          in_axes=(2, None, 2, None, 1, None), out_axes=1)
-        return error_fn(
-          online_sf_,  # [T, A, C]
-          online_actions_,  # [T]         
-          target_sf_,  # [T, A, C]
-          selector_actions_,  # [T]      
-          cumulants_,  # [T, C]      
-          discounts_)  # [T]         
-
-      elif self.loss_fn == 'qlambda':
-        error_fn = jax.vmap(q_learning_lambda,
-          in_axes=(2, None, 1, None, 2, None, None), out_axes=1)
-
-        return error_fn(
-          online_sf_,         # [T, A, C] (vmap 2)
-          online_actions_,    # [T]       (vmap None)
-          cumulants_,         # [T, C]    (vmap 1)
-          discounts_,         # [T]       (vmap None)
-          target_sf_,         # [T, A, C] (vmap 2)
-          selector_actions_,  # [T]      
-          lambda__,           # [T]       (vmap None)
-        )
-      else:
-        raise NotImplementedError
+      return SFTargetFn(bootstrap_n=self.bootstrap_n, loss_fn=self.loss_fn)(
+        cumulants_,
+        discounts_,
+        target_sf_,
+        lambda__,
+        selector_actions_
+      )
 
     # vmap over batch dimension (B), return B in dim=1
-    td_error_fn = jax.vmap(td_error_fn, in_axes=BATCH_AXIS, out_axes=BATCH_AXIS)
+    td_targets_fn = jax.vmap(td_targets_fn, in_axes=BATCH_AXIS, out_axes=BATCH_AXIS)
 
     # vmap over policy dimension (N), return N in dim=2
-    td_error_fn = jax.vmap(
-      td_error_fn,
-      in_axes=(POLICY_AXIS, None, POLICY_AXIS, POLICY_AXIS, None, None, None),
+    td_targets_fn = jax.vmap(
+      td_targets_fn,
+      in_axes=(POLICY_AXIS, POLICY_AXIS, None, None, None),
       out_axes=POLICY_AXIS)
 
     # output = [0=T, 1=B, 2=N, 3=C]
-    sf_td_error = td_error_fn(
-      online_sf[:-1],  # [T, B, N, A, C] (vmap 2,1)
-      online_actions[:-1],  # [T, B]          (vmap None,1)
+    sf_td_targets = td_targets_fn(
       target_sf[1:],  # [T, B, N, A, C] (vmap 2,1)
       selector_actions[1:],  # [T, B, N]       (vmap 2,1)
       cumulants,  # [T-1, B, C]       (vmap None,1)
@@ -315,79 +375,65 @@ class UsfaLossFn(basics.RecurrentLossFn):
       lambda_[:-1],
       )
 
-    #---------------------
-    # Q-learning TD-error
-    # needs to happen now because will be averaging over dim N
-    #  below this.
-    #---------------------
-    task_td = self.extract_task_dim(sf_td_error)
-    task_w = self.extract_task(data)[:-1]
-    task_weights = task_w
-    if self.indicator_weights:
-      task_weights = (jnp.abs(task_w) < 1e-5).astype(task_w.dtype)  # float
+    # [T, B, N, A, C, M]
+    online_sf_logits = online_preds.sf_logits
+    online_sf_logits = online_sf_logits*episode_mask[:,:, None, None, None, None]
 
-    # [T, B, C]*[T, B, C] = [T, B]
-    value_td_error = (task_td*task_weights).sum(-1)
+    def compute_loss(targets, logits, actions):
+      # targets: [C]
+      # logits: [A, C, M]
+      # actions: []
+      index = lambda x, i: jnp.take_along_axis(x, i, axis=0)
 
-    #---------------------
-    # Compute average loss for SFs
-    #---------------------
-    # [T, B, N, C] --> [T, B]
-    # mean over cumulants, mean over # of policies
-    if self.sum_cumulants:
-      sf_td_error = sf_td_error.sum(axis=3).mean(axis=2)
-    else:
-      sf_td_error = sf_td_error.mean(axis=3).mean(axis=2)
+      # [A, C]
+      logits_action = index(logits, actions[None, None, None])
+      logits_action = jnp.squeeze(logits_action, axis=0)
 
-    if self.mask_loss:
-      # [T, B]
-      loss_mask = make_episode_mask(data, include_final=False)
-      sf_loss = episode_mean(
-        x=(0.5 * jnp.square(sf_td_error)),
-        mask=loss_mask[:-1])
-    else:
-      sf_loss = (0.5 * jnp.square(sf_td_error)).mean(axis=(0,2,3))
+      # [C] --> [C, M]
+      scalar_to_probs = jax.vmap(self.discretizer.scalar_to_probs)
+      target_probs = scalar_to_probs(targets)
 
-    batch_loss = sf_loss*self.sf_coeff
-    #---------------------
-    # Compute average loss for Q-values
-    #---------------------
+      # [C]
+      loss = jax.vmap(rlax.categorical_cross_entropy)(
+        target_probs, logits_action)
 
-    q_loss = jnp.zeros_like(batch_loss)
-    if self.q_coeff > 0.0:
-      if self.mask_loss:
-        # [T, B]
-        q_loss = episode_mean(
-          x=(0.5 * jnp.square(value_td_error)),
-          mask=loss_mask[:-1])
-      else:
-        q_loss = (0.5 * jnp.square(value_td_error)).mean(axis=(0,2,3))
+      return loss.mean()
 
-      batch_loss = batch_loss + q_loss*self.q_coeff
+    compute_loss = jax.vmap(compute_loss, 0, 0)  # time
+    compute_loss = jax.vmap(compute_loss, 1, 1)  # batch
+    compute_loss = jax.vmap(compute_loss, in_axes=(2, 2, None), out_axes=2)  # policies
 
-    cumulant_reward = (cumulants*task_w).sum(-1)
-    reward_error = (cumulant_reward - data.reward[:-1])
+    # [T, B, N]
+    sf_loss = compute_loss(
+      sf_td_targets,          # [T, B, N, C]
+      online_sf_logits[:-1],  # [T, B, N, A, C, M]
+      data.action[:-1]        # [T, B]
+    )
+    sf_loss = sf_loss.mean(POLICY_AXIS)
+
+    batch_loss = episode_mean(x=sf_loss, mask=episode_mask[:-1])
+
+    online_sf = online_preds.sf[:-1:, :, 0]
+    online_sf_action = jax.vmap(index_sf, 1, 1)(
+      online_sf, data.action[:-1])
+
+    # [T, B, C]
+    sf_td_error = sf_td_targets[:, :, 0] - online_sf_action
+    sf_td_error = sf_td_error.mean(-1)
 
     if online_preds.action_mask is not None:
-      mask = online_preds.action_mask[:,:,None]  # [T, B, 1, A]
+      mask = online_preds.action_mask[:-1,:,None]  # [T, B, 1, A]
 
-      # [T, B, N, A]
-      online_q = online_q*mask
-
-      # [T, B, N, A, D]
-      online_sf = online_sf*mask[:,:,:,:, None]
+      # [T, B, N, D]
+      online_sf = online_sf*mask[:,:,:,None]
 
     metrics = {
       '0.total_loss': batch_loss,
       f'0.1.sf_loss_{self.loss_fn}': sf_loss,
-      '0.1.q_loss': q_loss,
-      '2.q_td_error': jnp.abs(value_td_error),
       '2.sf_td_error': jnp.abs(sf_td_error),
       '3.cumulants': cumulants,
       '3.sf_mean': online_sf,
-      '3.sf_var': online_sf.var(axis=4),
-      '3.q_mean': online_q,
-      '4.reward_error': reward_error,
+      '3.sf_var': online_sf.var(axis=3),
       }
 
     return sf_td_error, batch_loss, metrics # [T, B], [B]
@@ -414,7 +460,13 @@ def non_zero_elements_to_string(arr):
   result = ",".join(f"{index}:{value:.2g}" for index, value in zip(non_zero_indices, non_zero_values))
   return f"[{result}]"
 
-def plot_sfgpi(sfs: np.array, actions: np.array, train_tasks: np.array, frames: np.array, max_cols: int = 10, title:str = ''):
+def plot_sfgpi(
+    sfs: np.array,
+    actions: np.array,
+    train_q_values: np.array,
+    train_tasks: np.array,
+    frames: np.array,
+    max_cols: int = 10, title:str = ''):
   max_len = min(sfs.shape[0], 100)
   sfs = sfs[:max_len]
   train_tasks = train_tasks[:max_len]
@@ -450,65 +502,67 @@ def plot_sfgpi(sfs: np.array, actions: np.array, train_tasks: np.array, frames: 
   # Iterate over time steps and plot
   total_plots = total_rows // (2 + N) * cols  # Recalculate total plots based on new row structure
   for t in range(total_plots):
-      # Calculate base row index for current time step; adjusted for 2 rows per image/bar plot plus N rows for heatmaps
-      base_row = (t // max_cols) * (2 + N)
-      col = t % max_cols  # Column wraps every max_cols
+    # Calculate base row index for current time step; adjusted for 2 rows per image/bar plot plus N rows for heatmaps
+    base_row = (t // max_cols) * (2 + N)
+    col = t % max_cols  # Column wraps every max_cols
 
-      if t < T:
-          axs[base_row, col].set_title(f"t={t+1}")
+    if t < T:
+      axs[base_row, col].set_title(f"t={t+1}")
 
-          # Plot frames
-          axs[base_row, col].imshow(frames[t])
-          axs[base_row, col].axis('off')  # Turn off axis for images
+      # Plot frames
+      axs[base_row, col].imshow(frames[t])
+      axs[base_row, col].axis('off')  # Turn off axis for images
 
-          # Plot bar plots
-          # [N, A] --> [N]
-          max_q_values = train_q_values[t].max(axis=-1)
-          max_index = max_q_values.argmax()  # best N
+      # Plot bar plots
+      # [N, A] --> [N]
+      max_q_values = train_q_values[t].max(axis=-1)
+      max_index = max_q_values.argmax()  # best N
 
-          colors = ['red' if i == max_index else 'blue' for i in range(N)]
-          axs[base_row+1, col].bar(range(N), max_q_values, color=colors)
-          task_labels = [non_zero_elements_to_string(i) for i in train_tasks[t]]
-          axs[base_row+1, col].set_xticks(range(N))  # Set tick positions
-          axs[base_row+1, col].set_xticklabels(task_labels, rotation=0)
-          axs[base_row+1, col].set_ylim(0, max_q * 1.1)  # Set y-axis limit to 1.
-          axs[base_row+1, col].set_title(f"Chosen={max_index+1}, a ={actions[t]}")  # Set y-axis limit to 1.
+      colors = ['red' if i == max_index else 'blue' for i in range(N)]
+      axs[base_row+1, col].bar(range(N), max_q_values, color=colors)
+      task_labels = [non_zero_elements_to_string(i) for i in train_tasks[t]]
+      axs[base_row+1, col].set_xticks(range(N))  # Set tick positions
+      axs[base_row+1, col].set_xticklabels(task_labels, rotation=0)
+      axs[base_row+1, col].set_ylim(0, max_q * 1.1)  # Set y-axis limit to 1.
+      axs[base_row+1, col].set_title(f"Chosen={max_index+1}, a ={actions[t]}")  # Set y-axis limit to 1.
 
-          # Plot heatmaps for each N
-          for n in range(N):
-              non_zero_indices = np.nonzero(train_tasks[t,n])[0]
-              colors = ['black' if i in non_zero_indices else 'skyblue' for i in range(C)]
-              # Identify the action with the highest Q-value for this N at time t
-              action_with_highest_q = train_q_values[t, n].argmax()
-              
-              # Extract SFs values for this action
-              sf_values_for_highest_q = sfs[t, n, action_with_highest_q, :]
-              
-              # Plot barplot of SFs for the highest Q-value action
-              axs[base_row+2+n, col].bar(range(C), sf_values_for_highest_q, color=colors)
-              axs[base_row+2+n, col].set_title(f"policy {n+1}, a = {action_with_highest_q}")
+      # Plot heatmaps for each N
+      for n in range(N):
+          non_zero_indices = np.nonzero(train_tasks[t,n])[0]
+          colors = ['black' if i in non_zero_indices else 'skyblue' for i in range(C)]
+          # Identify the action with the highest Q-value for this N at time t
+          action_with_highest_q = train_q_values[t, n].argmax()
+          
+          # Extract SFs values for this action
+          sf_values_for_highest_q = sfs[t, n, action_with_highest_q, :]
+          
+          # Plot barplot of SFs for the highest Q-value action
+          axs[base_row+2+n, col].bar(range(C), sf_values_for_highest_q, color=colors)
+          axs[base_row+2+n, col].set_title(f"policy {n+1}, a = {action_with_highest_q}")
 
-              axs[base_row+2+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
-              axs[base_row+2+n, col].axis('on')  # Optionally, turn on the axis if needed
+          axs[base_row+2+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
+          axs[base_row+2+n, col].axis('on')  # Optionally, turn on the axis if needed
 
-      else:
-          # Remove unused axes
-          for r_offset in range(2 + N):
-              try:
-                  fig.delaxes(axs[base_row + r_offset, col])
-              except:
-                  break
+    else:
+        # Remove unused axes
+        for r_offset in range(2 + N):
+            try:
+                fig.delaxes(axs[base_row + r_offset, col])
+            except:
+                break
 
   axs[0, 0].set_title(title)
   plt.tight_layout()
   return fig
 
 class Observer(ActorObserver):
-  def __init__(self,
-               period=100,
-               plot_success_only: bool = False,
-               colors=None,
-               prefix: str = 'SFsObserver'):
+
+  def __init__(
+      self,
+      period=100,
+      plot_success_only: bool = False,
+      colors=None,
+      prefix: str = 'SFsObserver'):
     super(Observer, self).__init__()
     self.period = period
     self.prefix = prefix
@@ -582,19 +636,23 @@ class Observer(ActorObserver):
     sfs = [s.predictions.sf for s in self.actor_states[1:]]
     sfs = np.stack(sfs)
 
-    frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
+    all_q_values = [s.predictions.all_q_values for s in self.actor_states[1:]]
+    all_q_values = np.stack(all_q_values)
+
+    npreds = all_q_values.shape[0]
     actions = jnp.stack(self.actions)[:npreds]
 
+    frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
 
     # e.g. "Success 4: 0=1, 4=.5, 5=.5"
     task_str = non_zero_elements_to_string(tasks[0])
     title_prefix = f'success {self.successes}' if is_success else f'failure {self.failures}'
     title = f"{title_prefix}. Task: {task_str}"
 
-
     fig = plot_sfgpi(
       sfs=sfs,
       actions=actions,
+      train_q_values=all_q_values,
       train_tasks=train_tasks[:-1],
       frames=frames,
       title=title
@@ -700,8 +758,10 @@ class Observer(ActorObserver):
 # Architectures
 ###################################
 class USFAPreds(NamedTuple):
+  all_q_values: jnp.ndarray  # q-value
   q_values: jnp.ndarray  # q-value
   sf: jnp.ndarray # successor features
+  sf_logits: jnp.ndarray # successor features
   policy: jnp.ndarray  # policy vector
   task: jnp.ndarray  # task vector (potentially embedded)
   action_mask: Optional[jax.Array] = None
@@ -718,6 +778,7 @@ class MonolithicSfHead(hk.Module):
                policy_layers : Tuple[int]=(32,),
                name: Optional[str] = None):
     super(MonolithicSfHead, self).__init__(name=name)
+    raise NotImplementedError
 
     if out_init_value is None:
       out_init = None
@@ -821,8 +882,8 @@ class IndependentSfHead(hk.Module):
   Independent SF heads help with optimization.
 
   Inspired by 
-  1. Modular Successor Feature Approximators: https://arxiv.org/abs/2301.12305
-  2. Categorical Successor Feature Approximators: https://arxiv.org/abs/2310.15940
+  1. Categorical Successor Feature Approximators: https://arxiv.org/abs/2310.15940
+  2. Modular Successor Feature Approximators: https://arxiv.org/abs/2301.12305
 
   """
   def __init__(
@@ -830,23 +891,25 @@ class IndependentSfHead(hk.Module):
       layers: int,
       num_actions: int,
       state_features_dim: int,
+      discretizer: Discretizer,
       activation: str = 'relu',
+      shared_head: bool = True,
       compositional_policy: bool = False,
       policy_layers : Tuple[int]=(),
       name: Optional[str] = None,
       **kwargs):
     super(IndependentSfHead, self).__init__(name=name)
 
-    self.sf_net_factory = lambda: hk.Sequential([
-        hk.nets.MLP(tuple(layers), 
-                    activation=getattr(jax.nn, activation),
-                    activate_final=True,
-                    with_bias=False),
-        hk.Linear((num_actions), w_init=jnp.zeros, with_bias=False),
-      ])
-
+    self.discretizer = discretizer
+    self.sf_net_factory = lambda: PredictionMlp(
+        mlp_layers=tuple(layers),
+        num_predictions=num_actions * discretizer.num_bins,
+        output_init=jnp.zeros,
+        activation=activation,
+      )
     self.policy_layers = policy_layers
     self.compositional_policy = compositional_policy
+    self.shared_head = shared_head
 
 
     if policy_layers:
@@ -891,42 +954,46 @@ class IndependentSfHead(hk.Module):
     ndims = self.state_features_dim
     assert policy.shape[0] == ndims
 
-    linear = lambda x: hk.Linear(self.layers[0], with_bias=False)(x)
+    layer_size = self.layers[0]
+    # linear = lambda x: hk.Linear(layer_size, with_bias=False)(x)
     concat = lambda a, b: jnp.concatenate((a, b))
+    concat3 = lambda a, b, c: jnp.concatenate((a, b, c))
 
-    if self.compositional_policy:
-      # [C, 1]
-      policy = jnp.expand_dims(policy, axis=1)
-      if self.policy_layers:
-        # [[P], ..., [P]]
-        policy = [self.policy_net_factory()(policy[idx]) for idx in range(ndims)]
-        # [C, P]
-        policy = jnp.stack(policy, axis=0)
+    # compute policy representation
+    dim_indicator = (jnp.abs(policy) < 1e-5).astype(sf_input.dtype)
+    policy_inputs = concat(policy, dim_indicator)
+    policy = self.policy_net_factory()(policy_inputs)
 
-      # Below, we make C copies of sf_input, break policy into C vectors of dimension 1,
-      # and then concatenate each break policy unit to each sf_input copy.
-      concat = jax.vmap(concat, in_axes=(None, 0), out_axes=0)
-      sf_inputs = concat(sf_input, policy)  # [C, D+D]
-      # now we get sf-estimates for each policy dimension
-      # [[A], ..., [A]]
-      sfs = [self.sf_net_factory()(sf_inputs[idx]) for idx in range(ndims)]
+    # compute sfs
+    if self.shared_head:
+      sf_net = self.sf_net_factory()
+      cumulant_embds = hk.Embed(
+        vocab_size=self.state_features_dim,
+        embed_dim=layer_size)(jnp.arange(ndims))  # [C, D]
+      sfs = [sf_net(concat3(sf_input, policy, cumulant_embds[i])) for i in range(ndims)]
     else:
-      policy = self.policy_net_factory()(policy)
-      sf_input = concat(sf_input, policy)  # [C, D+D]
-      sf_input = jax.nn.relu(linear(sf_input))
       sfs = [self.sf_net_factory()(sf_input) for _ in range(ndims)]
 
-    # [A, C]
-    sf = jnp.stack(sfs, axis=1)
+    # [C, A*M]
+    sf_logits = jnp.stack(sfs)
 
-    def dot(a, b): return jnp.sum(a*b).sum()
+    # [C, A, M]
+    sf_logits = sf_logits.reshape((ndims, self.num_actions, -1))
 
-    # dot-product: A
-    q_values = jax.vmap(
-        dot, in_axes=(0, None), out_axes=0)(sf, task)
+    # [C, A, M] --> [A, C, M]
+    sf_logits = sf_logits.transpose((1, 0, 2))
 
+    logits_to_scalar = jax.vmap(self.discretizer.logits_to_scalar, 0, 0)  # cumulants
+    logits_to_scalar = jax.vmap(logits_to_scalar, 1, 1)  # action
+
+    # [A, C, 1]
+    sfs = logits_to_scalar(sf_logits)
+    sfs = jnp.squeeze(sfs)  # [A, C]
+
+    q_values = (sfs*task[None]).sum(1)
     assert q_values.shape[0] == self.num_actions, 'wrong shape'
-    return sf, q_values
+
+    return sfs, sf_logits, q_values
 
 class SfGpiHead(hk.Module):
   """Universal Successor Feature Approximator GPI head"""
@@ -1022,7 +1089,7 @@ class SfGpiHead(hk.Module):
         USFAPreds: Description
     """
 
-    sfs, q_values = jax.vmap(
+    sfs, sf_logits, all_q_values = jax.vmap(
       self.sf_net, in_axes=(None, 0, None), out_axes=0)(
         usfa_input,
         policies,
@@ -1031,7 +1098,7 @@ class SfGpiHead(hk.Module):
     # GPI
     # -----------------------
     # [N, A] --> [A]
-    q_values = jnp.max(q_values, axis=-2)
+    q_values = jnp.max(all_q_values, axis=-2)
     num_actions = q_values.shape[-1]
 
     # [N, D] --> [N, A, D]
@@ -1039,7 +1106,9 @@ class SfGpiHead(hk.Module):
 
     return USFAPreds(
       sf=sfs,       # [N, A, D_w]
+      sf_logits=sf_logits,
       policy=policies_repeated,         # [N, A, D_w]
+      all_q_values=all_q_values,
       q_values=q_values,  # [N, A]
       task=task)         # [D_w]
 
@@ -1131,16 +1200,23 @@ def make_minigrid_networks(
     )
 
     if config.head == 'independent':
-      SfNetCls = IndependentSfHead
+      SfNetCls = functools.partial(
+        IndependentSfHead,
+        shared_head=config.shared_ind_head)
     elif config.head == 'monolithic':
       SfNetCls = MonolithicSfHead
     else:
       raise NotImplementedError
-
+    discretizer = Discretizer(
+      num_bins=config.num_bins,
+      min_value=config.min_scalar_value,
+      max_value=config.max_scalar_value,
+      tx_pair=config.tx_pair)
     sf_net = SfNetCls(
       layers=config.sf_layers,
       state_features_dim=state_features_dim,
       num_actions=num_actions,
+      discretizer=discretizer,
       policy_layers=config.policy_layers,
       combine_policy=config.combine_policy,
       activation=config.sf_activation,

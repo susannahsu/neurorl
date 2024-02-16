@@ -501,7 +501,8 @@ def non_zero_elements_to_string(arr):
   result = ",".join(f"{index}:{value:.2g}" for index, value in zip(non_zero_indices, non_zero_values))
   return f"[{result}]"
 
-def plot_sfgpi(sfs: np.array, train_tasks: np.array, frames: np.array, max_cols: int = 10, title:str = ''):
+def plot_sfgpi(
+    sfs: np.array, actions: np.array, train_tasks: np.array, frames: np.array, max_cols: int = 10, title:str = ''):
   max_len = min(sfs.shape[0], 100)
   sfs = sfs[:max_len]
   train_tasks = train_tasks[:max_len]
@@ -518,6 +519,8 @@ def plot_sfgpi(sfs: np.array, train_tasks: np.array, frames: np.array, max_cols:
 
   # Compute train_q_values with corrected dimension alignment
   train_q_values = (sfs * train_tasks[:, :, None]).sum(-1)  # [T, N, A]
+  # actions_from_q = train_q_values.max(1).argmax()
+  # assert (actions_from_q == actions).all(), "computed incorrectly, mismatch"
   max_q = max(train_q_values.max(), .1)
 
   # Determine the layout
@@ -535,55 +538,54 @@ def plot_sfgpi(sfs: np.array, train_tasks: np.array, frames: np.array, max_cols:
   # Iterate over time steps and plot
   total_plots = total_rows // (2 + N) * cols  # Recalculate total plots based on new row structure
   for t in range(total_plots):
-      # Calculate base row index for current time step; adjusted for 2 rows per image/bar plot plus N rows for heatmaps
-      base_row = (t // max_cols) * (2 + N)
-      col = t % max_cols  # Column wraps every max_cols
+    # Calculate base row index for current time step; adjusted for 2 rows per image/bar plot plus N rows for heatmaps
+    base_row = (t // max_cols) * (2 + N)
+    col = t % max_cols  # Column wraps every max_cols
 
-      if t < T:
-          axs[base_row, col].set_title(f"t={t+1}")
+    if t < T:
+      axs[base_row, col].set_title(f"t={t+1}")
 
-          # Plot frames
-          axs[base_row, col].imshow(frames[t])
-          axs[base_row, col].axis('off')  # Turn off axis for images
+      # Plot frames
+      axs[base_row, col].imshow(frames[t])
+      axs[base_row, col].axis('off')  # Turn off axis for images
 
-          # Plot bar plots
-          # [T, N, A] --> [T, N]
-          max_q_values = train_q_values[t].max(axis=-1)
-          max_index = max_q_values.argmax()  # best N
+      # Plot bar plots
+      # [N, A] --> [N]
+      max_q_values = train_q_values[t].max(axis=-1)
+      max_index = max_q_values.argmax()  # best N
 
-          colors = ['red' if i == max_index else 'blue' for i in range(N)]
-          axs[base_row+1, col].bar(range(N), max_q_values, color=colors)
-          # axs[base_row+1, col].axis('off')  # Optionally turn off axis for clarity
-          task_labels = [non_zero_elements_to_string(i) for i in train_tasks[t]]
-          axs[base_row+1, col].set_xticks(range(N))  # Set tick positions
-          axs[base_row+1, col].set_xticklabels(task_labels, rotation=0)
-          axs[base_row+1, col].set_ylim(0, max_q * 1.1)  # Set y-axis limit to 1.
-          axs[base_row+1, col].set_title(f"Chosen={max_index}")  # Set y-axis limit to 1.
+      colors = ['red' if i == max_index else 'blue' for i in range(N)]
+      axs[base_row+1, col].bar(range(N), max_q_values, color=colors)
+      task_labels = [non_zero_elements_to_string(i) for i in train_tasks[t]]
+      axs[base_row+1, col].set_xticks(range(N))  # Set tick positions
+      axs[base_row+1, col].set_xticklabels(task_labels, rotation=0)
+      axs[base_row+1, col].set_ylim(0, max_q * 1.1)  # Set y-axis limit to 1.
+      axs[base_row+1, col].set_title(f"Chosen={max_index+1}, a ={actions[t]}")  # Set y-axis limit to 1.
 
-          # Plot heatmaps for each N
-          for n in range(N):
-              non_zero_indices = np.nonzero(train_tasks[t,n])[0]
-              colors = ['black' if i in non_zero_indices else 'skyblue' for i in range(C)]
-              # Identify the action with the highest Q-value for this N at time t
-              action_with_highest_q = train_q_values[t, n].argmax()
-              
-              # Extract SFs values for this action
-              sf_values_for_highest_q = sfs[t, n, action_with_highest_q, :]
-              
-              # Plot barplot of SFs for the highest Q-value action
-              axs[base_row+2+n, col].bar(range(C), sf_values_for_highest_q, color=colors)
-              axs[base_row+2+n, col].set_title(f"policy {n+1}, a = {action_with_highest_q+1}")
+      # Plot heatmaps for each N
+      for n in range(N):
+          non_zero_indices = np.nonzero(train_tasks[t,n])[0]
+          colors = ['black' if i in non_zero_indices else 'skyblue' for i in range(C)]
+          # Identify the action with the highest Q-value for this N at time t
+          action_with_highest_q = train_q_values[t, n].argmax()
+          
+          # Extract SFs values for this action
+          sf_values_for_highest_q = sfs[t, n, action_with_highest_q, :]
+          
+          # Plot barplot of SFs for the highest Q-value action
+          axs[base_row+2+n, col].bar(range(C), sf_values_for_highest_q, color=colors)
+          axs[base_row+2+n, col].set_title(f"policy {n+1}, a = {action_with_highest_q}")
 
-              axs[base_row+2+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
-              axs[base_row+2+n, col].axis('on')  # Optionally, turn on the axis if needed
+          axs[base_row+2+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
+          axs[base_row+2+n, col].axis('on')  # Optionally, turn on the axis if needed
 
-      else:
-          # Remove unused axes
-          for r_offset in range(2 + N):
-              try:
-                  fig.delaxes(axs[base_row + r_offset, col])
-              except:
-                  break
+    else:
+        # Remove unused axes
+        for r_offset in range(2 + N):
+            try:
+                fig.delaxes(axs[base_row + r_offset, col])
+            except:
+                break
 
   axs[0, 0].set_title(title)
   plt.tight_layout()

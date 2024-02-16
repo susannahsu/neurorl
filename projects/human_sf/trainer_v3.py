@@ -87,6 +87,7 @@ from projects.human_sf import object_q_learning
 from projects.human_sf import muzero
 from projects.human_sf import object_muzero
 from projects.human_sf import scalar_muzero
+from projects.human_sf import cat_usfa
 from projects.human_sf import usfa_offtask as usfa
 from projects.human_sf import usfa_dyna_offtask as usfa_dyna
 from projects.human_sf import object_usfa_offtask as object_usfa
@@ -238,6 +239,30 @@ def make_q_loss_fn(config):
           bootstrap_n=config.bootstrap_n,
         )
 
+def make_cat_sf_loss_fn(config, **kwargs):
+  discretizer = utils.Discretizer(
+    num_bins=config.num_bins,
+    min_value=config.min_scalar_value,
+    max_value=config.max_scalar_value,
+    tx_pair=config.tx_pair)
+  return cat_usfa.UsfaLossFn(
+    discount=config.discount,
+    importance_sampling_exponent=config.importance_sampling_exponent,
+    burn_in_length=config.burn_in_length,
+    max_replay_size=config.max_replay_size,
+    max_priority_weight=config.max_priority_weight,
+    bootstrap_n=config.bootstrap_n,
+    sf_coeff=config.sf_coeff,
+    loss_fn=config.loss_fn,
+    discretizer=discretizer,
+    lambda_=config.sf_lambda,
+    sum_cumulants=config.sum_cumulants,
+    # weight_type=config.weight_type,
+    # combination=config.combination,
+    # off_task_weight=config.off_task_weight,
+    q_coeff=config.q_coeff,
+    **kwargs
+  )
 
 def make_sf_loss_fn(config, **kwargs):
   return usfa.MultitaskUsfaLossFn(
@@ -343,6 +368,21 @@ def setup_experiment_inputs(
       LossFn=make_sf_loss_fn(config))
     network_factory = functools.partial(
             usfa.make_minigrid_networks, config=config)
+
+  elif agent == 'flat_cat_usfa':
+    # has no mechanism to select from object options since dependent on what agent sees
+    env_kwargs['object_options'] = False
+
+    config = cat_usfa.Config(**config_kwargs)
+    builder = basics.Builder(
+      config=config,
+      ActorCls=functools.partial(
+        basics.BasicActor, observers=[
+          cat_usfa.Observer(period=1 if debug else 5000)]),
+      get_actor_core_fn=cat_usfa.get_actor_core,
+      LossFn=make_cat_sf_loss_fn(config))
+    network_factory = functools.partial(
+            cat_usfa.make_minigrid_networks, config=config)
 
   elif agent == 'flat_usfa_dyna':
     # has no mechanism to select from object options since dependent on what agent sees
@@ -560,12 +600,12 @@ def setup_experiment_inputs(
       reset=50 if not debug else 5,
       get_task_name=env_get_task_name,
       ),
-    human_proj_utils.LevelEpisodeObserver(
-      reset=2000 if not debug else 1,
-      prefix='EpisodeObserver',
-      get_task_name=env_get_task_name,
-      get_action_names=lambda e: e.action_names,
-    ),
+    # human_proj_utils.LevelEpisodeObserver(
+    #   reset=2000 if not debug else 1,
+    #   prefix='EpisodeObserver',
+    #   get_task_name=env_get_task_name,
+    #   get_action_names=lambda e: e.action_names,
+    # ),
     key_room.ObjectCountObserver(
       reset=1000 if not debug else 5,
       prefix=f'Images',
@@ -840,7 +880,24 @@ def sweep(search: str = 'default'):
               # 'eval', 
               ]),
             # 'sf_coeff': tune.grid_search([1.0, 0.0]),
-            # 'loss_fn': tune.grid_search(['qlearning', 'qlambda']),
+        },
+    ]
+  elif search == 'cat_usfa':
+    space = [
+        {
+            # "num_steps": tune.grid_search([5e6]),
+            # "env.basic_only": tune.grid_search([1]),
+            "num_steps": tune.grid_search([20e6]),
+            "env.num_task_rooms": tune.grid_search([1]),
+            "agent": tune.grid_search([
+              'flat_cat_usfa'
+              # 'object_usfa',
+            ]),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['cat_usfa-1']),
+            "shared_ind_head": tune.grid_search([False, True]),
+            'loss_fn': tune.grid_search(['qlearning', 'qlambda']),
+            "sf_layers": tune.grid_search([[256, 256], [512, 512]]),
         },
     ]
   elif search == 'flat_usfa_dyna':
