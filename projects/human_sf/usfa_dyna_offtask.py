@@ -97,7 +97,7 @@ class Config(basics.Config):
   scale_grad: float = .5
   binary_feature_loss: bool = True
   task_weighted_model: bool = True
-  mask_zero_features: float = 0.75
+  mask_zero_features: float = 0.5
 
 
 ###################################
@@ -1510,7 +1510,7 @@ class SfGpiHead(hk.Module):
     # [N, A] --> [A]
     q_values = jnp.max(all_q_values, axis=0)
     num_actions = q_values.shape[-1]
-
+    assert num_actions == self.num_actions
     # [N, D] --> [N, A, D]
     policies_repeated = jnp.repeat(policies[:, None], repeats=num_actions, axis=1)
 
@@ -1519,7 +1519,7 @@ class SfGpiHead(hk.Module):
       sf=sfs,       # [N, A, D_w]
       policy=policies_repeated,         # [N, A, D_w]
       q_values=q_values,  # [N, A]
-      all_q_values=q_values,
+      all_q_values=all_q_values,
       task=task)         # [D_w]
 
 
