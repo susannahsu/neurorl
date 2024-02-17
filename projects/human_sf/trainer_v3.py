@@ -159,7 +159,7 @@ def make_keyroom_env(
     swap_episodes: int = 0,
     maze_idx: int = 0,
     num_task_rooms: int = 2,
-    color_rooms: bool = False,
+    color_rooms: bool = True,
     basic_only: int = 0,
     debug: bool = False,
     **kwargs) -> dm_env.Environment:
