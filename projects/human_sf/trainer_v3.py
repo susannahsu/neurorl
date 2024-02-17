@@ -894,10 +894,10 @@ def sweep(search: str = 'default'):
               # 'object_usfa',
             ]),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['cat_usfa-2']),
+            "group": tune.grid_search(['cat_usfa-3']),
             "shared_ind_head": tune.grid_search([False]),
             'loss_fn': tune.grid_search(['qlearning', 'qlambda']),
-            "sf_layers": tune.grid_search([[128, 128]]),
+            "sf_layers": tune.grid_search([[128, 128], [256, 256]]),
         },
     ]
   elif search == 'flat_usfa_dyna':
@@ -928,7 +928,7 @@ def sweep(search: str = 'default'):
               'flat_usfa_dyna',
             ]),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['usfa_dyna-21']),
+            "group": tune.grid_search(['usfa_dyna-22']),
             # "n_actions_dyna": tune.grid_search([5]),
             "model_coeff": tune.grid_search([1]),
             "dyna_coeff": tune.grid_search([1]),
