@@ -245,8 +245,23 @@ class LevelEpisodeObserver(LevelAvgObserver):
 ###################################
 # Actor Observer
 ###################################
+def sorted_nonzero_indices(arr: np.array):
+  # Step 1: Identify non-zero indices
+  non_zero_indices = np.nonzero(arr)[0]
 
-def non_zero_elements_to_string(arr):
+  # Step 2: Sort the non-zero indices by their corresponding values
+  # Extract non-zero values using the indices
+  non_zero_values = arr[non_zero_indices]
+
+  # Get the sorted order of indices based on values
+  sorted_order = np.argsort(non_zero_values)
+
+  # Apply sorted order to non-zero indices
+  sorted_non_zero_indices = non_zero_indices[sorted_order]
+  return sorted_non_zero_indices
+
+
+def non_zero_elements_to_string(arr: np.array):
   """
   Generates a string that lists the indices and values of non-zero elements in a NumPy array.
   
@@ -257,7 +272,7 @@ def non_zero_elements_to_string(arr):
   - A string in the format "{index1}={value1}, {index2}={value2},..." for non-zero elements.
   """
   # Find indices where the array is not equal to zero
-  non_zero_indices = np.nonzero(arr)[0]
+  non_zero_indices = sorted_nonzero_indices(arr)
   # Extract the non-zero values based on the indices
   non_zero_values = arr[non_zero_indices]
   # Format the indices and their corresponding values into the requested string format
@@ -267,6 +282,7 @@ def non_zero_elements_to_string(arr):
 def plot_sfgpi(
     sfs: np.array,
     actions: np.array,
+    chosen_q_values: np.array,
     train_q_values: np.array,
     train_tasks: np.array,
     tasks: np.array,
@@ -279,6 +295,9 @@ def plot_sfgpi(
 
   max_sf = max(sfs.max(), .1)
 
+  ##########################
+  # Setting up plots
+  ##########################
   T, N, A, C = sfs.shape  # Time steps, N, Actions, Channels for sfs
   T2, N2, C2 = train_tasks.shape  # Time steps, N, Channels for train_tasks
 
@@ -292,9 +311,9 @@ def plot_sfgpi(
   # Determine the layout
   cols = min(T, max_cols)
   # Adjust total rows calculation to include an additional N rows for the heatmaps
-  total_rows = (T // max_cols) * (2 + N)  # 2 rows for images and bar plots, plus N rows for heatmaps
-  if T % max_cols > 0:  # Add additional rows if there's a remainder
-      total_rows += (2 + N)
+  total_rows = (T // max_cols) * (3 + N)  # Adjusted for an additional row for the heatmap
+  if T % max_cols > 0:
+      total_rows += (3 + N)
 
   # Prepare the matplotlib figure
   unit = 3
@@ -303,62 +322,84 @@ def plot_sfgpi(
 
   # Iterate over time steps and plot
   total_plots = total_rows // (2 + N) * cols  # Recalculate total plots based on new row structure
+
+  ##########################
+  # Iterating over time dimensions
+  ##########################
   for t in range(total_plots):
     # Calculate base row index for current time step; adjusted for 2 rows per image/bar plot plus N rows for heatmaps
-    base_row = (t // max_cols) * (2 + N)
+    base_row = (t // max_cols) * (3 + N)  # Adjusted for an additional row for the heatmap
     col = t % max_cols  # Column wraps every max_cols
 
     if t < T:
-      axs[base_row, col].set_title(f"t={t+1}")
 
-      # Plot frames
+      #------------------
+      # Plot image
+      #------------------
+      t_title=title
+      t_title +=f"\nt={t+1}"
+      axs[base_row, col].set_title(t_title)
       axs[base_row, col].imshow(frames[t])
       axs[base_row, col].axis('off')  # Turn off axis for images
 
-      # Plot bar plots
-      # [N, A] --> [N]
+      #------------------
+      # Plot maximum Q-values for each policy
+      #------------------
       max_q_values = train_q_values[t].max(axis=-1)
       max_index = max_q_values.argmax()  # best N
 
+
       colors = ['red' if i == max_index else 'blue' for i in range(N)]
       axs[base_row+1, col].bar(range(N), max_q_values, color=colors)
+
       task_labels = [non_zero_elements_to_string(i) for i in train_tasks[t]]
       axs[base_row+1, col].set_xticks(range(N))  # Set tick positions
-      axs[base_row+1, col].set_xticklabels(task_labels, rotation=0)
+      axs[base_row+1, col].set_xticklabels(task_labels, rotation=0, fontsize=8)
       axs[base_row+1, col].set_ylim(0, max_q * 1.1)  # Set y-axis limit to 1.
       axs[base_row+1, col].set_title(f"Chosen={max_index+1}, a ={actions[t]}")  # Set y-axis limit to 1.
 
+      #------------------
+      # Plot heatmap for train_q_values
+      #------------------
+      train_q_values_T = train_q_values[t].transpose()
+      axs[base_row+2, col].imshow(train_q_values_T, cmap='hot', interpolation='nearest')
+      for i in range(train_q_values_T.shape[0]):
+          for j in range(train_q_values_T.shape[1]):
+              axs[base_row+2, col].text(j, i, f"{train_q_values_T[i,j]:.2g}", ha="center", va="center", color="w", fontsize=6)
+      axs[base_row+2, col].set_title("Q-values Heatmap")
+
+      #------------------
       # Plot heatmaps for each N
+      #------------------
       non_zero_indices = np.nonzero(tasks[t])[0]
       colors = ['black' if i in non_zero_indices else 'skyblue' for i in range(C)]
       for n in range(N):
           # Identify the action with the highest Q-value for this N at time t
           action_with_highest_q = train_q_values[t, n].argmax()
-          
+
           # Extract SFs values for this action
           sf_values_for_highest_q = sfs[t, n, action_with_highest_q, :]
-          
-          # Plot barplot of SFs for the highest Q-value action
-          axs[base_row+2+n, col].bar(range(C), sf_values_for_highest_q, color=colors)
-          axs[base_row+2+n, col].set_title(f"policy {n+1}, a = {action_with_highest_q}")
 
-          axs[base_row+2+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
-          axs[base_row+2+n, col].axis('on')  # Optionally, turn on the axis if needed
+
+          # Plot barplot of SFs for the highest Q-value action
+          axs[base_row+3+n, col].bar(range(C), sf_values_for_highest_q, color=colors)
+          axs[base_row+3+n, col].set_title(f"policy {n+1}, a = {action_with_highest_q}")
+          axs[base_row+3+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
+          axs[base_row+3+n, col].axis('on')  # Optionally, turn on the axis if needed
 
           # Annotate bars for non-zero indices
           for i in non_zero_indices:
               height = sf_values_for_highest_q[i]
-              axs[base_row+2+n, col].text(i, height, f'{tasks[t][i]:.2f}', ha='center', va='bottom')
+              axs[base_row+3+n, col].text(i, height, f'{tasks[t][i]:.2f}', ha='center', va='bottom')
 
     else:
         # Remove unused axes
-        for r_offset in range(2 + N):
+        for r_offset in range(3 + N):
             try:
                 fig.delaxes(axs[base_row + r_offset, col])
             except:
                 break
 
-  axs[0, 0].set_title(title)
   plt.tight_layout()
   return fig
 
@@ -434,33 +475,39 @@ class SFObserver(ActorObserver):
       if not (success_period or failure_period):
         return
 
-    # [T, C]
-    tasks = [t.observation.observation['task'] for t in self.timesteps]
-    tasks = np.stack(tasks)
+    def get_from_timesteps(key):
+      x = [t.observation.observation[key] for t in self.timesteps]
+      return np.stack(x)
 
-    # [T, N, C]
-    train_tasks = [t.observation.observation['train_tasks'] for t in self.timesteps]
-    train_tasks = np.stack(train_tasks)
+    def get_from_predictions(key):
+      x = [getattr(s.predictions, key) for s in self.actor_states[1:]]
+      return np.stack(x)
 
-    sfs = [s.predictions.sf for s in self.actor_states[1:]]
-    sfs = np.stack(sfs)
+    tasks = get_from_timesteps('task')  # [T, C]
+    train_tasks = get_from_timesteps('train_tasks')  # [T, N, C]
+    sfs = get_from_predictions('sf')  # [T, N, A, C]
+
 
     # [T, N, A]
-    all_q_values = [s.predictions.all_q_values for s in self.actor_states[1:]]
-    all_q_values = np.stack(all_q_values)
+    all_q_values = get_from_predictions('all_q_values')
     npreds = all_q_values.shape[0]
     actions = jnp.stack(self.actions)[:npreds]
+
+    # [T, A]
+    q_values = get_from_predictions('q_values')
+    q_values = rlax.batched_index(q_values, actions)  # [T]
 
     frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
 
     # e.g. "Success 4: 0=1, 4=.5, 5=.5"
     task_str = non_zero_elements_to_string(tasks[0])
     title_prefix = f'success {self.successes}' if is_success else f'failure {self.failures}'
-    title = f"{title_prefix}. Task: {task_str}"
+    title = f"{title_prefix}\nTask: {task_str}"
 
     fig = plot_sfgpi(
       sfs=sfs,
       actions=actions,
+      chosen_q_values=q_values,
       train_q_values=all_q_values,
       train_tasks=train_tasks[:-1],
       tasks=tasks[:-1],
@@ -481,19 +528,17 @@ class SFObserver(ActorObserver):
     index = jax.vmap(index, in_axes=(1, None), out_axes=1)
     sfs = index(sfs, actions)  # [T-1, N, C]
 
-    # [T, A]
-    q_values = [s.predictions.q_values for s in self.actor_states[1:]]
-    q_values = np.stack(q_values)
-    q_values = rlax.batched_index(q_values, actions)  # [T]
 
     # ignore 0th (reset) time-step w/ 0 reward and last (terminal) time-step
     state_features = jnp.stack([t.observation.observation['state_features'] for t in self.timesteps])[1:]
 
     # Determine the number of plots needed based on the condition
     ndims = state_features.shape[1]
-    active_dims = [j for j in range(ndims) if state_features[:, j].sum() > 0]
+    # active_dims = [j for j in range(ndims) if state_features[:, j].sum() > 0]
 
-    if active_dims:
+    active_dims = sorted_nonzero_indices(tasks[0])
+
+    if len(active_dims):
       n_plots = len(active_dims) + 1  # +1 for the rewards subplot
 
       # Calculate rows and columns for subplots
@@ -516,7 +561,7 @@ class SFObserver(ActorObserver):
       for n in range(all_q_values.shape[1]):
         q_values_n = rlax.batched_index(all_q_values[:, n], actions)
         axs[0, 0].plot(q_values_n, label=f'$\\pi_{n}$ q_values')
-      axs[0, 0].set_title("Reward Predictions")
+      # axs[0, 0].set_title("Reward Predictions")
       axs[0, 0].legend()
 
       # Initialize subplot index for state_features and sfs

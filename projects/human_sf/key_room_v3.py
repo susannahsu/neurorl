@@ -27,6 +27,9 @@ from minigrid.envs.babyai.core.roomgrid_level import RoomGridLevel, RejectSampli
 from minigrid.envs.babyai.core.verifier import Instr
 from minigrid.minigrid_env import MiniGridEnv
 
+Color = str
+Shape = str
+
 def reject_next_to(env: MiniGridEnv, pos: tuple[int, int]):
     """
     Function to filter out object positions that are right next to
@@ -85,6 +88,7 @@ class BaseTaskRep:
       types,
       colors,
       target,
+      key_room_rewards: Tuple[float] = (.1, .25),
       target_room_color: Optional[str] = None,
       colors_to_room: Optional[dict] = None,
       first_instance: bool = True):
@@ -93,7 +97,7 @@ class BaseTaskRep:
       self.target_type, self.target_color  = target
       self._task_name = f"{self.target_color} {self.target_type}"
       self.target_room_color = target_room_color
-
+      self.key_room_rewards = key_room_rewards
       colors_to_room = colors_to_room or dict()
       self.room_to_color = {room: color for color,
                             room in colors_to_room.items()}
@@ -159,6 +163,13 @@ class BaseTaskRep:
 
 class FlatTaskRep(BaseTaskRep):
 
+  def populate_array(self, objs: List[Shape, Color]):
+    array = self.empty_array()
+    for (shape, color) in objs:
+      idx = self.get_vector_index(color=color, shape=shape)
+      array[idx] = 1
+    return array
+
   def empty_array(self):
     return np.zeros(len(self.colors) * len(self.types))
 
@@ -172,11 +183,11 @@ class FlatTaskRep(BaseTaskRep):
     vector[target_idx] = 1.0
 
     if self.target_room_color:
-      target_room_idx = self.get_vector_index(self.target_room_color, 'room')
-      vector[target_room_idx] = 0.25
-
       target_key_idx = self.get_vector_index(self.target_room_color, 'key')
-      vector[target_key_idx] = 0.1
+      vector[target_key_idx] = self.key_room_rewards[0]
+
+      target_room_idx = self.get_vector_index(self.target_room_color, 'room')
+      vector[target_room_idx] = self.key_room_rewards[1]
 
     return vector
 
@@ -212,6 +223,14 @@ class FlatTaskRep(BaseTaskRep):
 
 class StructuredTaskRep(BaseTaskRep):
 
+  def populate_array(self, objs: List[str, str]):
+     raise NotImplementedError('need to generalize to matrix form')
+    # array = self.empty_array()
+    # for (color, shape) in objs:
+    #   idx = self.get_vector_index(color=color, shape=shape)
+    #   array[idx] = 1
+    # return array
+
   def empty_array(self):
     # Initialize the array with zeros
     return np.zeros((len(self.colors), len(self.types)))
@@ -230,8 +249,8 @@ class StructuredTaskRep(BaseTaskRep):
       target_room_color_idx = self.colors.index(self.target_room_color)
       room_shape_idx = self.types.index('room')
       key_shape_idx = self.types.index('key')
-      array[target_room_color_idx, room_shape_idx] = 0.5
-      array[target_room_color_idx, key_shape_idx] = 0.1
+      array[target_room_color_idx, key_shape_idx] = self.key_room_rewards[0]
+      array[target_room_color_idx, room_shape_idx] = self.key_room_rewards[1]
 
     return array
 
@@ -327,6 +346,7 @@ class KeyRoom(LevelGen):
       ignore_task: bool = False,
       training=True,
       test_itermediary_rewards: bool = True,
+      key_room_rewards: Tuple[float] = (.1, .25),
       train_basic_objects: bool = True,
       # include_task_signals=False,
       max_steps_per_room: int = 100,
@@ -401,6 +421,7 @@ class KeyRoom(LevelGen):
 
       self.colors.sort()
       self.types.sort()
+      self.key_room_rewards = key_room_rewards
 
       ###############
       # task settings
@@ -471,6 +492,12 @@ class KeyRoom(LevelGen):
       self.task_set = np.array([t.task_array for t in train_tasks])
 
       ####################
+      # cumulant mask
+      ####################
+      possible_cumulant_objects = self.all_possible_task_objects + [['room', k[1]] for k in maze_config['keys']]
+      self.cumulant_mask = train_tasks[0].populate_array(possible_cumulant_objects)
+
+      ####################
       # action space settings
       ####################
       self.primitive_actions = [
@@ -510,7 +537,7 @@ class KeyRoom(LevelGen):
           {**self.observation_space.spaces,
            "state_features": cumulants_space,
            "task": copy.deepcopy(cumulants_space),  # equivalent specs
-           "offtask_goal": copy.deepcopy(cumulants_space),  # equivalent specs
+           "cumulant_mask": copy.deepcopy(cumulants_space),  # equivalent specs
            "train_tasks": train_task_arrays,
            "context": context_array,
            }
@@ -537,6 +564,7 @@ class KeyRoom(LevelGen):
         colors=self.colors,
         colors_to_room=colors_to_room,
         target=task_object,
+        key_room_rewards=self.key_room_rewards,
         target_room_color=target_room_color
     )
 
@@ -829,7 +857,7 @@ class KeyRoom(LevelGen):
 
     def update_obs(self, obs):
       obs['task'] = self.task.task_array
-      obs['offtask_goal'] = self.offtask_goal.task_array
+      obs['cumulant_mask'] = self.cumulant_mask
       obs['state_features'] = self.task.state_features
       obs['train_tasks'] = self.task_set
       obs['context'] = np.array(self.context)

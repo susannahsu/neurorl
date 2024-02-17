@@ -81,7 +81,7 @@ class Config(basics.Config):
 
   # Online loss
   task_coeff: float = 1.0
-  loss_fn : str = 'qlambda'
+  loss_fn : str = 'qlearning'
   lambda_: float  = .9
 
   # Dyna loss
@@ -96,7 +96,7 @@ class Config(basics.Config):
   model_coeff: float = 1.0
   scale_grad: float = .5
   binary_feature_loss: bool = True
-  task_weighted_model: bool = True
+  task_weighted_model: bool = False
   mask_zero_features: float = 0.5
 
 
@@ -119,8 +119,8 @@ class Predictions(NamedTuple):
   all_q_values: jnp.ndarray  # q-value
   q_values: jnp.ndarray  # q-value
   sf: jnp.ndarray # successor features
-  policy: jnp.ndarray  # policy vector
   task: jnp.ndarray  # task vector (potentially embedded)
+  policy: Optional[jax.Array] = None  # policy vector
   action_mask: Optional[jax.Array] = None
   model_predictions: Optional[jax.Array] = None
 
@@ -742,7 +742,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   action_coeff: float = 1.0
   cat_coeff: float = 1.0
   binary_feature_loss: bool = True
-  task_weighted_model: bool = True
+  task_weighted_model: bool = False
   mask_zero_features: float = 0.0
 
   def error(self,
@@ -759,7 +759,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     T, B = data.discount.shape[:2]
 
     metrics = {}
-    total_batch_td_error = jnp.zeros((T, B))
+    total_batch_td_error = jnp.zeros((T-1, B))
     total_batch_loss = jnp.zeros(B)
 
     #==========================
@@ -792,6 +792,12 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     #---------------
     # pseudo rewards, [T/T+1, B, C]
     cumulants = self.extract_cumulants(data=data).astype(online_preds.sf.dtype)
+    cumulant_mask = data.observation.observation.get('cumulant_mask', None)
+    if cumulant_mask is None:
+      cumulant_mask = jnp.ones_like(cumulants)
+    else:
+      cumulant_mask = cumulant_mask[1:]
+
     selector_actions = jnp.argmax(online_preds.q_values, axis=-1) # [T+1]
 
     sf_target_fn = SFTargetFn(loss_fn=self.loss_fn)
@@ -801,10 +807,9 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     sf_targets = sf_target_fn(
       cumulants,
       discounts[:-1],
-      target_preds.sf[1:],
+      target_sf[1:],
       lambda_[:-1],
       selector_actions[1:])
-    sf_targets = sf_targets*episode_mask[:-1,:, None]
 
     #==========================
     # Online SF-learning loss
@@ -815,12 +820,10 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
           data=data,
           online_preds=online_preds,
           sf_targets=sf_targets,
+          cumulant_mask=cumulant_mask,
           episode_mask=episode_mask)
 
       # [T-1, B] --> [T, B]
-      ontask_batch_td_error = jnp.concatenate(
-        (ontask_batch_td_error, jnp.zeros((1, B))))
-
       total_batch_td_error += ontask_batch_td_error*self.task_coeff
       total_batch_loss += ontask_batch_loss*self.task_coeff
       metrics.update(
@@ -843,6 +846,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       model_batch_loss, model_metrics = model_loss_fn(
         data,
         online_preds,
+        cumulant_mask,
         episode_mask,
         sf_targets)
 
@@ -865,26 +869,26 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       T, B = data.discount.shape[:2]
       key_grad, loss_keys = split_key(key_grad, N=T*B)
       loss_keys = loss_keys.reshape(T, B, 2)
+
       # [T, B], [B], [B]
-
+      nT_cumulants = cumulant_mask.shape[0]
       dyna_td_error, dyna_batch_loss, dyna_metrics = multitask_dyna_loss(
-            discounts,
-            online_preds,
-            target_preds,
-            train_tasks,
-            action_mask,
-            loss_keys)
+            discounts[:nT_cumulants],
+            jax.tree_map(lambda x: x[:nT_cumulants], online_preds),
+            jax.tree_map(lambda x: x[:nT_cumulants], target_preds),
+            train_tasks[:nT_cumulants],
+            action_mask[:nT_cumulants],
+            cumulant_mask[:nT_cumulants],
+            loss_keys[:nT_cumulants])
 
-      dyna_batch_loss = episode_mean(dyna_batch_loss, episode_mask)
+      dyna_batch_loss = episode_mean(dyna_batch_loss, episode_mask[:nT_cumulants])
 
       # update
-      total_batch_td_error += dyna_td_error*self.dyna_coeff
+      total_batch_td_error += dyna_td_error[:T-1]*self.dyna_coeff
       total_batch_loss += dyna_batch_loss*self.dyna_coeff
       metrics.update({f'2.dyna.{k}': v for k, v in dyna_metrics.items()})
 
     metrics['0.total_loss'] = total_batch_loss
-    # remove last time-step since invalid for RL loss
-    total_batch_td_error = total_batch_td_error[:-1]
     return total_batch_td_error, total_batch_loss, metrics
 
   def ontask_loss(
@@ -892,6 +896,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     data: jax.Array,
     online_preds: jax.Array,
     sf_targets: jax.Array,
+    cumulant_mask: jax.Array,
     episode_mask: jax.Array,
     ):
     # prepare online sfs
@@ -902,6 +907,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
     # [T, B, C]
     td_errors = sf_targets - online_sf
+    td_errors = td_errors*cumulant_mask
 
     # vmap over time + batch dimensions
     loss_fn = jax.vmap(jax.vmap(TaskWeightedSFLossFn()))
@@ -929,6 +935,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     self,
     data: NestedArray,
     online_preds: jax.Array,
+    cumulant_mask: jax.Array,
     episode_mask: jax.Array,
     sf_targets: jax.Array,
     rng_key: networks_lib.PRNGKey,
@@ -967,6 +974,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
     # mask over individual entries [T, C]
     state_features_mask = state_features_mask_T[:,None]*jnp.ones_like(state_features)
+    state_features_mask = state_features_mask*cumulant_mask
     if self.mask_zero_features > 0.0:
       # if masking zeros out, mask out some proportion of when state features are 0.
       # helps with data imbalance problem
@@ -999,7 +1007,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       (episode_mask[1:num_sf_targets], jnp.zeros(2)))
     sf_mask_rolled = roll(sf_mask)
 
-
+    cumulant_mask_rolled = vmap_roll(cumulant_mask)
     # ------------
     # unrolls the model from each time-step in parallel
     # ------------
@@ -1083,6 +1091,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       predicted_sf_,
       sf_target_,
       sf_mask_,
+      cumulant_mask_,
       #
       action_mask_logits_,
       action_mask_,
@@ -1109,8 +1118,9 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       features_loss = episode_mean(features_loss, features_mask_T)  # []
 
        # [k, C]
+      sf_td = sf_target_ - predicted_sf_
+      sf_td = sf_td*cumulant_mask_
       if self.task_weighted_model:
-        sf_td = sf_target_ - predicted_sf_
         sf_loss_fn = jax.vmap(TaskWeightedSFLossFn())
 
         # [k]
@@ -1119,9 +1129,9 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
         sf_loss = (task_weighted_loss * self.weighted_coeff + 
                       unweighted_loss * self.unweighted_coeff)
-        sf_loss = sf_loss.mean(-1)  # []
+        sf_loss = sf_loss.sum(-1)  # []
       else:
-        sf_l2 = rlax.l2_loss(predicted_sf_, sf_target_)  # [k, C]
+        sf_l2 = rlax.l2_loss(sf_td)  # [k, C]
         sf_l2 = sf_l2.sum(-1)  # [k]
         sf_loss = episode_mean(sf_l2, sf_mask_)  # []
 
@@ -1143,6 +1153,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       predicted_sfs,
       sf_targets,
       sf_mask_rolled,
+      cumulant_mask_rolled,
       action_mask_logits,
       action_mask_target,
       action_loss_mask_rolled,
@@ -1177,6 +1188,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     target_preds: NestedArray,
     tasks: jax.Array,
     action_mask: jax.Array,
+    cumulant_mask: jax.Array,
     rng_key: networks_lib.PRNGKey,
     networks: MbrlSfNetworks,
     params: networks_lib.Params,
@@ -1385,6 +1397,8 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       task_keys,                 # [M]
       )
 
+    # only for cumulants that matter
+    td_errors = td_errors*cumulant_mask[None, None]
     #---------------
     # get task-weighted SF loss for each SF TD-error
     #---------------
@@ -1465,13 +1479,13 @@ class SfGpiHead(hk.Module):
     sfs, q_values = self.sf_net(state, task, task)
     num_actions = q_values.shape[-1]
     # [N, D] --> [N, A, D]
-    policies_repeated = jnp.repeat(task[:, None],
-                                   repeats=num_actions, axis=1)
+    # policies_repeated = jnp.repeat(task[:, None],
+    #                                repeats=num_actions, axis=1)
 
     return Predictions(
       state=state,
       sf=sfs,       # [N, A, D_w]
-      policy=policies_repeated,         # [N, A, D_w]
+      # policy=policies_repeated,         # [N, A, D_w]
       all_q_values=q_values,
       q_values=q_values,  # [N, A]
       task=task)         # [D_w]
@@ -1508,16 +1522,17 @@ class SfGpiHead(hk.Module):
     # GPI
     # -----------------------
     # [N, A] --> [A]
+    assert all_q_values.ndim == 2, 'wrong shape'
     q_values = jnp.max(all_q_values, axis=0)
     num_actions = q_values.shape[-1]
     assert num_actions == self.num_actions
     # [N, D] --> [N, A, D]
-    policies_repeated = jnp.repeat(policies[:, None], repeats=num_actions, axis=1)
+    # policies_repeated = jnp.repeat(policies[:, None], repeats=num_actions, axis=1)
 
     return Predictions(
       state=state,
       sf=sfs,       # [N, A, D_w]
-      policy=policies_repeated,         # [N, A, D_w]
+      # policy=policies_repeated,         # [N, A, D_w]
       q_values=q_values,  # [N, A]
       all_q_values=all_q_values,
       task=task)         # [D_w]
