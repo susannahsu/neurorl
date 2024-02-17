@@ -448,7 +448,6 @@ class SFObserver(ActorObserver):
     # [T, N, A]
     all_q_values = [s.predictions.all_q_values for s in self.actor_states[1:]]
     all_q_values = np.stack(all_q_values)
-
     npreds = all_q_values.shape[0]
     actions = jnp.stack(self.actions)[:npreds]
 
@@ -493,6 +492,7 @@ class SFObserver(ActorObserver):
     # Determine the number of plots needed based on the condition
     ndims = state_features.shape[1]
     active_dims = [j for j in range(ndims) if state_features[:, j].sum() > 0]
+
     if active_dims:
       n_plots = len(active_dims) + 1  # +1 for the rewards subplot
 
@@ -510,8 +510,12 @@ class SFObserver(ActorObserver):
       # Plot rewards in the first subplot
       axs[0, 0].plot(rewards, label='rewards', linestyle='--', color='grey')
       axs[0, 0].plot(q_values, label='q_values', color='grey')
+
+      assert sfs.shape[1] == all_q_values.shape[1], f'num policies do not match. shape={str(all_q_values.shape)}'
+
       for n in range(all_q_values.shape[1]):
-        axs[0, 0].plot(all_q_values[:, n], label=f'$\\pi_{n}$ q_values')
+        q_values_n = rlax.batched_index(all_q_values[:, n], actions)
+        axs[0, 0].plot(q_values_n, label=f'$\\pi_{n}$ q_values')
       axs[0, 0].set_title("Reward Predictions")
       axs[0, 0].legend()
 
