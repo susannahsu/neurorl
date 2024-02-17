@@ -57,8 +57,8 @@ class Config(basics.Config):
 
   head: str = 'independent'
   shared_ind_head: bool = True
-  sf_coeff: float = 1e1
-  q_coeff: float = 1e3
+  sf_coeff: float = 1.0
+  q_coeff: float = 1.0
   sf_lambda: float = .9
   loss_fn: str = 'qlambda'
   sf_activation: str = 'relu'
@@ -800,6 +800,7 @@ class SfGpiHead(hk.Module):
     # [N, A] --> [A]
     q_values = jnp.max(all_q_values, axis=-2)
     num_actions = q_values.shape[-1]
+    assert num_actions == self.num_actions
 
     # [N, D] --> [N, A, D]
     policies_repeated = jnp.repeat(policies[:, None], repeats=num_actions, axis=1)
