@@ -19,10 +19,31 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from minigrid.envs.babyai.core.levelgen import LevelGen
-from minigrid.core.world_object import Ball, Box, Key, Floor
+from minigrid.core.world_object import Ball, Box, Key, Floor, WorldObj
+from minigrid.core.world_object import Point, WorldObj
+
 
 from minigrid.envs.babyai.core.roomgrid_level import RoomGridLevel, RejectSampling
 from minigrid.envs.babyai.core.verifier import Instr
+from minigrid.minigrid_env import MiniGridEnv
+
+def reject_next_to(env: MiniGridEnv, pos: tuple[int, int]):
+    """
+    Function to filter out object positions that are right next to
+    the agent's starting point
+    """
+
+    # sx, sy = env.agent_pos
+    x, y = pos
+    all_empty = True
+    for dx in (-1, 1):
+      for dy in (-1, 1):
+        sx = x - dx
+        sy = y - dy
+        empty = env.grid.get(sy, sx) is None
+        all_empty = all_empty and empty
+    reject = all_empty = False
+    return reject
 
 try:
   from library.utils import LevelAvgObserver
@@ -185,6 +206,7 @@ class FlatTaskRep(BaseTaskRep):
     if current_room_color != START_ROOM_COLOR:
         room_idx = self.get_vector_index(current_room_color, 'room')
         state_vector[room_idx] = 1
+        env.carrying = None # remove object
 
     return state_vector
 
@@ -245,6 +267,7 @@ class StructuredTaskRep(BaseTaskRep):
         room_color_idx = self.colors.index(current_room_color)
         room_shape_idx = self.types.index('room')
         state_array[room_color_idx, room_shape_idx] = 1
+        env.carrying = None  # remove object
 
     return state_array
 
@@ -614,6 +637,111 @@ class KeyRoom(LevelGen):
          colors_to_room={START_ROOM_COLOR:
                          self.get_room(*center_room_coords)})
 
+    def place_in_room(
+        self, i: int, j: int, obj: WorldObj,
+        task_obj_index: int = 0,
+    ) -> tuple[WorldObj, tuple[int, int]]:
+        """
+        Add an existing object to room (i, j)
+        """
+
+        room = self.get_room(i, j)
+
+        if task_obj_index:
+          pos = self.place_task_obj(
+              obj, room.top, room.size, reject_fn=reject_next_to, max_tries=1000,
+              task_obj_index=task_obj_index,
+          )
+        else:
+           pos = self.place_obj(
+            obj, room.top, room.size, reject_fn=reject_next_to, max_tries=1000)
+
+        room.objs.append(obj)
+
+        return obj, pos
+
+    def place_task_obj(
+        self,
+        obj: WorldObj | None,
+        top: Point = None,
+        size: tuple[int, int] = None,
+        reject_fn=None,
+        task_obj_index: int = 0,
+        max_tries=np.inf,
+    ):
+        """
+        Place an object at an empty position in the grid
+
+        :param top: top-left position of the rectangle where to place
+        :param size: size of the rectangle where to place
+        :param reject_fn: function to filter out potential positions
+        """
+
+        if top is None:
+            raise RuntimeError
+        else:
+            top = (max(top[0], 0), max(top[1], 0))
+
+        if size is None:
+           raise RuntimeError
+            # size = (self.grid.width, self.grid.height)
+
+        num_tries = 0
+
+        # decrease size by 1 on each border
+        size = (size[0] - 2, size[1] - 2)
+
+        # add 1 to each. so not next to door
+        top = (top[0] + 2, top[1] + 2)
+
+        # midway point
+        halfsize = ((size[0]//2), (size[1]//2))
+        mid = ((top[0] + halfsize[0]-1), (top[1] + halfsize[1]-1))
+
+        # import ipdb; ipdb.set_trace()
+        while True:
+            # This is to handle with rare cases where rejection sampling
+            # gets stuck in an infinite loop
+            if num_tries > max_tries:
+                raise RecursionError("rejection sampling failed in place_obj")
+
+            num_tries += 1
+            def make_pos(_top, _size):
+               return (
+                  self._rand_int(
+                     _top[0], min(_top[0] + _size[0], self.grid.width)),
+                  self._rand_int(
+                     _top[1], min(_top[1] + _size[1], self.grid.height)),
+              )
+
+            if task_obj_index == 1:
+               pos = make_pos(top, halfsize)
+            elif task_obj_index == 2:
+               pos = make_pos(mid, halfsize)
+            else:
+               raise RuntimeError
+
+            # Don't place the object on top of another object
+            if self.grid.get(*pos) is not None:
+                continue
+
+            # Don't place the object where the agent is
+            if np.array_equal(pos, self.agent_pos):
+                continue
+
+            # Check if there is a filtering criterion
+            if reject_fn and reject_fn(self, pos):
+                continue
+
+            break
+
+        self.grid.set(pos[0], pos[1], obj)
+
+        if obj is not None:
+            obj.init_pos = pos
+            obj.cur_pos = pos
+
+        return pos
 
     def multi_room_placement(self, maze_config=None):
       self.task_setting = 'multi'
@@ -655,8 +783,8 @@ class KeyRoom(LevelGen):
           pair1, pair2 = pairs[idx]
           obj1 = construct(*pair1)
           obj2 = construct(*pair2)
-          self.place_in_room(*room, obj1)
-          self.place_in_room(*room, obj2)
+          self.place_in_room(*room, obj1, task_obj_index=1)
+          self.place_in_room(*room, obj2, task_obj_index=2)
 
           init_floor = construct(shape='floor', color=key_color)
 
@@ -756,7 +884,7 @@ class KeyRoom(LevelGen):
       truncated = False
       if self.step_count >= self.max_episode_steps:
           truncated = True
-          terminated = True
+          terminated = False
 
       return obs, reward, terminated, truncated, info
 
