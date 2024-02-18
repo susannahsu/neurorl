@@ -567,10 +567,10 @@ class SFObserver(ActorObserver):
       axs[1, 0].set_title(f"total reward: {total_reward:.2g}")
 
       # Initialize subplot index for state_features and sfs
-      for j in active_dims:
+      for col, j in enumerate(active_dims):
           # Calculate subplot position
           # row, col = divmod(subplot_idx, cols)
-          col = j+1
+          col = col + 1
           # default_cycler = iter(self._colors)
           # Plot state_features and sfs for each active dimension
           axs[0, col].plot(state_features[:, j], label=f'$\\phi_{j}$', linestyle='--', color='grey')
