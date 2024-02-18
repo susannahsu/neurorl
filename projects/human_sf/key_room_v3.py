@@ -218,9 +218,6 @@ class FlatTaskRep(BaseTaskRep):
         room_idx = self.get_vector_index(current_room_color, 'room')
         state_vector[room_idx] = 1
 
-        if carrying_shape == 'key':
-          env.carrying = None # remove object
-
     return state_vector
 
 class StructuredTaskRep(BaseTaskRep):
@@ -884,8 +881,19 @@ class KeyRoom(LevelGen):
 
     def step(self, action, **kwargs):
       obs, _, _, _, info = super().step(action, **kwargs)
+      if action == self.actions.toggle:
+        # Get the position in front of the agent
+        fwd_pos = self.front_pos
+
+        # Get the contents of the cell in front of the agent
+        fwd_cell = self.grid.get(*fwd_pos)
+        if fwd_cell:
+          if fwd_cell.type == 'door' and fwd_cell.is_open:
+              self.carrying = None
+
       self.task.step(self)
       self.update_obs(obs)
+
 
       reward = (obs['state_features']*obs['task']).sum()
 
