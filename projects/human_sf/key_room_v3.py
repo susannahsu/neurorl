@@ -217,7 +217,9 @@ class FlatTaskRep(BaseTaskRep):
     if current_room_color != START_ROOM_COLOR:
         room_idx = self.get_vector_index(current_room_color, 'room')
         state_vector[room_idx] = 1
-        env.carrying = None # remove object
+
+        if carrying_shape == 'key':
+          env.carrying = None # remove object
 
     return state_vector
 
@@ -912,7 +914,7 @@ class KeyRoom(LevelGen):
       truncated = False
       if self.step_count >= self.max_episode_steps:
           truncated = True
-          terminated = False
+          # terminated = True
 
       return obs, reward, terminated, truncated, info
 
