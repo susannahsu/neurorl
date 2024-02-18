@@ -336,9 +336,7 @@ def plot_sfgpi(
       #------------------
       # Plot image
       #------------------
-      t_title=title
-      t_title +=f"\nt={t+1}"
-      axs[base_row, col].set_title(t_title)
+      axs[base_row, col].set_title(f"{title}\nt={t+1}")
       axs[base_row, col].imshow(frames[t])
       axs[base_row, col].axis('off')  # Turn off axis for images
 
@@ -366,7 +364,7 @@ def plot_sfgpi(
       for i in range(train_q_values_T.shape[0]):
           for j in range(train_q_values_T.shape[1]):
               axs[base_row+2, col].text(j, i, f"{train_q_values_T[i,j]:.2g}", ha="center", va="center", color="w", fontsize=6)
-      axs[base_row+2, col].set_title("Q-values Heatmap")
+      axs[base_row+2, col].set_title("Heatmap")
 
       #------------------
       # Plot heatmaps for each N
@@ -459,12 +457,13 @@ class SFObserver(ActorObserver):
     """Returns metrics collected for the current episode."""
     rewards = jnp.stack([t.reward for t in self.timesteps])[1:]
     total_reward = rewards.sum()
-    is_success = total_reward > 1.
+
     if self.period == 0: return
-    if self.period > 1:
+    elif self.period == 1: pass
+    else:
       if total_reward > 1:
         self.successes += 1
-      elif total_reward > 1e-3:
+      elif total_reward > 1e-5:
         self.failures += 1
       else:
         return
@@ -472,7 +471,9 @@ class SFObserver(ActorObserver):
       success_period = self.successes % self.period == 0
       failure_period = self.failures % self.period == 0
 
-      if not (success_period or failure_period):
+      if self.successes == 1 or self.failures == 1:
+         pass
+      elif not (success_period or failure_period):
         return
 
     def get_from_timesteps(key):
@@ -500,9 +501,10 @@ class SFObserver(ActorObserver):
     frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
 
     # e.g. "Success 4: 0=1, 4=.5, 5=.5"
+    is_success = total_reward > 1.
     task_str = non_zero_elements_to_string(tasks[0])
-    title_prefix = f'success {self.successes}' if is_success else f'failure {self.failures}'
-    title = f"{title_prefix}\nTask: {task_str}"
+    title_prefix = f'{self.successes}' if is_success else f'{self.failures}'
+    title = f"{title_prefix}. {task_str}"
 
     fig = plot_sfgpi(
       sfs=sfs,
@@ -533,64 +535,56 @@ class SFObserver(ActorObserver):
     state_features = jnp.stack([t.observation.observation['state_features'] for t in self.timesteps])[1:]
 
     # Determine the number of plots needed based on the condition
-    ndims = state_features.shape[1]
+    # ndims = state_features.shape[1]
     # active_dims = [j for j in range(ndims) if state_features[:, j].sum() > 0]
 
     active_dims = sorted_nonzero_indices(tasks[0])
 
     if len(active_dims):
-      n_plots = len(active_dims) + 1  # +1 for the rewards subplot
+      cols = len(active_dims) + 1  # +1 for the rewards subplot
 
       # Calculate rows and columns for subplots
-      cols = min(n_plots, 4)  # Maximum of 3 horizontally
-      rows = np.ceil(n_plots / cols).astype(int)
+      # cols = min(n_plots, 4)  # Maximum of 3 horizontally
+      rows = 2
 
       # Create a figure with dynamic subplots
       width = 3*cols
       height = 3*rows
       fig, axs = plt.subplots(rows, cols, figsize=(width, height), squeeze=False)
 
-      # fig.suptitle(title, fontsize=16, y=1.03)
 
       # Plot rewards in the first subplot
+      axs[0, 0].set_title(title)
       axs[0, 0].plot(rewards, label='rewards', linestyle='--', color='grey')
       axs[0, 0].plot(q_values, label='q_values', color='grey')
-
+      axs[0, 0].legend()
       assert sfs.shape[1] == all_q_values.shape[1], f'num policies do not match. shape={str(all_q_values.shape)}'
 
       for n in range(all_q_values.shape[1]):
         q_values_n = rlax.batched_index(all_q_values[:, n], actions)
-        axs[0, 0].plot(q_values_n, label=f'$\\pi_{n}$ q_values')
-      # axs[0, 0].set_title("Reward Predictions")
-      axs[0, 0].legend()
+        axs[1, 0].plot(q_values_n, label=f'$\\pi_{n}$ q_values')
+      axs[1, 0].legend()
+      axs[1, 0].set_title(f"total reward: {total_reward:.2g}")
 
       # Initialize subplot index for state_features and sfs
-      subplot_idx = 1  # Start from the second subplot
       for j in active_dims:
           # Calculate subplot position
-          row, col = divmod(subplot_idx, cols)
-          ax = axs[row, col]
-
+          # row, col = divmod(subplot_idx, cols)
+          col = j+1
           # default_cycler = iter(self._colors)
           # Plot state_features and sfs for each active dimension
-          ax.plot(state_features[:, j], label=f'$\\phi_{j}$', linestyle='--', color='grey')
+          axs[0, col].plot(state_features[:, j], label=f'$\\phi_{j}$', linestyle='--', color='grey')
+          axs[0, col].set_title(f"Dimension {j}")
+          axs[0, col].legend()
+
           for n in range(sfs.shape[1]):
             # try:
             #     color = next(default_cycler)['color']
             # except StopIteration:
             #     raise RuntimeError(f"too many policies?")
-            ax.plot(sfs[:, n, j], label=f'$\\pi_{n}, \\psi_{j}$')
-          ax.set_title(f"Dimension {j}")
-          ax.legend()
-
-          subplot_idx += 1  # Move to the next subplot
-
-      # Hide any unused subplots if there are any
-      for k in range(subplot_idx, rows * cols):
-          row, col = divmod(k, cols)
-          axs[row, col].axis('off')
+            axs[1, col].plot(sfs[:, n, j], label=f'$\\pi_{n}, \\psi_{j}$')
+          axs[1, col].legend()
 
       plt.tight_layout()
-      axs[0, 0].set_title(title)
       self.wandb_log({f"{self.prefix}/sf-predictions-{wandb_suffix}": wandb.Image(fig)})
       plt.close(fig)

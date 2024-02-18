@@ -152,7 +152,7 @@ class MuZeroConfig(muzero.Config):
 
 def make_keyroom_env(
     seed: int,
-    room_size: int = 6,
+    room_size: int = 7,
     evaluation: bool = False,
     object_options: bool = False,
     flat_task: bool = True,
@@ -160,7 +160,8 @@ def make_keyroom_env(
     swap_episodes: int = 0,
     maze_idx: int = 0,
     num_task_rooms: int = 2,
-    color_rooms: bool = True,
+    color_rooms: bool = False,
+    key_room_rewards = (.25, .5),
     basic_only: int = 0,
     debug: bool = False,
     **kwargs) -> dm_env.Environment:
@@ -194,6 +195,7 @@ def make_keyroom_env(
     swap_episodes=swap_episodes,
     color_rooms=color_rooms,
     basic_only=basic_only,
+    key_room_rewards=key_room_rewards,
     training= not evaluation,
     **kwargs)
 
@@ -333,13 +335,8 @@ def setup_experiment_inputs(
   task_encoder = lambda obs: hk.nets.MLP(
     (128, 128), activate_final=True)(obs['task'])
 
-  q_observer  = q_learning.Observer(period=1 if debug else 5000)
-  sf_observer = usfa.Observer(
-    plot_success_only=False if debug else True,
-    period=1 if debug else 500)
-  sf_dyna_observer = usfa_dyna.Observer(
-    # plot_success_only=False if debug else True,
-    period=1 if debug else 500)
+  q_observer  = q_learning.Observer(period=1 if debug else 4000)
+  sf_observer = human_proj_utils.SFObserver(period=1 if debug else 4000)
 
   if agent == 'flat_q':
     # has no mechanism to select from object options since dependent on what agent sees
@@ -377,8 +374,7 @@ def setup_experiment_inputs(
     builder = basics.Builder(
       config=config,
       ActorCls=functools.partial(
-        basics.BasicActor, observers=[
-          cat_usfa.Observer(period=1 if debug else 500)]),
+        basics.BasicActor, observers=[sf_observer]),
       get_actor_core_fn=cat_usfa.get_actor_core,
       LossFn=make_cat_sf_loss_fn(config))
     network_factory = functools.partial(
@@ -391,7 +387,7 @@ def setup_experiment_inputs(
     config = usfa_dyna.Config(**config_kwargs)
     builder = basics.Builder(
       config=config,
-      ActorCls=functools.partial(basics.BasicActor, observers=[sf_dyna_observer]),
+      ActorCls=functools.partial(basics.BasicActor, observers=[sf_observer]),
       get_actor_core_fn=usfa_dyna.get_actor_core,
       LossFn=make_sf_dyna_loss_fn(config))
     network_factory = functools.partial(
@@ -495,7 +491,7 @@ def setup_experiment_inputs(
     builder = basics.Builder(
       config=config,
       get_actor_core_fn=usfa_dyna.get_actor_core,
-      ActorCls=functools.partial(basics.BasicActor, observers=[sf_dyna_observer]),
+      ActorCls=functools.partial(basics.BasicActor, observers=[sf_observer]),
       LossFn=make_sf_dyna_loss_fn(config, action_mask=True))
     network_factory = functools.partial(
       object_usfa_dyna.make_minigrid_networks, config=config)
@@ -607,7 +603,7 @@ def setup_experiment_inputs(
     #   get_action_names=lambda e: e.action_names,
     # ),
     key_room.ObjectCountObserver(
-      reset=1000 if not debug else 5,
+      reset=5000 if not debug else 5,
       prefix=f'Images',
       agent_name=agent,
       get_task_name=env_get_task_name),
@@ -921,19 +917,19 @@ def sweep(search: str = 'default'):
         {
             # "num_steps": tune.grid_search([5e6]),
             # "env.basic_only": tune.grid_search([1]),
-            "num_steps": tune.grid_search([20e6]),
+            "num_steps": tune.grid_search([30e6]),
             "env.num_task_rooms": tune.grid_search([1]),
             "agent": tune.grid_search([
               "object_usfa_dyna",
               # 'flat_usfa_dyna',
             ]),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['usfa_dyna-23-env']),
-            # "n_actions_dyna": tune.grid_search([5, 10]),
-            # "model_coeff": tune.grid_search([1]),
-            "dyna_coeff": tune.grid_search([1, 0.0]),
-            "env.color_rooms": tune.grid_search([True, False]),
-            "env.key_room_rewards": tune.grid_search([[.05, .1], [.1, .5], [.1, .25]]),
+            "group": tune.grid_search(['usfa_dyna-27']),
+            'env.test_itermediary_rewards': tune.grid_search([True]),
+            "samples_per_insert": tune.grid_search([10.0, 50.0]),
+            "n_actions_dyna": tune.grid_search([1]),
+            "dyna_coeff": tune.grid_search([.1]),
+            "env.room_size": tune.grid_search([7, 8]),
         },
         # {
         #     # "num_steps": tune.grid_search([5e6]),

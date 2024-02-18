@@ -342,7 +342,7 @@ class KeyRoom(LevelGen):
       swap_episodes: int = 0,
       terminate_failure: bool = True,
       num_task_rooms: int = 2,
-      color_rooms: bool = True,
+      color_rooms: bool = False,
       ignore_task: bool = False,
       training=True,
       test_itermediary_rewards: bool = True,
@@ -374,7 +374,7 @@ class KeyRoom(LevelGen):
           rooms_locked (bool): Whether rooms are initially locked.
           include_task_signals (bool): Whether to include task-specific signals (i.e. room color, indicator object).
       """
-
+      assert color_rooms is False
       ###############
       # preparing maze
       ###############
@@ -444,7 +444,7 @@ class KeyRoom(LevelGen):
       self.rooms_locked = rooms_locked
       self.basic_only = basic_only
       self.episodes = 0
-      self.max_steps_per_room = max_steps_per_room
+      self.max_steps_per_room = int(room_size/6 * max_steps_per_room)
 
       self.initiated = False
       super().__init__(
