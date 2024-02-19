@@ -213,10 +213,15 @@ class FlatTaskRep(BaseTaskRep):
         idx = self.get_vector_index(carrying_color, carrying_shape)
         state_vector[idx] = 1
 
-    current_room_color = self.current_room(env)
-    if current_room_color != START_ROOM_COLOR:
-        room_idx = self.get_vector_index(current_room_color, 'room')
+
+    fwd_cell = env.grid.get(*env.front_pos)
+    if fwd_cell:
+      if fwd_cell.type == 'door' and fwd_cell.is_open:
+        import ipdb; ipdb.set_trace()
+        room_idx = self.get_vector_index(fwd_cell.color, 'room')
         state_vector[room_idx] = 1
+    # current_room_color = self.current_room(env)
+    # if current_room_color != START_ROOM_COLOR:
 
     return state_vector
 

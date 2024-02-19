@@ -76,7 +76,9 @@ class Config(basics.Config):
   samples_per_insert: float = 10.0
   trace_length: int = 20
   weighted_coeff: float = 1.0
-  unweighted_coeff: float = 1.0
+  unweighted_coeff: float = 0.0
+  task_weighted_dyna: bool = True
+  model_unweighted_coeff: float = 0.0
   cat_coeff: float = 1.0
 
   # Online loss
@@ -85,8 +87,8 @@ class Config(basics.Config):
   lambda_: float  = .9
 
   # Dyna loss
-  dyna_coeff: float = 1.0
-  n_actions_dyna: int = 5
+  dyna_coeff: float = .1
+  n_actions_dyna: int = 20
   n_tasks_dyna: int = 10
 
   # Model loss
@@ -96,7 +98,7 @@ class Config(basics.Config):
   model_coeff: float = 1.0
   scale_grad: float = .5
   binary_feature_loss: bool = True
-  task_weighted_model: bool = False
+  task_weighted_model: bool = True
   mask_zero_features: float = 0.5
 
 
@@ -722,6 +724,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   bootstrap_n: int = 5
   weighted_coeff: float = 1.0
   unweighted_coeff: float = 1.0
+  model_unweighted_coeff: float = 1.0
   action_mask: bool = False
 
   # Online loss
@@ -733,6 +736,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   dyna_coeff: float = 1.0
   n_actions_dyna: int = 1
   n_tasks_dyna: int = 5
+  task_weighted_dyna: bool = True
 
   # Model loss
   simulation_steps: int = 5
@@ -915,7 +919,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     task_weighted_loss, unweighted_loss = loss_fn(
       td_errors, online_preds.task[:-1])
 
-    batch_loss = (task_weighted_loss * self.weighted_coeff + 
+    batch_loss = (task_weighted_loss + 
                   unweighted_loss * self.unweighted_coeff)
 
     td_errors = td_errors.mean(axis=2)
@@ -1127,7 +1131,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         task_weighted_loss, unweighted_loss = sf_loss_fn(
           sf_td, task_weights_)
 
-        sf_loss = (task_weighted_loss * self.weighted_coeff + 
+        sf_loss = (task_weighted_loss + 
                       unweighted_loss * self.unweighted_coeff)
         sf_loss = sf_loss.sum(-1)  # []
       else:
@@ -1403,14 +1407,14 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     # get task-weighted SF loss for each SF TD-error
     #---------------
     # vmap over task
-    if self.task_weighted_model:
+    if self.task_weighted_dyna:
       loss_fn = jax.vmap(TaskWeightedSFLossFn())
       # output should be [M, K] for tasks and actions sampled
       task_weighted_loss, unweighted_loss = loss_fn(
         td_errors,
         sampled_tasks)
-      batch_loss = (task_weighted_loss * self.weighted_coeff + 
-                    unweighted_loss * self.unweighted_coeff)
+      batch_loss = (task_weighted_loss + 
+                    unweighted_loss * self.model_unweighted_coeff)
       td_errors = td_errors.mean()
       batch_loss = batch_loss.mean()
 
@@ -1509,7 +1513,6 @@ class SfGpiHead(hk.Module):
     """
     if policies is None:
       policies = jnp.expand_dims(task, axis=-2)
-      import ipdb; ipdb.set_trace()
 
     task = task.astype(state.dtype)
     policies = policies.astype(state.dtype)
@@ -1526,13 +1529,10 @@ class SfGpiHead(hk.Module):
     q_values = jnp.max(all_q_values, axis=0)
     num_actions = q_values.shape[-1]
     assert num_actions == self.num_actions
-    # [N, D] --> [N, A, D]
-    # policies_repeated = jnp.repeat(policies[:, None], repeats=num_actions, axis=1)
 
     return Predictions(
       state=state,
       sf=sfs,       # [N, A, D_w]
-      # policy=policies_repeated,         # [N, A, D_w]
       q_values=q_values,  # [N, A]
       all_q_values=all_q_values,
       task=task)         # [D_w]
@@ -1563,10 +1563,13 @@ class UsfaArch(hk.RNNCore):
       state: State,  # [D]
       evaluation: bool = False,
   ) -> Tuple[Predictions, State]:
-    torso_outputs = self._torso(inputs)  # [D+A+1]
-    memory_input = jnp.concatenate(
-      (torso_outputs.image, torso_outputs.action), axis=-1)
 
+    torso_outputs = self._torso(inputs)  # [D+A+1]
+
+    state_features = inputs.observation['state_features'].astype(
+      torso_outputs.image.dtype)
+    memory_input = jnp.concatenate(
+      (torso_outputs.image, torso_outputs.action, state_features), axis=-1)
     core_outputs, new_state = self._memory(memory_input, state)
 
     if evaluation:
@@ -1589,8 +1592,11 @@ class UsfaArch(hk.RNNCore):
   ) -> Tuple[State, State]:
 
     torso_outputs = hk.BatchApply(self._torso)(inputs)  # [T, B, D+A+1]
+
+    state_features = inputs.observation['state_features'].astype(
+      torso_outputs.image.dtype)
     memory_input = jnp.concatenate(
-      (torso_outputs.image, torso_outputs.action), axis=-1)
+      (torso_outputs.image, torso_outputs.action, state_features), axis=-1)
 
     core_outputs, new_states = hk.static_unroll(
       self._memory, memory_input, state)

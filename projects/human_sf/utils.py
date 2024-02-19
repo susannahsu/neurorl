@@ -374,14 +374,13 @@ def plot_sfgpi(
       for n in range(N):
           # Identify the action with the highest Q-value for this N at time t
           action_with_highest_q = train_q_values[t, n].argmax()
-
+          a_chosen = actions[t]
           # Extract SFs values for this action
-          sf_values_for_highest_q = sfs[t, n, action_with_highest_q, :]
-
+          sf_values_for_highest_q = sfs[t, n, a_chosen, :]
 
           # Plot barplot of SFs for the highest Q-value action
           axs[base_row+3+n, col].bar(range(C), sf_values_for_highest_q, color=colors)
-          axs[base_row+3+n, col].set_title(f"policy {n+1}, a = {action_with_highest_q}")
+          axs[base_row+3+n, col].set_title(f"policy {n+1}, a = {a_chosen}, optimal={action_with_highest_q}")
           axs[base_row+3+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
           axs[base_row+3+n, col].axis('on')  # Optionally, turn on the axis if needed
 
