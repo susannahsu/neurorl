@@ -88,12 +88,14 @@ class BaseTaskRep:
       types,
       colors,
       target,
+      auto_enter_room: bool = True,
       key_room_rewards: Tuple[float] = (.1, .25),
       target_room_color: Optional[str] = None,
       colors_to_room: Optional[dict] = None,
       first_instance: bool = True):
       self.types = types
       self.colors = colors
+      self.auto_enter_room = auto_enter_room
       self.target_type, self.target_color  = target
       self._task_name = f"{self.target_color} {self.target_type}"
       self.target_room_color = target_room_color
@@ -165,9 +167,10 @@ class FlatTaskRep(BaseTaskRep):
 
   def populate_array(self, objs: List[Shape, Color]):
     array = self.empty_array()
+    task_array = self.make_task_array()
     for (shape, color) in objs:
       idx = self.get_vector_index(color=color, shape=shape)
-      array[idx] = 1
+      array[idx] = (np.abs(task_array[idx]) > 0.0).astype(task_array.dtype)
     return array
 
   def empty_array(self):
@@ -214,11 +217,17 @@ class FlatTaskRep(BaseTaskRep):
         state_vector[idx] = 1
 
 
-    fwd_cell = env.grid.get(*env.front_pos)
-    if fwd_cell:
-      if fwd_cell.type == 'door' and fwd_cell.is_open:
-        room_idx = self.get_vector_index(fwd_cell.color, 'room')
-        state_vector[room_idx] = 1
+    if self.auto_enter_room:
+      current_room_color = self.current_room(env)
+      if current_room_color != START_ROOM_COLOR:
+          room_idx = self.get_vector_index(current_room_color, 'room')
+          state_vector[room_idx] = 1
+    else:
+      fwd_cell = env.grid.get(*env.front_pos)
+      if fwd_cell:
+        if fwd_cell.type == 'door' and fwd_cell.is_open:
+          room_idx = self.get_vector_index(fwd_cell.color, 'room')
+          state_vector[room_idx] = 1
 
     return state_vector
 
@@ -282,12 +291,19 @@ class StructuredTaskRep(BaseTaskRep):
         state_array[color_idx, shape_idx] = 1
 
     # Check the color of the current room
-    fwd_cell = env.grid.get(*env.front_pos)
-    if fwd_cell:
-      if fwd_cell.type == 'door' and fwd_cell.is_open:
-        room_color_idx = self.colors.index(fwd_cell.color)
-        room_shape_idx = self.types.index('room')
-        state_array[room_color_idx, room_shape_idx] = 1
+    if self.auto_enter_room:
+      current_room_color = self.current_room(env)
+      if current_room_color != START_ROOM_COLOR:
+          room_color_idx = self.colors.index(current_room_color)
+          room_shape_idx = self.types.index('room')
+          state_array[room_color_idx, room_shape_idx] = 1
+    else:
+      fwd_cell = env.grid.get(*env.front_pos)
+      if fwd_cell:
+        if fwd_cell.type == 'door' and fwd_cell.is_open:
+          room_color_idx = self.colors.index(fwd_cell.color)
+          room_shape_idx = self.types.index('room')
+          state_array[room_color_idx, room_shape_idx] = 1
 
     return state_array
 
@@ -338,6 +354,8 @@ class KeyRoom(LevelGen):
       locations=False,
       unblocking=False,
       rooms_locked=True,
+      auto_remove_key: bool = True,
+      auto_enter_room: bool = True,
       basic_only: int = 0,
       flat_task: bool = True,
       swap_episodes: int = 0,
@@ -376,6 +394,8 @@ class KeyRoom(LevelGen):
           include_task_signals (bool): Whether to include task-specific signals (i.e. room color, indicator object).
       """
       assert color_rooms is False
+      self.auto_remove_key = auto_remove_key
+      self.auto_enter_room = auto_enter_room
       ###############
       # preparing maze
       ###############
@@ -496,7 +516,9 @@ class KeyRoom(LevelGen):
       # cumulant mask
       ####################
       possible_cumulant_objects = self.all_possible_task_objects + [['room', k[1]] for k in maze_config['keys']]
-      self.cumulant_mask = train_tasks[0].populate_array(possible_cumulant_objects)
+      self.cumulant_mask = np.array([t.populate_array(
+          possible_cumulant_objects) for t in train_tasks])
+      self.cumulant_mask = (self.cumulant_mask.sum(0) > 0.0).astype(self.cumulant_mask.dtype)
 
       ####################
       # action space settings
@@ -565,6 +587,7 @@ class KeyRoom(LevelGen):
         colors=self.colors,
         colors_to_room=colors_to_room,
         target=task_object,
+        auto_enter_room=self.auto_enter_room,
         key_room_rewards=self.key_room_rewards,
         target_room_color=target_room_color
     )
@@ -883,6 +906,7 @@ class KeyRoom(LevelGen):
 
     def step(self, action, **kwargs):
       obs, _, _, _, info = super().step(action, **kwargs)
+
       if action == self.actions.toggle:
         # Get the position in front of the agent
         fwd_pos = self.front_pos
@@ -891,7 +915,13 @@ class KeyRoom(LevelGen):
         fwd_cell = self.grid.get(*fwd_pos)
         if fwd_cell:
           if fwd_cell.type == 'door' and fwd_cell.is_open:
-              self.carrying = None
+              if self.auto_remove_key:
+                self.carrying = None
+              if self.auto_enter_room:
+                obs, _, _, _, info = super().step(self.actions.forward, **kwargs)
+                obs, _, _, _, info = super().step(self.actions.forward, **kwargs)
+                fwd_cell.toggle(self, fwd_pos)
+
 
       self.task.step(self)
       self.update_obs(obs)
