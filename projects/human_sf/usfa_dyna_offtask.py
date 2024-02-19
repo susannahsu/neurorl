@@ -76,8 +76,8 @@ class Config(basics.Config):
   samples_per_insert: float = 10.0
   trace_length: int = 20
   weighted_coeff: float = 1.0
-  unweighted_coeff: float = 0.0
   task_weighted_dyna: bool = True
+  unweighted_coeff: float = 0.0
   model_unweighted_coeff: float = 0.0
   cat_coeff: float = 1.0
 
@@ -90,6 +90,7 @@ class Config(basics.Config):
   dyna_coeff: float = .1
   n_actions_dyna: int = 20
   n_tasks_dyna: int = 10
+  backup_train_task: bool = False
 
   # Model loss
   simulation_steps: int = 5
@@ -718,6 +719,7 @@ class TaskWeightedSFLossFn:
 class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
   extract_cumulants: Callable = cumulants_from_env
+  extract_online_task: Callable = lambda d: d.observation.observation['task']
   extract_tasks: Callable = lambda d: d.observation.observation['train_tasks']
 
   # Shared
@@ -737,6 +739,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   n_actions_dyna: int = 1
   n_tasks_dyna: int = 5
   task_weighted_dyna: bool = True
+  backup_train_task: bool = False
 
   # Model loss
   simulation_steps: int = 5
@@ -867,6 +870,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         params=params,
         target_params=target_params,
         )
+      online_task = self.extract_online_task(data)
       train_tasks = self.extract_tasks(data)
 
       multitask_dyna_loss = jax.vmap(jax.vmap(multitask_dyna_loss))
@@ -880,6 +884,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
             discounts[:nT_cumulants],
             jax.tree_map(lambda x: x[:nT_cumulants], online_preds),
             jax.tree_map(lambda x: x[:nT_cumulants], target_preds),
+            online_task[:nT_cumulants],
             train_tasks[:nT_cumulants],
             action_mask[:nT_cumulants],
             cumulant_mask[:nT_cumulants],
@@ -1190,6 +1195,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     discounts: jax.Array,
     online_preds: NestedArray,
     target_preds: NestedArray,
+    online_task: jax.Array,
     tasks: jax.Array,
     action_mask: jax.Array,
     cumulant_mask: jax.Array,
@@ -1371,11 +1377,19 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
     # [M, A, C]
     rng_key, sf_keys = split_key(rng_key, N=ntasks)
-    predictions = jax.vmap(
-      compute_sfs,
-      in_axes=(0, None, 0), out_axes=0)(
-        # [M, 2], [D], [M, C]
-        sf_keys, online_preds.state, sampled_tasks)
+    if self.backup_train_task:
+      predictions = jax.vmap(
+        compute_sfs,
+        in_axes=(0, None, None), out_axes=0)(
+          # [M, 2], [D], [C]
+          sf_keys, online_preds.state, online_task)
+      import ipdb; ipdb.set_trace()
+    else:
+      predictions = jax.vmap(
+        compute_sfs,
+        in_axes=(0, None, 0), out_axes=0)(
+          # [M, 2], [D], [M, C]
+          sf_keys, online_preds.state, sampled_tasks)
 
     if self.action_mask:
       # vmap over K tasks for predictions, repeat action mask
