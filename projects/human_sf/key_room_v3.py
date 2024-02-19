@@ -217,11 +217,8 @@ class FlatTaskRep(BaseTaskRep):
     fwd_cell = env.grid.get(*env.front_pos)
     if fwd_cell:
       if fwd_cell.type == 'door' and fwd_cell.is_open:
-        import ipdb; ipdb.set_trace()
         room_idx = self.get_vector_index(fwd_cell.color, 'room')
         state_vector[room_idx] = 1
-    # current_room_color = self.current_room(env)
-    # if current_room_color != START_ROOM_COLOR:
 
     return state_vector
 
@@ -285,12 +282,12 @@ class StructuredTaskRep(BaseTaskRep):
         state_array[color_idx, shape_idx] = 1
 
     # Check the color of the current room
-    current_room_color = self.current_room(env)
-    if current_room_color != START_ROOM_COLOR:
-        room_color_idx = self.colors.index(current_room_color)
+    fwd_cell = env.grid.get(*env.front_pos)
+    if fwd_cell:
+      if fwd_cell.type == 'door' and fwd_cell.is_open:
+        room_color_idx = self.colors.index(fwd_cell.color)
         room_shape_idx = self.types.index('room')
         state_array[room_color_idx, room_shape_idx] = 1
-        env.carrying = None  # remove object
 
     return state_array
 
