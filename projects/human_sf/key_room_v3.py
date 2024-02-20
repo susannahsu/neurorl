@@ -359,7 +359,7 @@ class KeyRoom(LevelGen):
       basic_only: int = 0,
       flat_task: bool = True,
       swap_episodes: int = 0,
-      terminate_failure: bool = True,
+      terminate_failure: bool = False,
       num_task_rooms: int = 2,
       color_rooms: bool = False,
       ignore_task: bool = False,
@@ -840,7 +840,7 @@ class KeyRoom(LevelGen):
 
           init_floor = construct(shape='floor', color=key_color)
 
-          width = self.room_size - 3
+          width = max(self.room_size - 4, 1)
           if self.color_rooms:
             for _ in range(width*width):
               self.place_in_room(*room, init_floor)

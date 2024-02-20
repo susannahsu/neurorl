@@ -163,6 +163,7 @@ def make_keyroom_env(
     color_rooms: bool = False,
     key_room_rewards = (.25, .5),
     basic_only: int = 0,
+    auto_pickup: bool = True,
     debug: bool = False,
     **kwargs) -> dm_env.Environment:
   """Loads environments.
@@ -212,6 +213,7 @@ def make_keyroom_env(
       GotoOptionsWrapper,
       max_options=15,
       use_options=True,
+      auto_pickup=auto_pickup,
       ))
 
   for wrapper in gym_wrappers:
@@ -301,6 +303,7 @@ def make_sf_dyna_loss_fn(config, **kwargs):
     model_unweighted_coeff=config.model_unweighted_coeff,
     # task_weighted_cumulant_loss=config.task_weighted_cumulant_loss,
     mask_zero_features=config.mask_zero_features,
+    backup_train_task=config.backup_train_task,
     feature_coeff=config.feature_coeff,
     loss_fn=config.loss_fn,
     n_actions_dyna=config.n_actions_dyna,
@@ -319,6 +322,7 @@ def setup_experiment_inputs(
     agent_config_kwargs: dict=None,
     env_kwargs: dict=None,
     debug: bool = False,
+    log_dir: str = '.',
   ):
   """Setup."""
   config_kwargs = agent_config_kwargs or dict()
@@ -338,7 +342,7 @@ def setup_experiment_inputs(
     (128, 128), activate_final=True)(obs['task'])
 
   q_observer  = q_learning.Observer(period=1 if debug else 4000)
-  sf_observer = human_proj_utils.SFObserver(period=1 if debug else 4000)
+  sf_observer = human_proj_utils.SFObserver(period=1 if debug else 4000, log_dir=log_dir)
 
   if agent == 'flat_q':
     # has no mechanism to select from object options since dependent on what agent sees
@@ -642,6 +646,7 @@ def train_single(
     env_get_task_name=env_get_task_name,
     agent_config_kwargs=agent_config_kwargs,
     env_kwargs=env_kwargs,
+    log_dir=log_dir,
     debug=debug)
 
   logger_factory_kwargs = dict(
@@ -916,32 +921,74 @@ def sweep(search: str = 'default'):
     ]
   elif search == 'usfa_dyna':
     space = [
+        # {
+        #     # "num_steps": tune.grid_search([5e6]),
+        #     # "env.basic_only": tune.grid_search([1]),
+        #     "num_steps": tune.grid_search([30e6]),
+        #     "env.num_task_rooms": tune.grid_search([1]),
+        #     "agent": tune.grid_search([
+        #       "object_usfa_dyna",
+        #       # 'flat_usfa_dyna',
+        #     ]),
+        #     "seed": tune.grid_search([5]),
+        #     "group": tune.grid_search(['usfa_dyna-35-gpi']),
+        #     # "env.key_room_rewards": tune.grid_search([[0., 0.], [.25, .5]]),
+        #     "eval_task_support": tune.grid_search(["train_eval", "train", "eval"]),
+        #     "dyna_coeff": tune.grid_search([.1, .01]),
+        #     "task_weighted_dyna": tune.grid_search([False]),
+        #     "task_weighted_model": tune.grid_search([False]),
+        #     # 'env.test_itermediary_rewards': tune.grid_search([False]),
+        # },
         {
             # "num_steps": tune.grid_search([5e6]),
             # "env.basic_only": tune.grid_search([1]),
-            "num_steps": tune.grid_search([30e6]),
+            "num_steps": tune.grid_search([2e6]),
             "env.num_task_rooms": tune.grid_search([1]),
             "agent": tune.grid_search([
               "object_usfa_dyna",
               # 'flat_usfa_dyna',
             ]),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['usfa_dyna-31-bigger-door-feature']),
-            'env.test_itermediary_rewards': tune.grid_search([True]),
-            # "samples_per_insert": tune.grid_search([10.0, 50.0]),
-            # "n_actions_dyna": tune.grid_search([20]),
-            "env.room_size": tune.grid_search([7]),
-            "env.terminate_failure": tune.grid_search([False]),
-            # "task_weighted_dyna": tune.grid_search([True]),
-            "env.auto_enter_room": tune.grid_search([True, False]),
-            "env.key_room_rewards": tune.grid_search([[.25, .5], [0., 0.]]),
-            "backup_train_task": tune.grid_search([True, False]),
-            # "sf_layers": tune.grid_search([[256, 256]]),
-            # "state_dim": tune.grid_search([256]),
-            # "final_conv_dim": tune.grid_search([16]),
-            "dyna_coeff": tune.grid_search([.01, .1]),
-            # "unweighted_coeff": tune.grid_search([1.0, 0.1, .0]),
+            "group": tune.grid_search(['usfa_dyna-36-discount']),
+            "eval_task_support": tune.grid_search(["train"]),
+            "dyna_coeff": tune.grid_search([1e-2]),
+            "backup_train_task": tune.grid_search([True]),
+            'env.train_basic_objects': tune.grid_search([True]),
+            'discount': tune.grid_search([.6, .9]),
+            'loss_fn': tune.grid_search(['qlearning', 'qlambda']),
         },
+        # {
+        #     # "num_steps": tune.grid_search([5e6]),
+        #     # "env.basic_only": tune.grid_search([1]),
+        #     "num_steps": tune.grid_search([2e6]),
+        #     "env.num_task_rooms": tune.grid_search([2]),
+        #     "agent": tune.grid_search([
+        #       "object_usfa_dyna",
+        #       # 'flat_usfa_dyna',
+        #     ]),
+        #     "seed": tune.grid_search([5]),
+        #     "group": tune.grid_search(['usfa_dyna-36-no-basic']),
+        #     "eval_task_support": tune.grid_search(["train"]),
+        #     "dyna_coeff": tune.grid_search([1e-1, 1e-2, 1e-3, 0.0]),
+        #     # "backup_train_task": tune.grid_search([True]),
+        #     'env.train_basic_objects': tune.grid_search([False]),
+        # },
+        # {
+        #     # "num_steps": tune.grid_search([5e6]),
+        #     # "env.basic_only": tune.grid_search([1]),
+        #     "num_steps": tune.grid_search([30e6]),
+        #     "env.num_task_rooms": tune.grid_search([1]),
+        #     "agent": tune.grid_search([
+        #       "object_usfa_dyna",
+        #       # 'flat_usfa_dyna',
+        #     ]),
+        #     "seed": tune.grid_search([5]),
+        #     "group": tune.grid_search(['usfa_dyna-35-no-dyna']),
+        #     "eval_task_support": tune.grid_search(["train_eval", "train", "eval"]),
+        #     "dyna_coeff": tune.grid_search([0.]),
+        #     # "model_unweighted_coeff": tune.grid_search([1.]),
+        #     # 'env.test_itermediary_rewards': tune.grid_search([False]),
+        # },
         # {
         #     # "num_steps": tune.grid_search([5e6]),
         #     # "env.basic_only": tune.grid_search([1]),

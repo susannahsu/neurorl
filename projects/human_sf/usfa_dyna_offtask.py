@@ -60,7 +60,7 @@ class Config(basics.Config):
 
   final_conv_dim: int = 16
   conv_flat_dim: Optional[int] = 0
-  sf_layers : Tuple[int]=(256, 256)
+  sf_layers : Tuple[int]=(512, 512)
   policy_layers : Tuple[int]=(128, 128)
   feature_layers: Tuple[int]=(256, 256)
   transition_blocks: int = 6
@@ -87,7 +87,7 @@ class Config(basics.Config):
   lambda_: float  = .9
 
   # Dyna loss
-  dyna_coeff: float = .1
+  dyna_coeff: float = .01
   n_actions_dyna: int = 20
   n_tasks_dyna: int = 10
   backup_train_task: bool = False
@@ -123,7 +123,7 @@ class Predictions(NamedTuple):
   q_values: jnp.ndarray  # q-value
   sf: jnp.ndarray # successor features
   task: jnp.ndarray  # task vector (potentially embedded)
-  policy: Optional[jax.Array] = None  # policy vector
+  policies: Optional[jax.Array] = None  # policy vector
   action_mask: Optional[jax.Array] = None
   model_predictions: Optional[jax.Array] = None
 
@@ -261,7 +261,7 @@ def mask_predictions(
 
   # mask out entries to 0, vmap over cumulant dimension
   mask = lambda x: jnp.where(action_mask, x, 0.0)
-  has_actions = len(predictions.sf) == 3 # [N, A, C]
+  has_actions = predictions.sf.ndim == 3 # [N, A, C]
 
   if has_actions:
     # vmap [N, C]
@@ -1383,7 +1383,6 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         in_axes=(0, None, None), out_axes=0)(
           # [M, 2], [D], [C]
           sf_keys, online_preds.state, online_task)
-      import ipdb; ipdb.set_trace()
     else:
       predictions = jax.vmap(
         compute_sfs,
@@ -1469,7 +1468,6 @@ class SfGpiHead(hk.Module):
         hidden_size (int, optional): hidden size of SF MLP network
         variance (float, optional): variances of sampling
         nsamples (int, optional): number of policies
-        eval_task_support (bool, optional): include eval task in support
     
     Raises:
         NotImplementedError: Description
@@ -1495,16 +1493,11 @@ class SfGpiHead(hk.Module):
 
     """
     sfs, q_values = self.sf_net(state, task, task)
-    num_actions = q_values.shape[-1]
-    # [N, D] --> [N, A, D]
-    # policies_repeated = jnp.repeat(task[:, None],
-    #                                repeats=num_actions, axis=1)
-
     return Predictions(
       state=state,
       sf=sfs,       # [N, A, D_w]
-      # policy=policies_repeated,         # [N, A, D_w]
-      all_q_values=q_values,
+      policies=jnp.expand_dims(task, axis=-2),         # [N, A, D_w]
+      all_q_values=jnp.expand_dims(q_values, axis=-2),
       q_values=q_values,  # [N, A]
       task=task)         # [D_w]
 
@@ -1549,6 +1542,7 @@ class SfGpiHead(hk.Module):
       sf=sfs,       # [N, A, D_w]
       q_values=q_values,  # [N, A]
       all_q_values=all_q_values,
+      policies=policies,
       task=task)         # [D_w]
 
 
@@ -1560,12 +1554,15 @@ class UsfaArch(hk.RNNCore):
                memory: hk.RNNCore,
                transition_fn: hk.RNNCore,
                sf_head: SfGpiHead,
+               eval_task_support: str = 'train',
                name: str = 'usfa_arch'):
     super().__init__(name=name)
     self._torso = torso
     self._memory = memory
     self._sf_head = sf_head
     self._transition_fn = transition_fn
+    self._eval_task_support = eval_task_support
+    self._context_embed = hk.Linear(128)
 
   def initial_state(self, batch_size: Optional[int],
                     **unused_kwargs) -> State:
@@ -1582,15 +1579,29 @@ class UsfaArch(hk.RNNCore):
 
     state_features = inputs.observation['state_features'].astype(
       torso_outputs.image.dtype)
+    context = inputs.observation['context'].astype(
+      torso_outputs.image.dtype)
+    context = self._context_embed(context)
     memory_input = jnp.concatenate(
-      (torso_outputs.image, torso_outputs.action, state_features), axis=-1)
+      (torso_outputs.image, torso_outputs.action, state_features, context), axis=-1)
     core_outputs, new_state = self._memory(memory_input, state)
 
     if evaluation:
+      if self._eval_task_support == 'train':
+        policies = inputs.observation['train_tasks']
+      elif self._eval_task_support == 'eval':
+        policies = jnp.expand_dims(inputs.observation['task'], axis=-2)
+      elif self._eval_task_support == 'train_eval':
+        policies = jnp.concatenate((
+          inputs.observation['train_tasks'],
+          jnp.expand_dims(inputs.observation['task'], axis=-2),
+        ))
+      else:
+        raise NotImplementedError
       predictions = self._sf_head.sfgpi(
         state=core_outputs,
         task=inputs.observation['task'],
-        policies=inputs.observation['train_tasks']
+        policies=policies
         )
     else:
       predictions = self._sf_head(
@@ -1609,8 +1620,11 @@ class UsfaArch(hk.RNNCore):
 
     state_features = inputs.observation['state_features'].astype(
       torso_outputs.image.dtype)
+    context = inputs.observation['context'].astype(
+      torso_outputs.image.dtype)
+    context = hk.BatchApply(self._context_embed)(context)
     memory_input = jnp.concatenate(
-      (torso_outputs.image, torso_outputs.action, state_features), axis=-1)
+      (torso_outputs.image, torso_outputs.action, state_features, context), axis=-1)
 
     core_outputs, new_states = hk.static_unroll(
       self._memory, memory_input, state)
@@ -1769,6 +1783,7 @@ def make_minigrid_networks(
       memory=hk.LSTM(config.state_dim),
       transition_fn=transition_fn,
       sf_head=sf_head,
+      eval_task_support=config.eval_task_support,
       )
 
   return make_mbrl_usfa_network(

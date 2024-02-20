@@ -2,6 +2,9 @@ from typing import Optional, Callable, NamedTuple, Dict
 from acme.wrappers import observation_action_reward
 import haiku as hk
 
+from acme.utils import paths
+from absl import logging
+import os.path
 import dm_env
 import jax
 import jax.numpy as jnp
@@ -287,6 +290,7 @@ def plot_sfgpi(
     train_tasks: np.array,
     tasks: np.array,
     frames: np.array,
+    include_heatmap: bool = False,
     max_cols: int = 10, title:str = ''):
   max_len = min(sfs.shape[0], 100)
   sfs = sfs[:max_len]
@@ -308,12 +312,13 @@ def plot_sfgpi(
   # max q-value
   max_q = max(train_q_values.max(), .1)
 
+  extra_rows = 2 + int(include_heatmap)
   # Determine the layout
   cols = min(T, max_cols)
   # Adjust total rows calculation to include an additional N rows for the heatmaps
-  total_rows = (T // max_cols) * (3 + N)  # Adjusted for an additional row for the heatmap
+  total_rows = (T // max_cols) * (extra_rows + N)  # Adjusted for an additional row for the heatmap
   if T % max_cols > 0:
-      total_rows += (3 + N)
+      total_rows += (extra_rows + N)
 
   # Prepare the matplotlib figure
   unit = 3
@@ -328,7 +333,7 @@ def plot_sfgpi(
   ##########################
   for t in range(total_plots):
     # Calculate base row index for current time step; adjusted for 2 rows per image/bar plot plus N rows for heatmaps
-    base_row = (t // max_cols) * (3 + N)  # Adjusted for an additional row for the heatmap
+    base_row = (t // max_cols) * (extra_rows + N)  # Adjusted for an additional row for the heatmap
     col = t % max_cols  # Column wraps every max_cols
 
     if t < T:
@@ -359,12 +364,13 @@ def plot_sfgpi(
       #------------------
       # Plot heatmap for train_q_values
       #------------------
-      train_q_values_T = train_q_values[t].transpose()
-      axs[base_row+2, col].imshow(train_q_values_T, cmap='hot', interpolation='nearest')
-      for i in range(train_q_values_T.shape[0]):
-          for j in range(train_q_values_T.shape[1]):
-              axs[base_row+2, col].text(j, i, f"{train_q_values_T[i,j]:.2g}", ha="center", va="center", color="w", fontsize=6)
-      axs[base_row+2, col].set_title("Heatmap")
+      if include_heatmap:
+        train_q_values_T = train_q_values[t].transpose()
+        axs[base_row+2, col].imshow(train_q_values_T, cmap='hot', interpolation='nearest')
+        for i in range(train_q_values_T.shape[0]):
+            for j in range(train_q_values_T.shape[1]):
+                axs[base_row+2, col].text(j, i, f"{train_q_values_T[i,j]:.2g}", ha="center", va="center", color="w", fontsize=6)
+        axs[base_row+2, col].set_title("Heatmap")
 
       #------------------
       # Plot heatmaps for each N
@@ -379,19 +385,20 @@ def plot_sfgpi(
           sf_values_for_highest_q = sfs[t, n, a_chosen, :]
 
           # Plot barplot of SFs for the highest Q-value action
-          axs[base_row+3+n, col].bar(range(C), sf_values_for_highest_q, color=colors)
-          axs[base_row+3+n, col].set_title(f"policy {n+1}, a = {a_chosen}, optimal={action_with_highest_q}")
-          axs[base_row+3+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
-          axs[base_row+3+n, col].axis('on')  # Optionally, turn on the axis if needed
+          new_base = base_row+2+int(include_heatmap)
+          axs[new_base+n, col].bar(range(C), sf_values_for_highest_q, color=colors)
+          axs[new_base+n, col].set_title(f"policy {n+1}, a = {a_chosen}, optimal={action_with_highest_q}")
+          axs[new_base+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
+          axs[new_base+n, col].axis('on')  # Optionally, turn on the axis if needed
 
           # Annotate bars for non-zero indices
           for i in non_zero_indices:
               height = sf_values_for_highest_q[i]
-              axs[base_row+3+n, col].text(i, height, f'{tasks[t][i]:.2f}', ha='center', va='bottom')
+              axs[new_base+n, col].text(i, height, f'{tasks[t][i]:.2f}', ha='center', va='bottom')
 
     else:
         # Remove unused axes
-        for r_offset in range(3 + N):
+        for r_offset in range(extra_rows + N):
             try:
                 fig.delaxes(axs[base_row + r_offset, col])
             except:
@@ -407,6 +414,7 @@ class SFObserver(ActorObserver):
       period=100,
       plot_success_only: bool = False,
       colors=None,
+      log_dir: str = None,
       prefix: str = 'SFsObserver'):
     super(SFObserver, self).__init__()
     self.period = period
@@ -417,6 +425,8 @@ class SFObserver(ActorObserver):
     self.logging = True
     self.plot_success_only = plot_success_only
     self._colors = colors or plt.rcParams['axes.prop_cycle']
+    self._log_dir = os.path.join(log_dir, 'images')
+    paths.process_path(self._log_dir, add_uid=False)
 
   def wandb_log(self, d: dict):
     if wandb.run is not None:
@@ -484,7 +494,7 @@ class SFObserver(ActorObserver):
       return np.stack(x)
 
     tasks = get_from_timesteps('task')  # [T, C]
-    train_tasks = get_from_timesteps('train_tasks')  # [T, N, C]
+    train_tasks = get_from_predictions('policies')  # [T, N, C]
     sfs = get_from_predictions('sf')  # [T, N, A, C]
 
 
@@ -510,7 +520,7 @@ class SFObserver(ActorObserver):
       actions=actions,
       chosen_q_values=q_values,
       train_q_values=all_q_values,
-      train_tasks=train_tasks[:-1],
+      train_tasks=train_tasks,
       tasks=tasks[:-1],
       frames=frames,
       title=title
@@ -518,6 +528,12 @@ class SFObserver(ActorObserver):
 
     wandb_suffix = 'success' if is_success else 'failure'
     self.wandb_log({f"{self.prefix}/sfgpi-{wandb_suffix}": wandb.Image(fig)})
+
+    if self._log_dir:
+      idx = f'{self.successes}' if is_success else f'{self.failures}'
+      file = os.path.join(self._log_dir, f'sfgp-{wandb_suffix}-{idx}.png')
+      fig.savefig(file)
+      logging.info(f"saved {file}")
     plt.close(fig)
 
     ##################################
@@ -561,7 +577,7 @@ class SFObserver(ActorObserver):
 
       for n in range(all_q_values.shape[1]):
         q_values_n = rlax.batched_index(all_q_values[:, n], actions)
-        axs[1, 0].plot(q_values_n, label=f'$\\pi_{n}$ q_values')
+        axs[1, 0].plot(q_values_n, label=f'$\\pi_{n}$ q')
       axs[1, 0].legend()
       axs[1, 0].set_title(f"total reward: {total_reward:.2g}")
 

@@ -120,10 +120,11 @@ class GoNextToSubgoal(bot_lib.Subgoal):
 
 class GotoBot(bot_lib.BabyAIBot):
   """"""
-  def __init__(self, env, loc):
+  def __init__(self, env, loc, auto_pickup: bool = True):
 
     # Mission to be solved
     self.mission = mission = env
+    self.auto_pickup = auto_pickup
 
     # Visibility mask. True for explored/seen, false for unexplored.
     self.vis_mask = np.zeros(shape=(mission.unwrapped.width, mission.unwrapped.height), dtype=bool)
@@ -178,6 +179,8 @@ class GotoBot(bot_lib.BabyAIBot):
       # done??
       # -----------------------
       if action == env.actions.done:
+        if self.auto_pickup:
+          step_update(self.actions.pickup)
         break
 
       # -----------------------
@@ -262,6 +265,7 @@ class GotoOptionsWrapper(Wrapper):
                  env,
                  max_options: int = 1,
                  use_options: bool = True,
+                 auto_pickup: bool = True,
                  partial_obs: bool = True):
         """
         Args:
@@ -282,6 +286,7 @@ class GotoOptionsWrapper(Wrapper):
         self.prior_objects = None
         self.prior_visible_objects = None
         self.prior_object_mask = None
+        self.auto_pickup = auto_pickup
 
 
         max_options = max(max_options, len(self.unwrapped.env_objects))
@@ -453,7 +458,7 @@ class GotoOptionsWrapper(Wrapper):
             return self.env.step(self.actions.done)
         # otherwise, generate a trajectory to the goal position
 
-        bot = GotoBot(self.env, match.global_pos)
+        bot = GotoBot(self.env, match.global_pos, auto_pickup=self.auto_pickup)
         actions, obss, rewards, truncateds, dones, infos = bot.generate_trajectory()
 
         # not doable
