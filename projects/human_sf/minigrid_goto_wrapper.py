@@ -180,7 +180,7 @@ class GotoBot(bot_lib.BabyAIBot):
       # -----------------------
       if action == env.actions.done:
         if self.auto_pickup:
-          step_update(self.actions.pickup)
+          step_update(env.actions.pickup)
         break
 
       # -----------------------
