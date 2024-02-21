@@ -494,7 +494,7 @@ class SFObserver(ActorObserver):
       return np.stack(x)
 
     tasks = get_from_timesteps('task')  # [T, C]
-    train_tasks = get_from_predictions('policies')  # [T, N, C]
+    train_tasks = get_from_timesteps('train_tasks')  # [T, N, C]
     sfs = get_from_predictions('sf')  # [T, N, A, C]
 
 
@@ -510,7 +510,7 @@ class SFObserver(ActorObserver):
     frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
 
     # e.g. "Success 4: 0=1, 4=.5, 5=.5"
-    is_success = total_reward > 1.
+    is_success = total_reward > .9
     task_str = non_zero_elements_to_string(tasks[0])
     title_prefix = f'{self.successes}' if is_success else f'{self.failures}'
     title = f"{title_prefix}. {task_str}"
@@ -520,7 +520,7 @@ class SFObserver(ActorObserver):
       actions=actions,
       chosen_q_values=q_values,
       train_q_values=all_q_values,
-      train_tasks=train_tasks,
+      train_tasks=train_tasks[:-1],
       tasks=tasks[:-1],
       frames=frames,
       title=title

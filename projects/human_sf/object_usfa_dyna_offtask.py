@@ -174,7 +174,9 @@ def make_minigrid_networks(
       memory=hk.LSTM(config.state_dim),
       transition_fn=transition_fn,
       eval_task_support=config.eval_task_support,
-      sf_head=sf_head)
+      sf_head=sf_head,
+      policy_rep=config.policy_rep,
+      )
 
   return usfa.make_mbrl_usfa_network(
     env_spec, make_core_module)

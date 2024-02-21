@@ -54,6 +54,7 @@ LARGE_NEGATIVE = -1e7
 @dataclasses.dataclass
 class Config(basics.Config):
 
+  policy_rep: str = 'task'
   eval_task_support: str = "train"  # options:
   nsamples: int = 0  # no samples outside of train vector
   variance: float = 0.1
@@ -83,17 +84,18 @@ class Config(basics.Config):
 
   # Online loss
   task_coeff: float = 1.0
-  loss_fn : str = 'qlearning'
+  loss_fn : str = 'qlambda'
   lambda_: float  = .9
 
   # Dyna loss
   dyna_coeff: float = .01
   n_actions_dyna: int = 20
   n_tasks_dyna: int = 10
-  backup_train_task: bool = False
+  backup_train_task: bool = True
 
   # Model loss
   simulation_steps: int = 5
+  gpi_eval_model: bool = False
   feature_coeff: float = 1.0
   model_sf_coeff: float = 1.0
   model_coeff: float = 1.0
@@ -342,6 +344,7 @@ def model_optimal_trajectory(
     #   2. mask predictions
     #   3. get action from best q-values
     key_, sf_key = jax.random.split(key_)
+    raise NotImplementedError
     predictions = networks.compute_sfs(
       params, sf_key, state_, task)
     predictions = mask_predictions(predictions, a_mask)
@@ -476,6 +479,7 @@ def select_action_unroll_model(
         compute_sfs, in_axes=(0, 0, None))  # vmap over time
 
       # [T+1, ...]
+      raise NotImplementedError
       offtask_predictions = compute_sfs(sf_keys, states, offtask_goal)
 
       preds = preds._replace(
@@ -721,6 +725,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   extract_cumulants: Callable = cumulants_from_env
   extract_online_task: Callable = lambda d: d.observation.observation['task']
   extract_tasks: Callable = lambda d: d.observation.observation['train_tasks']
+  policy_rep: str = 'task'
 
   # Shared
   bootstrap_n: int = 5
@@ -751,6 +756,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   binary_feature_loss: bool = True
   task_weighted_model: bool = False
   mask_zero_features: float = 0.0
+  gpi_eval_model: bool = False
 
   def error(self,
             data,
@@ -795,7 +801,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     lambda_ = (episode_mask*self.lambda_).astype(online_preds.sf.dtype)
 
     #---------------
-    # cumulants
+    # cumulants.
     #---------------
     # pseudo rewards, [T/T+1, B, C]
     cumulants = self.extract_cumulants(data=data).astype(online_preds.sf.dtype)
@@ -870,8 +876,17 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         params=params,
         target_params=target_params,
         )
-      online_task = self.extract_online_task(data)
+      online_task = online_preds.task
+      online_policy = online_preds.policies
       train_tasks = self.extract_tasks(data)
+      if self.policy_rep == 'task_id':
+        policy_key = 'task_ids' 
+      elif self.policy_rep == 'task':
+        policy_key = 'train_tasks'
+      else:
+        raise NotImplementedError
+      policies = data.observation.observation[policy_key]
+
 
       multitask_dyna_loss = jax.vmap(jax.vmap(multitask_dyna_loss))
       T, B = data.discount.shape[:2]
@@ -885,7 +900,9 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
             jax.tree_map(lambda x: x[:nT_cumulants], online_preds),
             jax.tree_map(lambda x: x[:nT_cumulants], target_preds),
             online_task[:nT_cumulants],
+            online_policy[:nT_cumulants],
             train_tasks[:nT_cumulants],
+            policies[:nT_cumulants],
             action_mask[:nT_cumulants],
             cumulant_mask[:nT_cumulants],
             loss_keys[:nT_cumulants])
@@ -1056,8 +1073,11 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     compute_sfs = jax.vmap(compute_sfs)  # over time dimension
     compute_sfs = jax.vmap(compute_sfs)  # over simulation dimension
 
-    # PREP TASK
+    # PREP TASK and POLICY
     # [T, C] --> [T', k, C]
+    policy = online_preds.policies[1:]
+    policy = vmap_roll(policy)
+
     task = online_preds.task[1:]
     task = vmap_roll(task)
 
@@ -1069,7 +1089,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
     # COMPUTE PREDICTIONS
     # [T', k, ...]
-    predictions = compute_sfs(sf_keys, model_outputs.state, task)
+    predictions = compute_sfs(sf_keys, model_outputs.state, task, policy)
 
     if self.action_mask:
       # these predictions begin at t+1 since for output of applying model
@@ -1196,7 +1216,9 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     online_preds: NestedArray,
     target_preds: NestedArray,
     online_task: jax.Array,
+    online_policy: jax.Array,
     tasks: jax.Array,
+    policies: jax.Array,
     action_mask: jax.Array,
     cumulant_mask: jax.Array,
     rng_key: networks_lib.PRNGKey,
@@ -1269,6 +1291,8 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       sf: jax.Array,
       q_values: jax.Array,
       task: jax.Array,
+      policy: jax.Array,
+      online_policy_: jax.Array,
       discounts_: jax.Array,
       action_mask_: jax.Array,
       key: networks_lib.PRNGKey,
@@ -1286,6 +1310,8 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       Returns:
           _type_: _description_
       """
+
+      q_values = (sf*task[None]).sum(-1)
       optimal_q_action = jnp.argmax(q_values, axis=-1)
 
       # sample K random actions. append the optimal action by current Q-values
@@ -1326,19 +1352,25 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       # [K, A, C]
       # using regular params, this will be used for Q-value action-selection
       key, sf_keys = split_key(key, N=nactions)
+      next_task = task
+      if self.gpi_eval_model:
+        next_policy = online_policy_
+      else:
+        next_policy = policy
+
       next_predictions = jax.vmap(
         compute_sfs,
-        in_axes=(0, 0, None), out_axes=0)(
+        in_axes=(0, 0, None, None), out_axes=0)(
           # [K, 2], [K, D], [C]
-          sf_keys, model_outputs.state, task)
+          sf_keys, model_outputs.state, next_task, next_policy)
 
       # using target params, this will define the targets
       key, sf_keys = split_key(key, N=nactions)
       target_next_predictions = jax.vmap(
         compute_target_sfs,
-        in_axes=(0, 0, None), out_axes=0)(
+        in_axes=(0, 0, None, None), out_axes=0)(
           # [K, 2], [K, D], [C]
-          sf_keys, target_model_outputs.state, task)
+          sf_keys, target_model_outputs.state, next_task, next_policy)
       if self.action_mask:
         next_predictions = batch_mask_predictions(
           next_predictions, model_outputs.action_mask)
@@ -1372,23 +1404,29 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     rng_key, sample_key = jax.random.split(rng_key)
     max_tasks = tasks.shape[0]
     ntasks = min(max_tasks, self.n_tasks_dyna)
-    sampled_tasks = jax.random.choice(
-      sample_key, tasks, shape=(ntasks,), replace=False)
+
+    sampled_idxs = jax.random.choice(
+      sample_key, jnp.arange(len(tasks)), shape=(ntasks,), replace=False)
+
+    sampled_tasks = tasks[sampled_idxs]
+    sampled_policies = policies[sampled_idxs]
+    # sampled_tasks = jax.random.choice(
+    #   sample_key, tasks, shape=(ntasks,), replace=False)
 
     # [M, A, C]
     rng_key, sf_keys = split_key(rng_key, N=ntasks)
     if self.backup_train_task:
       predictions = jax.vmap(
         compute_sfs,
-        in_axes=(0, None, None), out_axes=0)(
+        in_axes=(0, None, None, None), out_axes=0)(
           # [M, 2], [D], [C]
-          sf_keys, online_preds.state, online_task)
+          sf_keys, online_preds.state, online_task, online_policy)
     else:
       predictions = jax.vmap(
         compute_sfs,
-        in_axes=(0, None, 0), out_axes=0)(
+        in_axes=(0, None, 0, 0), out_axes=0)(
           # [M, 2], [D], [M, C]
-          sf_keys, online_preds.state, sampled_tasks)
+          sf_keys, online_preds.state, sampled_tasks, sampled_policies)
 
     if self.action_mask:
       # vmap over K tasks for predictions, repeat action mask
@@ -1400,7 +1438,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     # get sf_dyna td-errors for each of the K task SFs
     #---------------
     loss_fn = jax.vmap(sf_dyna_td,
-      in_axes=(None, None, 0, 0, 0, None, None, 0))
+      in_axes=(None, None, 0, 0, 0, 0, None, None, None, 0))
 
     rng_key, task_keys = split_key(rng_key, N=ntasks)
     td_errors = loss_fn(
@@ -1409,6 +1447,8 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       predictions.sf,            # [M, A, C]
       predictions.q_values,      # [M, A, C]
       sampled_tasks,             # [M, C]
+      sampled_policies,          # [M, C]
+      online_policy,             # [C]
       discounts,                 # []
       action_mask,               # [A]
       task_keys,                 # [M]
@@ -1480,6 +1520,7 @@ class SfGpiHead(hk.Module):
   def __call__(self,
     state: jax.Array,  # memory output (e.g. LSTM)
     task: jax.Array,  # task vector
+    policy: jax.Array,  # task vector
     ) -> Predictions:
     """Summary
 
@@ -1492,12 +1533,12 @@ class SfGpiHead(hk.Module):
         Predictions: Description
 
     """
-    sfs, q_values = self.sf_net(state, task, task)
+    sfs, q_values = self.sf_net(state, policy, task)
     return Predictions(
       state=state,
       sf=sfs,       # [N, A, D_w]
-      policies=jnp.expand_dims(task, axis=-2),         # [N, A, D_w]
-      all_q_values=jnp.expand_dims(q_values, axis=-2),
+      policies=policy,         # [N, A, D_w]
+      all_q_values=q_values,
       q_values=q_values,  # [N, A]
       task=task)         # [D_w]
 
@@ -1554,6 +1595,7 @@ class UsfaArch(hk.RNNCore):
                memory: hk.RNNCore,
                transition_fn: hk.RNNCore,
                sf_head: SfGpiHead,
+               policy_rep: str = 'task',
                eval_task_support: str = 'train',
                name: str = 'usfa_arch'):
     super().__init__(name=name)
@@ -1563,6 +1605,8 @@ class UsfaArch(hk.RNNCore):
     self._transition_fn = transition_fn
     self._eval_task_support = eval_task_support
     self._context_embed = hk.Linear(128)
+    self._policy_rep = policy_rep
+    assert policy_rep in ('task', 'task_id')
 
   def initial_state(self, batch_size: Optional[int],
                     **unused_kwargs) -> State:
@@ -1587,15 +1631,18 @@ class UsfaArch(hk.RNNCore):
     core_outputs, new_state = self._memory(memory_input, state)
 
     if evaluation:
+      key = 'train_tasks' if self._policy_rep == 'task' else 'task_ids'
+      train_policies = inputs.observation[key]
+
+      key = 'task' if self._policy_rep == 'task' else 'task_id'
+      eval_policy = jnp.expand_dims(inputs.observation[key], axis=-2)
+
       if self._eval_task_support == 'train':
-        policies = inputs.observation['train_tasks']
+        policies = train_policies
       elif self._eval_task_support == 'eval':
-        policies = jnp.expand_dims(inputs.observation['task'], axis=-2)
+        policies = eval_policy
       elif self._eval_task_support == 'train_eval':
-        policies = jnp.concatenate((
-          inputs.observation['train_tasks'],
-          jnp.expand_dims(inputs.observation['task'], axis=-2),
-        ))
+        policies = jnp.concatenate((train_policies, eval_policy))
       else:
         raise NotImplementedError
       predictions = self._sf_head.sfgpi(
@@ -1604,9 +1651,11 @@ class UsfaArch(hk.RNNCore):
         policies=policies
         )
     else:
+      key = 'task' if self._policy_rep == 'task' else 'task_id'
       predictions = self._sf_head(
         state=core_outputs,
         task=inputs.observation['task'],
+        policy=inputs.observation[key],
       )
     return predictions, new_state
 
@@ -1630,9 +1679,11 @@ class UsfaArch(hk.RNNCore):
       self._memory, memory_input, state)
 
     # treat T,B like this don't exist with vmap
+    key = 'task' if self._policy_rep == 'task' else 'task_id'
     predictions = jax.vmap(jax.vmap(self._sf_head))(
         core_outputs,                # [T, B, D]
         inputs.observation['task'],  # [T, B]
+        inputs.observation[key],
       )
     return predictions, new_states
 
@@ -1649,9 +1700,10 @@ class UsfaArch(hk.RNNCore):
       self,
       state: State,  # [B, D]
       task: jax.Array,  # [B, D]
+      policy: jax.Array,  # [B, D]
   ) -> Predictions:
     # [B, D], [B, D]
-    sf_predictions = self._sf_head(state=state, task=task)
+    sf_predictions = self._sf_head(state=state, task=task, policy=policy)
     return sf_predictions
 
 
@@ -1784,6 +1836,7 @@ def make_minigrid_networks(
       transition_fn=transition_fn,
       sf_head=sf_head,
       eval_task_support=config.eval_task_support,
+      policy_rep=config.policy_rep,
       )
 
   return make_mbrl_usfa_network(

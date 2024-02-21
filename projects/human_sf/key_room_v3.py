@@ -511,6 +511,8 @@ class KeyRoom(LevelGen):
            self.make_task(task_object=train_object, intermediary_reward=True))
 
       self.task_set = np.array([t.task_array for t in train_tasks])
+      self.task_ids = np.identity(len(self.task_set))
+      self.task_id_sample = self.task_ids[0]
 
       ####################
       # cumulant mask
@@ -550,6 +552,18 @@ class KeyRoom(LevelGen):
           shape=self.task_set.shape,  # number of cells
           dtype="float32",
       )
+      task_id_space = spaces.Box(
+          low=0,
+          high=100.0,
+          shape=self.task_id_sample.shape,  # number of cells
+          dtype="float32",
+      )
+      task_ids_space = spaces.Box(
+          low=0,
+          high=100.0,
+          shape=self.task_ids.shape,  # number of cells
+          dtype="float32",
+      )
       context_array = spaces.Box(
           low=0,
           high=100.0,
@@ -563,6 +577,8 @@ class KeyRoom(LevelGen):
            "cumulant_mask": copy.deepcopy(cumulants_space),  # equivalent specs
            "train_tasks": train_task_arrays,
            "context": context_array,
+           "task_id": task_id_space,
+           "task_ids": task_ids_space,
            }
       )
 
@@ -881,10 +897,17 @@ class KeyRoom(LevelGen):
 
     def update_obs(self, obs):
       obs['task'] = self.task.task_array
+      obs['train_tasks'] = self.task_set
       obs['cumulant_mask'] = self.cumulant_mask
       obs['state_features'] = self.task.state_features
-      obs['train_tasks'] = self.task_set
       obs['context'] = np.array(self.context)
+
+      task = self.task.task_array
+
+      same = lambda x, y: (np.abs(x - y) < 1e-5).all()
+      obs['task_id'] = np.array([same(task,t) for t in self.task_set]).astype(np.float32)
+      obs['task_ids'] = self.task_ids
+
 
       if self.ignore_task:
          obs['task'] = obs['task']*0.0

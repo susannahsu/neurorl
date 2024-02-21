@@ -972,7 +972,6 @@ class IndependentSfHead(hk.Module):
         jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
     """
     ndims = self.state_features_dim
-    assert policy.shape[0] == ndims
 
     linear = lambda x: hk.Linear(self.layers[0], with_bias=False)(x)
     concat = lambda a, b: jnp.concatenate((a, b))
