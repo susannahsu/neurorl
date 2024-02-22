@@ -366,7 +366,7 @@ class KeyRoom(LevelGen):
       training=True,
       test_itermediary_rewards: bool = True,
       key_room_rewards: Tuple[float] = (.1, .25),
-      train_basic_objects: bool = True,
+      train_basic_objects: int = 0,
       # include_task_signals=False,
       max_steps_per_room: int = 100,
       implicit_unlock=True,
@@ -393,7 +393,7 @@ class KeyRoom(LevelGen):
           rooms_locked (bool): Whether rooms are initially locked.
           include_task_signals (bool): Whether to include task-specific signals (i.e. room color, indicator object).
       """
-      assert color_rooms is False
+      # assert color_rooms is False
       self.auto_remove_key = auto_remove_key
       self.auto_enter_room = auto_enter_room
       ###############
@@ -501,11 +501,16 @@ class KeyRoom(LevelGen):
       for idx, (type, room_color) in enumerate(maze_config['keys']):
         train_object, test_object = maze_config['pairs'][idx]
 
-        if self.train_basic_objects:
+        if self.train_basic_objects == 1:
           # train_tasks.append(
           #   self.make_task(task_object=train_object, intermediary_reward=False))
           train_tasks.append(
             self.make_task(task_object=test_object, intermediary_reward=False))
+        elif self.train_basic_objects == 2:
+          train_tasks.append(
+            self.make_task(task_object=train_object, intermediary_reward=False))
+          train_tasks.append(
+              self.make_task(task_object=test_object, intermediary_reward=False))
 
         train_tasks.append(
            self.make_task(task_object=train_object, intermediary_reward=True))
@@ -688,7 +693,13 @@ class KeyRoom(LevelGen):
       # Place objects
       ###########################################
       # starts to the right for some reason
-      potential_objects = self.test_objects
+      if self.train_basic_objects == 1:
+        potential_objects = self.test_objects
+      elif self.train_basic_objects == 2:
+        potential_objects = self.train_objects + self.test_objects
+      else:
+         raise NotImplementedError
+
       if self.basic_only == 2:
          raise NotImplementedError
          potential_objects = potential_objects[:1]
@@ -708,12 +719,12 @@ class KeyRoom(LevelGen):
          colors_to_room={START_ROOM_COLOR:
                          self.get_room(*center_room_coords)})
 
-      offtask_goal_object = [o for o in potential_objects if o != task_object][0]
-      self.offtask_goal = self.make_task(
-         task_object=offtask_goal_object,
-         intermediary_reward=False,
-         colors_to_room={START_ROOM_COLOR:
-                         self.get_room(*center_room_coords)})
+      # offtask_goal_object = [o for o in potential_objects if o != task_object][0]
+      # self.offtask_goal = self.make_task(
+      #    task_object=offtask_goal_object,
+      #    intermediary_reward=False,
+      #    colors_to_room={START_ROOM_COLOR:
+      #                    self.get_room(*center_room_coords)})
 
     def place_in_room(
         self, i: int, j: int, obj: WorldObj,
@@ -900,10 +911,10 @@ class KeyRoom(LevelGen):
          colors_to_room=colors_to_room,
          intermediary_reward=self.training or self.test_itermediary_rewards)
 
-      self.offtask_goal = self.make_task(
-         task_object=offtask_goal_object,
-         colors_to_room=colors_to_room,
-         intermediary_reward=self.test_itermediary_rewards)
+      # self.offtask_goal = self.make_task(
+      #    task_object=offtask_goal_object,
+      #    colors_to_room=colors_to_room,
+      #    intermediary_reward=self.test_itermediary_rewards)
 
     def update_obs(self, obs):
       obs['task'] = self.task.task_array
