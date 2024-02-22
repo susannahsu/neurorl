@@ -337,7 +337,7 @@ def plot_sfgpi(
     col = t % max_cols  # Column wraps every max_cols
 
     if t < T:
-
+      a_chosen = actions[t]
       #------------------
       # Plot image
       #------------------
@@ -349,12 +349,13 @@ def plot_sfgpi(
       # Plot maximum Q-values for each policy
       #------------------
       # jnp.max(all_q_values, axis=0)
-      policy_q_values = train_q_values[t].max(axis=-1)
+      chosen_q = chosen_q_values[t]
+      policy_q_values = train_q_values[t].max(axis=-1)  # [N, A] --> [N]
       max_index = policy_q_values.argmax()  # best N
 
 
       colors = ['red' if i == max_index else 'blue' for i in range(N)]
-      axs[base_row+1, col].bar(range(N), policy_q_values, color=colors)
+      axs[base_row+1, col].bar(range(N), chosen_q, color=colors)
 
       task_labels = [non_zero_elements_to_string(i) for i in train_tasks[t]]
       axs[base_row+1, col].set_xticks(range(N))  # Set tick positions
@@ -381,7 +382,6 @@ def plot_sfgpi(
       for n in range(N):
           # Identify the action with the highest Q-value for this N at time t
           action_with_highest_q = train_q_values[t, n].argmax()
-          a_chosen = actions[t]
           # Extract SFs values for this action
           sf_values_for_highest_q = sfs[t, n, a_chosen, :]
 

@@ -103,7 +103,7 @@ class Config(basics.Config):
   scale_grad: float = .5
   binary_feature_loss: bool = True
   task_weighted_model: bool = True
-  mask_zero_features: float = 0.75
+  mask_zero_features: float = 0.5
 
 
 ###################################

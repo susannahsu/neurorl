@@ -369,6 +369,7 @@ class KeyRoom(LevelGen):
       train_basic_objects: int = 1,
       # include_task_signals=False,
       max_steps_per_room: int = 100,
+      evaluate_key_only: bool = True,
       implicit_unlock=True,
       **kwargs):
       """
@@ -396,6 +397,7 @@ class KeyRoom(LevelGen):
       # assert color_rooms is False
       self.auto_remove_key = auto_remove_key
       self.auto_enter_room = auto_enter_room
+      self.evaluate_key_only = evaluate_key_only
       ###############
       # preparing maze
       ###############
@@ -994,6 +996,11 @@ class KeyRoom(LevelGen):
           target_color = self.task.target_color
           if shape == target_shape and color == target_color:
             terminated = True
+
+        if not self.training and self.evaluate_key_only:
+          if shape == 'key':
+             terminated = True
+             reward = float(color == self.task.target_room_color)
 
       truncated = False
       if self.step_count >= self.max_episode_steps:

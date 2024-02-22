@@ -930,6 +930,7 @@ def sweep(search: str = 'default'):
       'weighted_coeff': tune.grid_search([1.0]),
       'unweighted_coeff': tune.grid_search([1.0]),
       'sep_task_heads': tune.grid_search([True]),
+      # 'model_discount': tune.grid_search([0.0]),
     }
     shared_task_heads ={
       'task_weighted_dyna': tune.grid_search([True]),
