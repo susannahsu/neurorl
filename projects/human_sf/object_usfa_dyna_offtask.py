@@ -150,9 +150,7 @@ def make_minigrid_networks(
     else:
       raise NotImplementedError
 
-    sf_head = usfa.SfGpiHead(
-      num_actions=num_actions,
-      sf_net=SfNetCls(
+    sf_net_kwargs = dict(
         layers=config.sf_layers,
         state_features_dim=state_features_dim,
         num_actions=num_actions,
@@ -161,7 +159,16 @@ def make_minigrid_networks(
         activation=config.sf_activation,
         mlp_type=config.sf_mlp_type,
         out_init_value=config.out_init_value,
-        ))
+    )
+    if config.sep_task_heads:
+      sf_net = usfa.IndTaskHead(SfNetCls, sf_net_kwargs)
+    else:
+      sf_net = SfNetCls(**sf_net_kwargs)
+
+    sf_head = usfa.SfGpiHead(
+      num_actions=num_actions,
+      sf_net=sf_net)
+
 
     return ObjectOrientedUsfaArch(
       torso=networks.OarTorso(

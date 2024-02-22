@@ -54,6 +54,7 @@ LARGE_NEGATIVE = -1e7
 @dataclasses.dataclass
 class Config(basics.Config):
 
+  sep_task_heads: bool = True
   policy_rep: str = 'task'
   eval_task_support: str = "train"  # options:
   nsamples: int = 0  # no samples outside of train vector
@@ -61,7 +62,7 @@ class Config(basics.Config):
 
   final_conv_dim: int = 16
   conv_flat_dim: Optional[int] = 0
-  sf_layers : Tuple[int]=(512, 512)
+  sf_layers : Tuple[int]=(256, 256)
   policy_layers : Tuple[int]=(128, 128)
   feature_layers: Tuple[int]=(256, 256)
   transition_blocks: int = 6
@@ -92,17 +93,18 @@ class Config(basics.Config):
   n_actions_dyna: int = 20
   n_tasks_dyna: int = 10
   backup_train_task: bool = True
+  model_discount: float = 0.0
 
   # Model loss
   simulation_steps: int = 5
-  gpi_eval_model: bool = False
+  gpi_eval_model: bool = True
   feature_coeff: float = 1.0
   model_sf_coeff: float = 1.0
   model_coeff: float = 1.0
   scale_grad: float = .5
   binary_feature_loss: bool = True
   task_weighted_model: bool = True
-  mask_zero_features: float = 0.5
+  mask_zero_features: float = 0.0
 
 
 ###################################
@@ -736,7 +738,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
   # Online loss
   task_coeff: float = 1.0
-  loss_fn : str = 'qlearning'
+  loss_fn : str = 'qlambda'
   lambda_: float  = .9
 
   # Dyna loss
@@ -744,10 +746,11 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   n_actions_dyna: int = 1
   n_tasks_dyna: int = 5
   task_weighted_dyna: bool = True
-  backup_train_task: bool = False
+  backup_train_task: bool = True
 
   # Model loss
   simulation_steps: int = 5
+  model_discount: float = 0.0
   feature_coeff: float = 1.0
   model_sf_coeff: float = 1.0
   model_coeff: float = 1.0
@@ -895,8 +898,10 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
       # [T, B], [B], [B]
       nT_cumulants = cumulant_mask.shape[0]
+      model_discount = self.discount if self.model_discount is None else self.model_discount
+      model_discounts = (data.discount*model_discount).astype(online_preds.sf.dtype)
       dyna_td_error, dyna_batch_loss, dyna_metrics = multitask_dyna_loss(
-            discounts[:nT_cumulants],
+            model_discounts[:nT_cumulants],
             jax.tree_map(lambda x: x[:nT_cumulants], online_preds),
             jax.tree_map(lambda x: x[:nT_cumulants], target_preds),
             online_task[:nT_cumulants],
@@ -1494,6 +1499,62 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 ###################################
 # Architectures
 ###################################
+
+class IndTaskHead(hk.Module):
+  """
+  Implements a head with independent SF heads for each task.
+
+  This class wraps the `IndependentSfHead` class and manages separate instances
+  for each task. It calls the `__call__` method of each instance with the
+  appropriate task weight and combines the results.
+
+  Args:
+    sf_head_kwargs: Keyword arguments for creating `IndependentSfHead` instances.
+    num_tasks: Number of tasks.
+  """
+
+  def __init__(self, SfCls, sf_head_kwargs):
+    super().__init__()
+    self.SfCls = SfCls
+    self.sf_head_kwargs = sf_head_kwargs
+
+  def __call__(self,
+               sf_input: jnp.ndarray,
+               policy: jnp.ndarray,
+               task: jnp.ndarray) -> jnp.ndarray:
+    """Computes successor features and q-values for each task.
+
+    Args:
+      sf_input: State features, shape [batch_size, state_features_dim].
+      policy: One-hot encoded policy, shape [batch_size, num_actions].
+      task: Task weights, shape [batch_size, num_tasks].
+
+    Returns:
+      sfs: Combined successor features, shape [batch_size, action_values, num_actions].
+      q_values: Combined q-values, shape [batch_size, action_values].
+    """
+
+    sfs_list = []
+    q_values_list = []
+    policy_ids = jnp.identity(len(policy))
+    for policy_id in policy_ids:
+      # Call SF head for the task
+      sfs, q_values = self.SfCls(**self.sf_head_kwargs)(
+        sf_input, policy_id, task)
+
+      sfs_list.append(sfs)
+      q_values_list.append(q_values)
+
+    # Stack and combine results across tasks
+    sfs = jnp.stack(sfs_list)
+    q_values = jnp.stack(q_values_list)
+
+    # Apply policy mask to sum across task values
+    sfs = (sfs * policy[:, None, None]).sum(axis=0)
+    q_values = (q_values * policy[:, None]).sum(axis=0)
+    return sfs, q_values
+
+
 class SfGpiHead(hk.Module):
 
   """Universal Successor Feature Approximator GPI head"""
@@ -1810,10 +1871,7 @@ def make_minigrid_networks(
       SfNetCls = MonolithicSfHead
     else:
       raise NotImplementedError
-
-    sf_head = SfGpiHead(
-      num_actions=num_actions,
-      sf_net=SfNetCls(
+    sf_net_kwargs = dict(
         layers=config.sf_layers,
         state_features_dim=state_features_dim,
         num_actions=num_actions,
@@ -1822,7 +1880,15 @@ def make_minigrid_networks(
         activation=config.sf_activation,
         mlp_type=config.sf_mlp_type,
         out_init_value=config.out_init_value,
-        ))
+    )
+    if config.sep_task_heads:
+      sf_net = IndTaskHead(SfNetCls, sf_net_kwargs)
+    else:
+      sf_net = SfNetCls(**sf_net_kwargs)
+
+    sf_head = SfGpiHead(
+      num_actions=num_actions,
+      sf_net=sf_net)
 
     return UsfaArch(
       torso=networks.OarTorso(
