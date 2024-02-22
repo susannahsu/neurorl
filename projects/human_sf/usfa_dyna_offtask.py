@@ -1,5 +1,5 @@
 
-from typing import Callable, Dict, NamedTuple, Tuple, Optional, Any
+from typing import Callable, Dict, NamedTuple, Tuple, Optional, Any, Generic, List
 
 import dataclasses
 import dm_env
@@ -31,7 +31,7 @@ import library.networks as networks
 from td_agents import basics
 from projects.human_sf.utils import SFObserver
 from projects.human_sf import usfa_offtask
-from td_agents.basics import ActorObserver, ActorState
+from td_agents.basics import ActorObserver
 
 q_learning_lambda = usfa_offtask.q_learning_lambda
 SFLossFn = usfa_offtask.SFLossFn
@@ -60,7 +60,7 @@ class Config(basics.Config):
 
   final_conv_dim: int = 16
   conv_flat_dim: Optional[int] = 0
-  sf_layers : Tuple[int]=(128,128)
+  sf_layers : Tuple[int]=(128,)
   policy_layers : Tuple[int]=()
   feature_layers: Tuple[int]=(256, 256)
   transition_blocks: int = 6
@@ -97,19 +97,29 @@ class Config(basics.Config):
 
   # Model loss
   simulation_steps: int = 5
-  gpi_eval_model: bool = True
   feature_coeff: float = 1.0
   model_sf_coeff: float = 1.0
   model_coeff: float = 1.0
   scale_grad: float = .5
   binary_feature_loss: bool = True
   task_weighted_model: bool = True
-  mask_zero_features: float = 0.0
+  mask_zero_features: float = 0.75
 
 
 ###################################
 # DATA CLASSES
 ###################################
+@chex.dataclass(frozen=True, mappable_dataclass=False)
+class ActorState(Generic[actor_core_lib.RecurrentState]):
+  rng: networks_lib.PRNGKey
+  recurrent_state: actor_core_lib.RecurrentState
+  prev_recurrent_state: actor_core_lib.RecurrentState
+  prev_actions: Optional[jax.Array] = None
+  prev_states: Optional[jax.Array]  = None
+  predictions: Optional[jax.Array] = None
+  epsilon: Optional[jax.Array] = None
+  step: Optional[jax.Array] = None
+
 @dataclasses.dataclass
 class MbrlSfNetworks:
   """Network that can unroll state-fn and apply model or SFs over an input sequence."""
@@ -375,6 +385,12 @@ def model_optimal_trajectory(
 # Actor
 ###################################
 
+def fifo_update(queue: jax.Array, x: jax.Array):
+  # remove oldest and append x to end
+  concat = lambda a,b: jnp.concatenate((a[1:],b[None]))
+  queue = jax.tree_map(lambda q, x_: concat(q, x_), queue, x)
+  return queue
+
 def epsilon_greedy_sample(
     q_values: jax.Array,
     epsilon: float,
@@ -425,7 +441,7 @@ def select_action_unroll_model(
     observation: networks_lib.Observation,
     state: ActorState[actor_core_lib.RecurrentState],
     networks: basics.NetworkFn,
-    num_actions: int = 2,
+    num_model_actions: int = 2,
     evaluation: bool = True,
     unroll_model: bool = False):
 
@@ -446,21 +462,23 @@ def select_action_unroll_model(
       action_mask=action_mask,
       key=q_rng, epsilon=state.epsilon)
 
-    ########################
-    # Unroll model w/ current optimal policy for offtask_goal
-    ########################
+    prev_states = state.prev_states
+    prev_actions = state.prev_actions
     if unroll_model:
-      offtask_goal = observation.observation['offtask_goal']
-
+      ########################
+      # Unroll model
+      ########################
       rng, model_rng = jax.random.split(rng)
       # [T]
-      model_outputs = model_optimal_trajectory(
-          key=model_rng, state=state.recurrent_state.hidden,
-          networks=networks, params=params,
-          action_mask=action_mask,
-          # initial_action=action,
-          task=offtask_goal,
-          T=num_actions,
+      start_state = state.prev_states.hidden[0]
+      model_actions = state.prev_actions
+
+      model_outputs = model_unroll(
+          key=model_rng,
+          state=start_state,
+          actions=model_actions,
+          networks=networks,
+          params=params,
       )
 
       ########################
@@ -469,23 +487,27 @@ def select_action_unroll_model(
       ########################
       # [T+1]
       # compute current state with predicted states
-      states = jnp.concatenate(
-        (state.recurrent_state.hidden[None], model_outputs.state))
+      model_states = jnp.concatenate(
+        (start_state[None], model_outputs.state))
 
       # compute sfs
       def compute_sfs(*args, **kwargs):
         return networks.compute_sfs(params, *args, **kwargs)
 
-      rng, sf_keys = split_key(rng, N=num_actions+1)
+      rng, sf_keys = split_key(rng, N=len(model_states))
       compute_sfs = jax.vmap(
-        compute_sfs, in_axes=(0, 0, None))  # vmap over time
+        compute_sfs, in_axes=(0, 0, None, None))  # vmap over time
 
       # [T+1, ...]
-      raise NotImplementedError
-      offtask_predictions = compute_sfs(sf_keys, states, offtask_goal)
+      policy = observation.observation.get('task_id')
+      task = observation.observation.get('task')
+      predictions = compute_sfs(sf_keys, model_states, task, policy)
 
       preds = preds._replace(
-        model_predictions=model_outputs.replace(predictions=offtask_predictions))
+        model_predictions=model_outputs.replace(predictions=predictions))
+
+      prev_states = fifo_update(prev_states, recurrent_state)
+      prev_actions = fifo_update(prev_actions, action)
 
     return action, ActorState(
         rng=rng,
@@ -493,6 +515,8 @@ def select_action_unroll_model(
         step=state.step + 1,
         predictions=preds,
         recurrent_state=recurrent_state,
+        prev_states=prev_states,
+        prev_actions=prev_actions,
         prev_recurrent_state=state.recurrent_state)
 
 
@@ -500,13 +524,19 @@ def get_actor_core(
     networks: basics.NetworkFn,
     config: Config,
     evaluation: bool = False,
-    extract_q_values = lambda preds: preds.q_values
+    extract_q_values = lambda preds: preds.q_values,
+    num_model_actions: int = 1,
+    unroll_model: bool = False,
   ):
   """Returns ActorCore for R2D2."""
 
   if evaluation:
     select_action = functools.partial(
-      select_action_unroll_model, networks=networks, evaluation=evaluation)
+      select_action_unroll_model,
+      networks=networks,
+      num_model_actions=num_model_actions,
+      unroll_model=unroll_model,
+      evaluation=evaluation)
   else:
     select_action = functools.partial(
       regular_select_action, networks=networks, evaluation=evaluation)
@@ -524,12 +554,23 @@ def get_actor_core(
     else:
       epsilon = config.evaluation_epsilon
     initial_core_state = networks.init_recurrent_state(state_rng, None)
+
+    kwargs = dict()
+    if evaluation and unroll_model:
+      prev_states = jax.tree_map(lambda x: jnp.repeat(x[None], num_model_actions, axis=0), initial_core_state)
+      prev_actions = jnp.zeros(num_model_actions, dtype=jnp.int32)
+      kwargs = dict(
+        prev_actions=prev_actions,
+        prev_states=prev_states,
+      )
     return ActorState(
         rng=rng,
         epsilon=epsilon,
         step=0,
         recurrent_state=initial_core_state,
-        prev_recurrent_state=initial_core_state)
+        prev_recurrent_state=initial_core_state,
+        **kwargs,
+        )
 
   def get_extras(
       state: ActorState[actor_core_lib.RecurrentState]
@@ -759,7 +800,6 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   binary_feature_loss: bool = True
   task_weighted_model: bool = False
   mask_zero_features: float = 0.0
-  gpi_eval_model: bool = False
 
   def error(self,
             data,
@@ -946,7 +986,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     task_weighted_loss, unweighted_loss = loss_fn(
       td_errors, online_preds.task[:-1])
 
-    batch_loss = (task_weighted_loss + 
+    batch_loss = (task_weighted_loss * self.weighted_coeff + 
                   unweighted_loss * self.unweighted_coeff)
 
     td_errors = td_errors.mean(axis=2)
@@ -1358,7 +1398,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       # using regular params, this will be used for Q-value action-selection
       key, sf_keys = split_key(key, N=nactions)
       next_task = task
-      if self.gpi_eval_model:
+      if self.backup_train_task:
         next_policy = online_policy_
       else:
         next_policy = policy
@@ -1376,6 +1416,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         in_axes=(0, 0, None, None), out_axes=0)(
           # [K, 2], [K, D], [C]
           sf_keys, target_model_outputs.state, next_task, next_policy)
+
       if self.action_mask:
         next_predictions = batch_mask_predictions(
           next_predictions, model_outputs.action_mask)
@@ -1423,9 +1464,9 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     if self.backup_train_task:
       predictions = jax.vmap(
         compute_sfs,
-        in_axes=(0, None, None, None), out_axes=0)(
+        in_axes=(0, None, 0, None), out_axes=0)(
           # [M, 2], [D], [C]
-          sf_keys, online_preds.state, online_task, online_policy)
+          sf_keys, online_preds.state, sampled_tasks, online_policy)
     else:
       predictions = jax.vmap(
         compute_sfs,
@@ -1522,21 +1563,24 @@ class IndTaskHead(hk.Module):
                sf_input: jnp.ndarray,
                policy: jnp.ndarray,
                task: jnp.ndarray) -> jnp.ndarray:
-    """Computes successor features and q-values for each task.
-
+    """Compute successor features and q-valuesu
+    
     Args:
-      sf_input: State features, shape [batch_size, state_features_dim].
-      policy: One-hot encoded policy, shape [batch_size, num_actions].
-      task: Task weights, shape [batch_size, num_tasks].
-
+        sf_input (jnp.ndarray): D
+        policy (jnp.ndarray): C
+        task (jnp.ndarray): D
+    
     Returns:
-      sfs: Combined successor features, shape [batch_size, action_values, num_actions].
-      q_values: Combined q-values, shape [batch_size, action_values].
+        jnp.ndarray: 2-D tensor of action values of shape [batch_size, num_actions]
     """
 
     sfs_list = []
     q_values_list = []
     policy_ids = jnp.identity(len(policy))
+    assert policy.ndim == 1, 'need to vmap'
+    assert task.ndim == 1, 'need to vmap'
+    assert sf_input.ndim == 1, 'need to vmap'
+
     for policy_id in policy_ids:
       # Call SF head for the task
       sfs, q_values = self.SfCls(**self.sf_head_kwargs)(
@@ -1665,7 +1709,7 @@ class UsfaArch(hk.RNNCore):
     self._sf_head = sf_head
     self._transition_fn = transition_fn
     self._eval_task_support = eval_task_support
-    self._context_embed = hk.Linear(128)
+    self._context_embed = hk.Linear(32)
     self._policy_rep = policy_rep
     assert policy_rep in ('task', 'task_id')
 

@@ -973,7 +973,8 @@ class IndependentSfHead(hk.Module):
     """
     ndims = self.state_features_dim
 
-    linear = lambda x: hk.Linear(self.layers[0], with_bias=False)(x)
+    linear_dim = self.layers[0] if self.layers else sf_input.shape[-1]
+    linear = lambda x: hk.Linear(linear_dim, with_bias=False)(x)
     concat = lambda a, b: jnp.concatenate((a, b))
 
     if self.compositional_policy:

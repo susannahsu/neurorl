@@ -348,16 +348,17 @@ def plot_sfgpi(
       #------------------
       # Plot maximum Q-values for each policy
       #------------------
-      max_q_values = train_q_values[t].max(axis=-1)
-      max_index = max_q_values.argmax()  # best N
+      # jnp.max(all_q_values, axis=0)
+      policy_q_values = train_q_values[t].max(axis=-1)
+      max_index = policy_q_values.argmax()  # best N
 
 
       colors = ['red' if i == max_index else 'blue' for i in range(N)]
-      axs[base_row+1, col].bar(range(N), max_q_values, color=colors)
+      axs[base_row+1, col].bar(range(N), policy_q_values, color=colors)
 
       task_labels = [non_zero_elements_to_string(i) for i in train_tasks[t]]
       axs[base_row+1, col].set_xticks(range(N))  # Set tick positions
-      axs[base_row+1, col].set_xticklabels(task_labels, rotation=0, fontsize=8)
+      axs[base_row+1, col].set_xticklabels(task_labels, rotation=45, fontsize=8)
       axs[base_row+1, col].set_ylim(0, max_q * 1.1)  # Set y-axis limit to 1.
       axs[base_row+1, col].set_title(f"Chosen={max_index+1}, a ={actions[t]}")  # Set y-axis limit to 1.
 
@@ -387,7 +388,8 @@ def plot_sfgpi(
           # Plot barplot of SFs for the highest Q-value action
           new_base = base_row+2+int(include_heatmap)
           axs[new_base+n, col].bar(range(C), sf_values_for_highest_q, color=colors)
-          axs[new_base+n, col].set_title(f"policy {n+1}, a = {a_chosen}, optimal={action_with_highest_q}")
+          axs[new_base+n, col].set_title(
+             f"policy {n+1} for a={a_chosen}, optimal={action_with_highest_q}")
           axs[new_base+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
           axs[new_base+n, col].axis('on')  # Optionally, turn on the axis if needed
 
@@ -465,24 +467,22 @@ class SFObserver(ActorObserver):
   def flush_metrics(self) -> Dict[str, float]:
     """Returns metrics collected for the current episode."""
     rewards = jnp.stack([t.reward for t in self.timesteps])[1:]
-    total_reward = rewards.sum()
+    state_features = jnp.stack([t.observation.observation['state_features'] for t in self.timesteps])[1:]
 
-    if self.period == 0: return
+    total_reward = rewards.sum()
+    if self.idx == 1: pass
+    elif self.period == 0: return
     elif self.period == 1: pass
     else:
-      if total_reward > 1:
+      if state_features.sum() > 0:
         self.successes += 1
-      elif total_reward > 1e-5:
-        self.failures += 1
       else:
-        return
+        self.failures += 1
 
-      success_period = self.successes % self.period == 0
-      failure_period = self.failures % self.period == 0
+      log_success = self.successes and self.successes % self.period == 0
+      log_failure = self.failures and self.failures % self.period == 0
 
-      if self.successes == 1 or self.failures == 1:
-         pass
-      elif not (success_period or failure_period):
+      if not log_success and not log_failure:
         return
 
     def get_from_timesteps(key):
@@ -537,6 +537,12 @@ class SFObserver(ActorObserver):
     plt.close(fig)
 
     ##################################
+    # model rollouts
+    ##################################
+    if hasattr(self.actor_states, 'prev_states'):
+       import ipdb; ipdb.set_trace()
+
+    ##################################
     # line bars
     ##################################
     npreds = len(sfs)
@@ -547,7 +553,6 @@ class SFObserver(ActorObserver):
 
 
     # ignore 0th (reset) time-step w/ 0 reward and last (terminal) time-step
-    state_features = jnp.stack([t.observation.observation['state_features'] for t in self.timesteps])[1:]
 
     # Determine the number of plots needed based on the condition
     # ndims = state_features.shape[1]

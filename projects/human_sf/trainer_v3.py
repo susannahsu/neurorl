@@ -301,7 +301,7 @@ def make_sf_dyna_loss_fn(config, **kwargs):
     model_sf_coeff=config.model_sf_coeff,
     task_weighted_dyna=config.task_weighted_dyna,
     policy_rep=config.policy_rep,
-    gpi_eval_model=config.gpi_eval_model,
+    # gpi_eval_model=config.gpi_eval_model,
     model_unweighted_coeff=config.model_unweighted_coeff,
     model_discount=config.model_discount,
     # task_weighted_cumulant_loss=config.task_weighted_cumulant_loss,
@@ -344,8 +344,8 @@ def setup_experiment_inputs(
   task_encoder = lambda obs: hk.nets.MLP(
     (128, 128), activate_final=True)(obs['task'])
 
-  q_observer  = q_learning.Observer(period=1 if debug else 4000)
-  sf_observer = human_proj_utils.SFObserver(period=1 if debug else 4000, log_dir=log_dir)
+  q_observer  = q_learning.Observer(period=5 if debug else 4000)
+  sf_observer = human_proj_utils.SFObserver(period=5 if debug else 4000, log_dir=log_dir)
 
   if agent == 'flat_q':
     # has no mechanism to select from object options since dependent on what agent sees
@@ -716,6 +716,7 @@ def run_single():
       min_replay_size=40,
       batch_size=2,
       trace_length=5,
+      state_dim=32,
     ))
     env_kwargs.update(dict(
     ))
@@ -923,88 +924,61 @@ def sweep(search: str = 'default'):
         },
     ]
   elif search == 'usfa_dyna':
+    independent_heads={
+      'task_weighted_dyna': tune.grid_search([False]),
+      'task_weighted_model': tune.grid_search([False]),
+      'weighted_coeff': tune.grid_search([1.0]),
+      'unweighted_coeff': tune.grid_search([1.0]),
+      'sep_task_heads': tune.grid_search([True]),
+    }
+    shared_task_heads ={
+      'task_weighted_dyna': tune.grid_search([True]),
+      'task_weighted_model': tune.grid_search([True]),
+      'weighted_coeff': tune.grid_search([1.0]),
+      'unweighted_coeff': tune.grid_search([0.0]),
+      'sep_task_heads': tune.grid_search([False]),
+      'sf_layers': tune.grid_search([[256, 256]]),
+    }
+    shared_task_heads_no_dyna ={
+      'task_weighted_dyna': tune.grid_search([True]),
+      'task_weighted_model': tune.grid_search([True]),
+      'weighted_coeff': tune.grid_search([1.0]),
+      'unweighted_coeff': tune.grid_search([0.0]),
+      'sep_task_heads': tune.grid_search([False]),
+      'sf_layers': tune.grid_search([[256, 256]]),
+      'dyna_coeff': tune.grid_search([0.0]),
+    }
+
     space = [
-        # {
-        #     # "num_steps": tune.grid_search([5e6]),
-        #     # "env.basic_only": tune.grid_search([1]),
-        #     "num_steps": tune.grid_search([30e6]),
-        #     "env.num_task_rooms": tune.grid_search([1]),
-        #     "agent": tune.grid_search([
-        #       "object_usfa_dyna",
-        #       # 'flat_usfa_dyna',
-        #     ]),
-        #     "seed": tune.grid_search([5]),
-        #     "group": tune.grid_search(['usfa_dyna-35-gpi']),
-        #     # "env.key_room_rewards": tune.grid_search([[0., 0.], [.25, .5]]),
-        #     "eval_task_support": tune.grid_search(["train_eval", "train", "eval"]),
-        #     "dyna_coeff": tune.grid_search([.1, .01]),
-        #     "task_weighted_dyna": tune.grid_search([False]),
-        #     "task_weighted_model": tune.grid_search([False]),
-        #     # 'env.test_itermediary_rewards': tune.grid_search([False]),
-        # },
         {
-            # "num_steps": tune.grid_search([5e6]),
-            # "env.basic_only": tune.grid_search([1]),
-            "num_steps": tune.grid_search([2e6]),
-            "env.num_task_rooms": tune.grid_search([1]),
-            "agent": tune.grid_search([
-              "object_usfa_dyna",
-              # 'flat_usfa_dyna',
-            ]),
+            "num_steps": tune.grid_search([5e6]),
+            "env.num_task_rooms": tune.grid_search([2]),
+            "agent": tune.grid_search(["object_usfa_dyna"]),
             "seed": tune.grid_search([5]),
-            "group": tune.grid_search(['usfa_dyna-43-no-share-2']),
-            "eval_task_support": tune.grid_search(["train"]),
-            "dyna_coeff": tune.grid_search([1e-2]),
-            'discount': tune.grid_search([.5, .6, .7, .99]),
-            'model_discount': tune.grid_search([0.0]),
-            'env.test_itermediary_rewards': tune.grid_search([False]),
-            'task_weighted_dyna': tune.grid_search([True, False]),
-            'task_weighted_model': tune.grid_search([True, False]),
+            "group": tune.grid_search(['usfa_dyna-48-shared']),
+            'discount': tune.grid_search([.6, .9]),
+            'dyna_coeff': tune.grid_search([1.0, 1e-1, 1e-2]),
+            **shared_task_heads,
         },
-        # {
-        #     # "num_steps": tune.grid_search([5e6]),
-        #     # "env.basic_only": tune.grid_search([1]),
-        #     "num_steps": tune.grid_search([2e6]),
-        #     "env.num_task_rooms": tune.grid_search([2]),
-        #     "agent": tune.grid_search([
-        #       "object_usfa_dyna",
-        #       # 'flat_usfa_dyna',
-        #     ]),
-        #     "seed": tune.grid_search([5]),
-        #     "group": tune.grid_search(['usfa_dyna-36-no-basic']),
-        #     "eval_task_support": tune.grid_search(["train"]),
-        #     "dyna_coeff": tune.grid_search([1e-1, 1e-2, 1e-3, 0.0]),
-        #     # "backup_train_task": tune.grid_search([True]),
-        #     'env.train_basic_objects': tune.grid_search([False]),
-        # },
-        # {
-        #     # "num_steps": tune.grid_search([5e6]),
-        #     # "env.basic_only": tune.grid_search([1]),
-        #     "num_steps": tune.grid_search([30e6]),
-        #     "env.num_task_rooms": tune.grid_search([1]),
-        #     "agent": tune.grid_search([
-        #       "object_usfa_dyna",
-        #       # 'flat_usfa_dyna',
-        #     ]),
-        #     "seed": tune.grid_search([5]),
-        #     "group": tune.grid_search(['usfa_dyna-35-no-dyna']),
-        #     "eval_task_support": tune.grid_search(["train_eval", "train", "eval"]),
-        #     "dyna_coeff": tune.grid_search([0.]),
-        #     # "model_unweighted_coeff": tune.grid_search([1.]),
-        #     # 'env.test_itermediary_rewards': tune.grid_search([False]),
-        # },
-        # {
-        #     # "num_steps": tune.grid_search([5e6]),
-        #     # "env.basic_only": tune.grid_search([1]),
-        #     "num_steps": tune.grid_search([20e6]),
-        #     "env.num_task_rooms": tune.grid_search([1]),
-        #     "agent": tune.grid_search([
-        #       'flat_usfa_dyna',
-        #       # 'object_usfa_dyna',
-        #     ]),
-        #     "seed": tune.grid_search([5]),
-        #     "group": tune.grid_search(['usfa_dyna-11-fixed-eval-2']),
-        # },
+        {
+            "num_steps": tune.grid_search([5e6]),
+            "env.num_task_rooms": tune.grid_search([2]),
+            "agent": tune.grid_search(["object_usfa_dyna"]),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['usfa_dyna-48-shared-no-dyna']),
+            'discount': tune.grid_search([.6, .9]),
+            **shared_task_heads_no_dyna,
+        },
+        {
+            "num_steps": tune.grid_search([5e6]),
+            "env.num_task_rooms": tune.grid_search([2]),
+            "agent": tune.grid_search(["object_usfa_dyna"]),
+            "seed": tune.grid_search([5]),
+            "group": tune.grid_search(['usfa_dyna-48-ind']),
+            'discount': tune.grid_search([.6, .9]),
+            'dyna_coeff': tune.grid_search([1.0, 1e-2]),
+            **independent_heads,
+        },
     ]
   elif search == 'q':
     space = [
