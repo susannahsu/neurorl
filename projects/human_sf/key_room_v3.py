@@ -402,6 +402,7 @@ class KeyRoom(LevelGen):
       # preparing maze
       ###############
       # limit number of rooms
+      maze_config = copy.deepcopy(maze_config)
       maze_config['keys'] = maze_config['keys'][:num_task_rooms]
       maze_config['pairs'] = maze_config['pairs'][:num_task_rooms]
 
