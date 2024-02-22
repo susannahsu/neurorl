@@ -54,21 +54,21 @@ LARGE_NEGATIVE = -1e7
 @dataclasses.dataclass
 class Config(basics.Config):
 
-  sep_task_heads: bool = True
-  policy_rep: str = 'task'
   eval_task_support: str = "train"  # options:
   nsamples: int = 0  # no samples outside of train vector
   variance: float = 0.1
 
   final_conv_dim: int = 16
   conv_flat_dim: Optional[int] = 0
-  sf_layers : Tuple[int]=(256, 256)
-  policy_layers : Tuple[int]=(128, 128)
+  sf_layers : Tuple[int]=(128,128)
+  policy_layers : Tuple[int]=()
   feature_layers: Tuple[int]=(256, 256)
   transition_blocks: int = 6
   combine_policy: str = 'sum'
 
-  head: str = 'independent'
+  sep_task_heads: bool = True  # seperate head for each task
+  policy_rep: str = 'task_id'
+  head: str = 'independent'  # seperate head for each cumulant
   sf_activation: str = 'relu'
   sf_mlp_type: str = 'hk'
   out_init_value: Optional[float] = 0.0
@@ -93,7 +93,7 @@ class Config(basics.Config):
   n_actions_dyna: int = 20
   n_tasks_dyna: int = 10
   backup_train_task: bool = True
-  model_discount: float = 0.0
+  model_discount: float = None
 
   # Model loss
   simulation_steps: int = 5

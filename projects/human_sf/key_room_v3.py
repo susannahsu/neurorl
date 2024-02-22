@@ -502,8 +502,8 @@ class KeyRoom(LevelGen):
         train_object, test_object = maze_config['pairs'][idx]
 
         if self.train_basic_objects:
-          train_tasks.append(
-            self.make_task(task_object=train_object, intermediary_reward=False))
+          # train_tasks.append(
+          #   self.make_task(task_object=train_object, intermediary_reward=False))
           train_tasks.append(
             self.make_task(task_object=test_object, intermediary_reward=False))
 
@@ -674,11 +674,21 @@ class KeyRoom(LevelGen):
       self.place_agent(*center_room_coords)
       _ = self.room_from_pos(*self.agent_pos)
 
+
+      init_floor = construct(
+        shape='floor',
+        color=random.choice(["red", "green", "blue", "purple", "yellow", "grey"]))
+
+      width = max(self.room_size - 4, 1)
+      if self.color_rooms:
+        for _ in range(width*width):
+          self.place_in_room(*center_room_coords, init_floor)
+
       ###########################################
       # Place objects
       ###########################################
       # starts to the right for some reason
-      potential_objects = self.train_objects+self.test_objects
+      potential_objects = self.test_objects
       if self.basic_only == 2:
          raise NotImplementedError
          potential_objects = potential_objects[:1]
@@ -854,12 +864,12 @@ class KeyRoom(LevelGen):
           self.place_in_room(*room, obj1, task_obj_index=1)
           self.place_in_room(*room, obj2, task_obj_index=2)
 
-          init_floor = construct(shape='floor', color=key_color)
+          # init_floor = construct(shape='floor', color=key_color)
 
-          width = max(self.room_size - 4, 1)
-          if self.color_rooms:
-            for _ in range(width*width):
-              self.place_in_room(*room, init_floor)
+          # width = max(self.room_size - 4, 1)
+          # if self.color_rooms:
+          #   for _ in range(width*width):
+          #     self.place_in_room(*room, init_floor)
 
           # if self.num_dists and not self.training:
           #   # Place distractors in the room
