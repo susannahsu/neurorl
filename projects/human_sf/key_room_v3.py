@@ -366,10 +366,10 @@ class KeyRoom(LevelGen):
       training=True,
       test_itermediary_rewards: bool = True,
       key_room_rewards: Tuple[float] = (.1, .25),
-      train_basic_objects: int = 1,
+      train_basic_objects: int = 2,
       # include_task_signals=False,
       max_steps_per_room: int = 100,
-      evaluate_key_only: bool = True,
+      evaluate_key_only: bool = False,
       implicit_unlock=True,
       **kwargs):
       """
