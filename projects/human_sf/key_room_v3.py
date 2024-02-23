@@ -604,8 +604,8 @@ class KeyRoom(LevelGen):
       else:
           TaskCls = StructuredTaskRep
 
-      target_room_color = self.object_to_target_color[tuple(task_object)]
-      target_room_color = target_room_color if intermediary_reward else None
+      self.target_room_color = self.object_to_target_color[tuple(task_object)]
+      task_target_room_color = self.target_room_color if intermediary_reward else None
       return TaskCls(
         types=self.types,
         colors=self.colors,
@@ -613,7 +613,7 @@ class KeyRoom(LevelGen):
         target=task_object,
         auto_enter_room=self.auto_enter_room,
         key_room_rewards=self.key_room_rewards,
-        target_room_color=target_room_color
+        target_room_color=task_target_room_color
     )
 
     def gen_mission(self):
@@ -1001,7 +1001,7 @@ class KeyRoom(LevelGen):
         if not self.training and self.evaluate_key_only:
           if shape == 'key':
              terminated = True
-             reward = float(color == self.task.target_room_color)
+             reward = float(color == self.target_room_color)
 
       truncated = False
       if self.step_count >= self.max_episode_steps:
