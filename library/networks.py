@@ -80,10 +80,11 @@ class AtariVisionTorso(hk.Module):
 class BabyAIVisionTorso(hk.Module):
   """Convolutional stack used in BabyAI codebase."""
 
-  def __init__(self, flatten=True, conv_dim=16, out_dim=0):
+  def __init__(self, flatten=True, conv_dim=16, out_dim=0, relu_layer_0: bool = False, init_kernel: int = 8):
     super().__init__(name='babyai_torso')
     layers = [
-        hk.Conv2D(128, [8, 8], stride=8),
+        hk.Conv2D(128, [init_kernel, init_kernel], stride=init_kernel),
+        *([jax.nn.relu] if relu_layer_0 else []),
         hk.Conv2D(128, [3, 3], stride=1),
         jax.nn.relu,
         hk.Conv2D(128, [3, 3], stride=1),

@@ -286,6 +286,7 @@ def plot_sfgpi(
     sfs: np.array,
     actions: np.array,
     chosen_q_values: np.array,
+    chosen_policy: np.array,
     train_q_values: np.array,
     train_tasks: np.array,
     tasks: np.array,
@@ -348,20 +349,23 @@ def plot_sfgpi(
       #------------------
       # Plot maximum Q-values for each policy
       #------------------
-      # jnp.max(all_q_values, axis=0)
-      chosen_q = chosen_q_values[t]
-      policy_q_values = train_q_values[t].max(axis=-1)  # [N, A] --> [N]
-      max_index = policy_q_values.argmax()  # best N
+      gpi_q_values = train_q_values[t, :, a_chosen]
+      chosen_index = chosen_policy[t, a_chosen]  # best N
 
+      same = lambda x, y: (np.abs(x - y) < 1e-5).all()
+      assert same(
+         train_q_values[t, chosen_index, a_chosen],
+         chosen_q_values[t]), "error"
 
-      colors = ['red' if i == max_index else 'blue' for i in range(N)]
-      axs[base_row+1, col].bar(range(N), chosen_q, color=colors)
+      colors = []
+      colors = ['red' if i == chosen_index else 'blue' for i in range(N)]
+      axs[base_row+1, col].bar(range(N), gpi_q_values, color=colors)
 
       task_labels = [non_zero_elements_to_string(i) for i in train_tasks[t]]
       axs[base_row+1, col].set_xticks(range(N))  # Set tick positions
       axs[base_row+1, col].set_xticklabels(task_labels, rotation=45, fontsize=8)
       axs[base_row+1, col].set_ylim(0, max_q * 1.1)  # Set y-axis limit to 1.
-      axs[base_row+1, col].set_title(f"Chosen={max_index+1}, a ={actions[t]}")  # Set y-axis limit to 1.
+      axs[base_row+1, col].set_title(f"Chosen={chosen_index+1}, a ={actions[t]}")  # Set y-axis limit to 1.
 
       #------------------
       # Plot heatmap for train_q_values
@@ -377,25 +381,36 @@ def plot_sfgpi(
       #------------------
       # Plot heatmaps for each N
       #------------------
-      non_zero_indices = np.nonzero(tasks[t])[0]
-      colors = ['black' if i in non_zero_indices else 'skyblue' for i in range(C)]
+      non_zero_test_indices = np.nonzero(tasks[t])[0]
+      def get_colors(train_task):
+        non_zero_train_indices = np.nonzero(train_task)[0]
+        colors = []
+        for i in range(C):
+            if i in non_zero_test_indices: colors.append('black')
+            elif i in non_zero_train_indices: colors.append('green')
+            else: colors.append('skyblue')
+        return colors
+
       for n in range(N):
           # Identify the action with the highest Q-value for this N at time t
           action_with_highest_q = train_q_values[t, n].argmax()
           # Extract SFs values for this action
-          sf_values_for_highest_q = sfs[t, n, a_chosen, :]
+          sf_values_for_action = sfs[t, n, a_chosen, :]
 
+          colors = get_colors(train_tasks[t, n])
           # Plot barplot of SFs for the highest Q-value action
           new_base = base_row+2+int(include_heatmap)
-          axs[new_base+n, col].bar(range(C), sf_values_for_highest_q, color=colors)
+          axs[new_base+n, col].bar(range(C), sf_values_for_action, color=colors)
+
+          w_name = non_zero_elements_to_string(train_tasks[t, n])
           axs[new_base+n, col].set_title(
-             f"policy {n+1} for a={a_chosen}, optimal={action_with_highest_q}")
+             f"policy {n+1} for {w_name}\na={a_chosen}, optimal={action_with_highest_q}")
           axs[new_base+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
           axs[new_base+n, col].axis('on')  # Optionally, turn on the axis if needed
 
           # Annotate bars for non-zero indices
-          for i in non_zero_indices:
-              height = sf_values_for_highest_q[i]
+          for i in non_zero_test_indices:
+              height = sf_values_for_action[i]
               axs[new_base+n, col].text(i, height, f'{tasks[t][i]:.2f}', ha='center', va='bottom')
 
     else:
@@ -495,19 +510,20 @@ class SFObserver(ActorObserver):
 
     tasks = get_from_timesteps('task')  # [T, C]
     train_tasks = get_from_timesteps('train_tasks')  # [T, N, C]
+    frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
+
     sfs = get_from_predictions('sf')  # [T, N, A, C]
+    all_q_values = get_from_predictions('all_q_values')
+    q_values = get_from_predictions('q_values')
+    chosen_policy = get_from_predictions('chosen_policy')
 
 
     # [T, N, A]
-    all_q_values = get_from_predictions('all_q_values')
     npreds = all_q_values.shape[0]
     actions = jnp.stack(self.actions)[:npreds]
 
     # [T, A]
-    q_values = get_from_predictions('q_values')
     q_values = rlax.batched_index(q_values, actions)  # [T]
-
-    frames = np.stack([t.observation.observation['image'] for t in self.timesteps])
 
     # e.g. "Success 4: 0=1, 4=.5, 5=.5"
     is_success = total_reward > .9
@@ -520,6 +536,7 @@ class SFObserver(ActorObserver):
       actions=actions,
       chosen_q_values=q_values,
       train_q_values=all_q_values,
+      chosen_policy=chosen_policy,
       train_tasks=train_tasks[:-1],
       tasks=tasks[:-1],
       frames=frames,

@@ -58,12 +58,15 @@ class Config(basics.Config):
   nsamples: int = 0  # no samples outside of train vector
   variance: float = 0.1
 
+  relu_layer_0: bool = False
+  tile_size: int = 8
   final_conv_dim: int = 16
   conv_flat_dim: Optional[int] = 0
   sf_layers : Tuple[int]=(128,)
   policy_layers : Tuple[int]=()
   feature_layers: Tuple[int]=(256, 256)
   transition_blocks: int = 6
+  evaluation_epsilon: float = 0.0
   combine_policy: str = 'sum'
 
   sep_task_heads: bool = True  # seperate head for each task
@@ -137,6 +140,7 @@ class Predictions(NamedTuple):
   q_values: jnp.ndarray  # q-value
   sf: jnp.ndarray # successor features
   task: jnp.ndarray  # task vector (potentially embedded)
+  chosen_policy: Optional[jax.Array] = None  # policy vector
   policies: Optional[jax.Array] = None  # policy vector
   action_mask: Optional[jax.Array] = None
   model_predictions: Optional[jax.Array] = None
@@ -1680,6 +1684,7 @@ class SfGpiHead(hk.Module):
     # [N, A] --> [A]
     assert all_q_values.ndim == 2, 'wrong shape'
     q_values = jnp.max(all_q_values, axis=0)
+    chosen_policy = jnp.argmax(all_q_values, axis=0)
     num_actions = q_values.shape[-1]
     assert num_actions == self.num_actions
 
@@ -1688,6 +1693,7 @@ class SfGpiHead(hk.Module):
       sf=sfs,       # [N, A, D_w]
       q_values=q_values,  # [N, A]
       all_q_values=all_q_values,
+      chosen_policy=chosen_policy,
       policies=policies,
       task=task)         # [D_w]
 
@@ -1938,6 +1944,8 @@ def make_minigrid_networks(
       torso=networks.OarTorso(
         num_actions=num_actions,
         vision_torso=networks.BabyAIVisionTorso(
+          init_kernel=config.tile_size,
+          relu_layer_0=config.relu_layer_0,
           conv_dim=config.final_conv_dim,
           out_dim=config.conv_flat_dim),
         output_fn=networks.TorsoOutput,

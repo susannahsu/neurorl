@@ -174,6 +174,8 @@ def make_minigrid_networks(
       torso=networks.OarTorso(
         num_actions=num_actions,
         vision_torso=networks.BabyAIVisionTorso(
+          init_kernel=config.tile_size,
+          relu_layer_0=config.relu_layer_0,
           conv_dim=config.final_conv_dim,
           out_dim=config.conv_flat_dim),
         output_fn=networks.TorsoOutput,
