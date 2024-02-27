@@ -57,6 +57,8 @@ flags.DEFINE_bool(
 flags.DEFINE_integer('seed', 0, 'Random seed (experiment).')
 flags.DEFINE_integer('num_steps', 1_000_000,
                      'Number of environment steps to run for.')
+# flags.DEFINE_integer('num_learner_steps', 20_000_000,
+#                      'Number of learner steps to run for.') # Yichen added
 
 # -----------------------
 # wandb

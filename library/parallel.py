@@ -18,7 +18,7 @@ from acme.utils import paths
 import library.utils as utils
 
 flags.DEFINE_integer('num_actors', 6, 'number of actors.')
-flags.DEFINE_integer('config_idx', 1, 'number of actors.')
+flags.DEFINE_integer('config_idx', 1, 'configuration index.') # starts with 1 on slurm
 flags.DEFINE_integer('num_cpus', 16, 'number of cpus.')
 flags.DEFINE_integer('memory', 120_000, 'memory (in mbs).')
 flags.DEFINE_integer('max_concurrent', 12, 'number of concurrent jobs')
@@ -344,7 +344,7 @@ def run_sbatch(
       group = wandb_init_kwargs.get('group', search_name)
 
     agent_config, env_config = get_agent_env_configs(
-        config=config)
+        config=config) # will contain all configs specified in terminal command
 
     # dir will be root_path/folder/group/exp_name
     # exp_name is also name in wandb
@@ -415,7 +415,8 @@ def run_sbatch(
   #################################
   # create sbatch file
   #################################
-  job_name=f'{search_name}-{date_time(True)}'
+  # job_name=f'{search_name}-{date_time(True)}'
+  job_name=f'{group}-{date_time(True)}'
   sbatch_contents = f"#SBATCH --gres=gpu:{FLAGS.num_gpus}\n"
   sbatch_contents += f"#SBATCH -c {FLAGS.num_cpus}\n"
   sbatch_contents += f"#SBATCH --mem {FLAGS.memory}\n"

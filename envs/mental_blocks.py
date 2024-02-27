@@ -12,20 +12,17 @@ from acme import types, specs
 from typing import Any, Dict, Optional
 import tree
 import numpy as np
-
-SKIP_RELOCATED = True # skip area RELOCATED
-MAX_STACKS = 1 # maximum number of stacks allowed
-MAX_BLOCKS = 7 # maximum number of blocks allowed in each stack
-MAX_STEPS = 50 # maximum number of actions allowed in each episode
-BASE_BLOCK_REWARD = 3 # base reward for getting 1 block correct, cumulates with more blocks correct
-BLOCK_REWARD_DECAY_FACTOR = 1.2 # discount factor for subsequently correct blocks, the larger the faster the decay
-ACTION_COST = 1e-3 # cost for performing any action
+from envs import mental_blocks_cfg
 
 class Simulator():
 	def __init__(self, input_stacks, goal_stacks, 
-			  max_stacks=MAX_STACKS, max_blocks=MAX_BLOCKS, max_steps=MAX_STEPS,
-			  base_block_reward=BASE_BLOCK_REWARD, reward_decay_factor=BLOCK_REWARD_DECAY_FACTOR,
-			  action_cost=ACTION_COST,
+			  max_stacks=mental_blocks_cfg.MAX_STACKS, 
+			  max_blocks=mental_blocks_cfg.MAX_BLOCKS, 
+			  max_steps=mental_blocks_cfg.MAX_STEPS,
+			  base_block_reward=mental_blocks_cfg.BASE_BLOCK_REWARD, 
+			  reward_decay_factor=mental_blocks_cfg.BLOCK_REWARD_DECAY_FACTOR,
+			  action_cost=mental_blocks_cfg.ACTION_COST,
+			  difficulty=None,
 			  verbose=False):
 		self.max_stacks = max_stacks
 		self.max_blocks = max_blocks
@@ -39,11 +36,9 @@ class Simulator():
 		self.state_size = self.state.size # total number of elements in flattened state matrix
 		num_valid_blocks = [[1 for _ in goal_stack] for goal_stack in goal_stacks]
 		self.num_valid_blocks = sum(sum(l) for l in num_valid_blocks)
-		self.reward_upper_bound = sum([self.base_block_reward / (self.reward_decay_factor**(intersection+1)) for istack in range(len(goal_stacks)) for jblock in range(len(goal_stacks[istack])) for intersection in range(jblock+1)]) #- self.action_cost
-		#self.reward_lower_bound = -self.action_cost*3
-		self.max_episode_reward = sum([self.base_block_reward / (self.reward_decay_factor**(intersection+1)) for istack in range(len(goal_stacks)) for jblock in range(len(goal_stacks[istack])) for intersection in range(jblock+1)] 
-								+ [-5*action_cost for istack in range(len(goal_stacks)) for _ in range(len(goal_stacks[istack]))]
-								+ [-1*action_cost for _ in range(len(goal_stacks)) ] + [-action_cost, -action_cost])
+		self.difficulty = difficulty
+		# self.reward_upper_bound = sum([self.base_block_reward / (self.reward_decay_factor**(intersection+1)) for istack in range(len(goal_stacks)) for jblock in range(len(goal_stacks[istack])) for intersection in range(jblock+1)]) - self.action_cost
+		self.reward_upper_bound = sum([self.base_block_reward / (self.reward_decay_factor**(intersection+1)) for istack in range(len(goal_stacks)) for intersection in range(len(goal_stacks[istack]))])
 		self.action_dict = self.__create_action_dictionary() 
 		self.n_actions = len(self.action_dict)
 		# format the input and goal to same length
@@ -63,10 +58,31 @@ class Simulator():
 		return 
 	
 
-	def reset(self):
-		self.state = self.__create_state_representation()
-		self.current_time = 0
-		return self.state, None
+	def reset(self, random_number_generator=None):
+		# important: sample a new puzzle!
+		num_blocks, input_stacks, goal_stacks = create_random_problem(max_num_blocks=self.max_blocks, 
+													max_num_stacks=self.max_stacks,
+													difficulty=self.difficulty,
+													random_number_generator=random_number_generator,
+													cur_curriculum=mental_blocks_cfg.CURRICULUM)
+		# print(f"\n\n----- reset\ncurriculum={mental_blocks_cfg.CURRICULUM}, difficulty={num_blocks}\ninput stacks={input_stacks}\ngoal stacks={goal_stacks}")
+		self.current_time = 0 # reset time 
+		self.state = self.__create_state_representation() # reset state
+		assert self.state.size == self.state_size 
+		num_valid_blocks = [[1 for _ in goal_stack] for goal_stack in goal_stacks]
+		assert self.difficulty==None or sum(sum(l) for l in num_valid_blocks) == self.difficulty == num_blocks
+		self.num_valid_blocks = sum(sum(l) for l in num_valid_blocks)
+		self.reward_upper_bound = sum([self.base_block_reward / (self.reward_decay_factor**(intersection+1)) for istack in range(len(goal_stacks)) for intersection in range(len(goal_stacks[istack]))])
+		# format the input and goal to same length
+		self.goal = [[-1 for _ in range(self.max_blocks)] for _ in range(self.max_stacks)] # [max_stacks, max_blocks]
+		for istack in range(len(goal_stacks)): # a stack [-1, -1, ..., top block, ..., bottom block]
+			for jblock in range(1, len(goal_stacks[istack])+1): # traverse backwards
+				self.goal[istack][-jblock] = goal_stacks[istack][-jblock] 
+		self.input_stacks = [[-1 for _ in range(self.max_blocks)] for _ in range(self.max_stacks)] # [max_stacks, max_blocks]
+		for istack in range(len(input_stacks)): # a stack [-1, -1, ..., top block, ..., bottom block]
+			for jblock in range(1, len(input_stacks[istack])+1): # traverse backwards
+				self.input_stacks[istack][-jblock] = input_stacks[istack][-jblock]
+		return self.state.copy(), None
 	
 	
 	def __parse_input(self):
@@ -75,7 +91,7 @@ class Simulator():
 				self.state[istack*self.max_blocks+jblock, :] = 0 # initialize one-hot encoding
 				if self.input_stacks[istack][jblock] != -1: # encode nonempty block
 					self.state[istack*self.max_blocks+jblock, self.input_stacks[istack][jblock]] = 1
-		self.state[self.max_blocks*(self.max_stacks*2+1):self.max_blocks*(self.max_stacks*2+1)+self.max_stacks, :] = 0 # clear intersection record
+		# self.state[self.max_blocks*(self.max_stacks*2+1):self.max_blocks*(self.max_stacks*2+1)+self.max_stacks, :] = 0 # clear intersection record
 		self.state[self.max_blocks*self.max_stacks:self.max_blocks*self.max_stacks+self.max_blocks, :] = 0 # clear table stacks
 		self.state[-4, :] = 0 # reset cur pointer 
 		self.state[-4, 0] = 1 # point to the first cur stack
@@ -100,55 +116,69 @@ class Simulator():
 		input_parsed = np.any(self.state[-2]==1) # True if any 1 exists (whole vector will be 1s if parsed already)
 		goal_parsed = np.any(self.state[-1]==1) # True if any 1 exists (whole vector will be 1s if parsed already)
 		reward = -self.action_cost # default cost for performing any action
-		terminated = False
-		truncated = False
+		terminated = False # whether the episode ended
+		truncated = False # end due to max steps
 		info = None
 		if (not input_parsed) or (not goal_parsed):
-			if (not input_parsed) and (not goal_parsed) and (action_name != "parse_input") and (action_name != "parse_goal"):
-				reward -= 0.3 #self.action_cost*2
+			if (not input_parsed) and (not goal_parsed) and (action_name != "parse_input") and (action_name != "parse_goal"): # BAD, perform any other actions before input or goal is parsed
+				reward -= self.action_cost*2
 				print('\tboth input and goal not parsed yet') if self.verbose else 0
-			elif (not input_parsed) and action_name == "parse_input":
+				# reward = -self.action_cost*3*self.max_steps # death
+				# terminated = True # death
+			elif (not input_parsed) and action_name == "parse_input": # GOOD, parse input for first time
 				self.__parse_input()
 				input_parsed = True
-			elif (not goal_parsed) and action_name == "parse_goal":
+			elif (not goal_parsed) and action_name == "parse_goal": # GOOD, parse goal for first time
 				self.__parse_goal()
 				goal_parsed = True
-			else:
-				reward -= 0.3 #self.action_cost*2
+			else: # BAD, perform other actions when one of input or goal still not parsed
+				reward -= self.action_cost*2
 				print('\teither input or goal not parsed yet') if self.verbose else 0
+				# reward = -self.action_cost*3*self.max_steps # death
+				# terminated = True # death
 		elif action_name == "next_stack":
-			if cur_pointer + 1 >= self.max_stacks: # new cur pointer idx out of range
-				reward -= 0.3 #self.action_cost
+			if cur_pointer + 1 >= self.max_stacks: # BAD, new cur pointer idx out of range
+				reward -= self.action_cost
 				print('\tcur pointer out of range') if self.verbose else 0
-			else: # next stack
+				# reward = -self.action_cost*3*self.max_steps # death
+				# terminated = True # death
+			else: # GOOD, next stack
 				self.state[-4, cur_pointer] = 0
 				self.state[-4, cur_pointer+1] = 1
 		elif action_name == "previous_stack":
-			if cur_pointer == 0: # cur pointer is already minimum
-				reward -= 0.3 #self.action_cost
+			if cur_pointer == 0: # BAD, cur pointer is already minimum
+				reward -= self.action_cost
 				print('\tcur pointer out of range') if self.verbose else 0
-			else: # previous stack
+				# reward = -self.action_cost*3*self.max_steps # death
+				# terminated = True # death
+			else: # GOOD, previous stack
 				self.state[-4, cur_pointer] = 0
 				self.state[-4, cur_pointer-1] = 1
 		elif action_name == "next_table":
-			if table_pointer + 1 >= self.max_blocks: # new table pointer out of range
-				reward -= 0.3 #self.action_cost
+			if table_pointer + 1 >= self.max_blocks: # BAD, new table pointer out of range
+				reward -= self.action_cost
 				print('\ttable pointer out of range') if self.verbose else 0
-			else: # next table stack
+				# reward = -self.action_cost*3*self.max_steps # death
+				# terminated = True # death
+			else: # GOOD, next table stack
 				self.state[-3, table_pointer] = 0
 				self.state[-3, table_pointer+1] = 1
 		elif action_name == "previous_table":
-			if table_pointer == 0: # table pointer is already minimum
-				reward -= 0.3 #self.action_cost
+			if table_pointer == 0: # BAD, table pointer is already minimum
+				reward -= self.action_cost
 				print('\ttable pointer out of range') if self.verbose else 0
-			else: # previous table stack
+				# reward = -self.action_cost*3*self.max_steps # death
+				# terminated = True # death
+			else: # GOOD, previous table stack
 				self.state[-3, table_pointer] = 0
 				self.state[-3, table_pointer-1] = 1
 		elif action_name == "remove":
-			if np.all(self.state[cur_pointer*self.max_blocks + self.max_blocks-1]==0): # nothing to remove, cur stack is empty
-				reward -= 0.3 #self.action_cost
+			if np.all(self.state[cur_pointer*self.max_blocks + self.max_blocks-1]==0): # BAD, nothing to remove, cur stack is empty
+				reward -= self.action_cost
 				print('\tnothing to remove, cur stack empty') if self.verbose else 0
-			else: # pop the top block from cur stack
+				# reward = -self.action_cost*3*self.max_steps # death
+				# terminated = True # death
+			else: # GOOD, pop the top block from cur stack
 				pop_idx = 0
 				block_id = -1
 				for i in range(cur_pointer*self.max_blocks, cur_pointer*self.max_blocks+self.max_blocks): # from top block to bottom
@@ -166,13 +196,17 @@ class Simulator():
 				r = r / self.reward_upper_bound 
 				reward += r
 		elif action_name == "add":
-			if np.all(self.state[self.max_blocks*self.max_stacks+table_pointer]==0): # nothing to add, table stack is empty
-				reward -= 0.3 #self.action_cost
+			if np.all(self.state[self.max_blocks*self.max_stacks+table_pointer]==0): # BAD, nothing to add, table stack is empty
+				reward -= self.action_cost
 				print('\tnothing to add, table stack empty') if self.verbose else 0
-			elif np.any(self.state[cur_pointer*self.max_blocks]==1): # intent to add to cur stack, but stack full
+				# reward = -self.action_cost*3*self.max_steps # death
+				# terminated = True # death
+			elif np.any(self.state[cur_pointer*self.max_blocks]==1): # BAD, intent to add to cur stack, but stack full
+				reward -= self.action_cost
 				print('\tintend to add to full stack, last block in stack is',self.state[cur_pointer+self.max_blocks-1]) if self.verbose else 0
-				reward -= 0.3 #self.action_cost
-			else: # add the block to cur stack
+				# reward = -self.action_cost*3*self.max_steps # death
+				# terminated = True # death
+			else: # GOOD, add the block to cur stack
 				new_block = np.argmax(self.state[self.max_blocks*self.max_stacks+table_pointer]) # the new blockid to be added
 				self.state[self.max_blocks*self.max_stacks+table_pointer, new_block] = 0 # remove the block from table
 				for i in range(cur_pointer*self.max_blocks+self.max_blocks-1, cur_pointer*self.max_blocks-1, -1): # from bottom to top
@@ -182,20 +216,29 @@ class Simulator():
 				r, terminated = self.__readout_reward()
 				r = r / self.reward_upper_bound
 				reward += r 
-		elif action_name == "parse_input": # parse input repetitively
+		elif action_name == "parse_input": # BAD, parse input repetitively
 			assert input_parsed
 			self.__parse_input()
-			reward -= 0.3 #self.action_cost
+			reward -= self.action_cost*2
+			# reward = -self.action_cost*3*self.max_steps # termination penalty
+			# reward = -1 # termination penalty
+			# terminated = True if goal_parsed else False # end the episode if both parsed and reset input
+			# terminated = True # death
 			print('\tinput parsed again, reset') if self.verbose else 0
-		elif action_name == "parse_goal": # parse goal repetitively
+		elif action_name == "parse_goal": # BAD, parse goal repetitively
 			assert goal_parsed
-			reward -= 0.3 #self.action_cost
+			reward -= self.action_cost*2
+			# reward = -self.action_cost*3*self.max_steps # termination penalty
+			# terminated = True if input_parsed else False # end the episode if both parsed and reset goal
+			# terminated = True # death
 			print('\tgoal parsed again') if self.verbose else 0
+		# increment step
 		self.current_time += 1
 		if self.current_time >= self.max_steps:
 			truncated = True
 		#normalized_reward = 2*(reward - self.reward_lower_bound)/(self.reward_upper_bound-self.reward_lower_bound) - 1
 		normalized_reward = reward
+		# print(f"\t{action_name}, R={round(normalized_reward, 4)}, terminated={terminated}, truncated={truncated}")
 		return self.state.copy(), normalized_reward, terminated, truncated, info
 
 
@@ -243,7 +286,9 @@ class Simulator():
 			print('intersections', intersections, 'intersection_record', intersection_record) if self.verbose else 0
 			if intersections[istack]!=0 and (intersection_record[istack][intersections[istack]-1]==0): # new match
 				score += sum([base_block_reward / (reward_decay_factor**(d+1)) for d in range(intersections[istack])])
-				intersection_record[istack][intersections[istack]-1] = 1
+				intersection_record[istack][intersections[istack]-1] = 1 # update the intersection record for the new match
+				if intersections[istack] > 1: # fill preceeding intersection record with all 1s
+					intersection_record[istack][:intersections[istack]] = [1 for _ in range(intersections[istack])]
 			elif intersections[istack] != 0: # already matched, give smaller reward
 				score += 0
 		all_correct = sum(intersections) == self.num_valid_blocks # all blocks are matched
@@ -297,7 +342,7 @@ class Simulator():
 								self.max_blocks))
 		self.state[-4, 0] = 1 # initialize the cur pointer to be the first stack (one-hot encoding)
 		self.state[-3, 0] = 1 # initialize the table pointer to be the first table stack (one-hot encoding)
-		return self.state
+		return self.state.copy()
 
 
 	def __create_action_dictionary(self):
@@ -413,7 +458,7 @@ class EnvWrapper(dm_env.Environment):
 		https://github.com/google-deepmind/dm_env/
 		https://github.com/google-deepmind/acme/
 	'''
-	def __init__(self, environment: Simulator):
+	def __init__(self, environment: Simulator, random_number_generator):
 		self._environment = environment
 		self._reset_next_step = True
 		self._last_info = None
@@ -421,11 +466,14 @@ class EnvWrapper(dm_env.Environment):
 		act_space = self._environment.n_actions-1 # maximum action index
 		self._observation_spec = _convert_to_spec(obs_space, name='observation')
 		self._action_spec = _convert_to_spec(act_space, name='action')
+		self.rng = random_number_generator
 
 
 	def reset(self) -> dm_env.TimeStep:
 		self._reset_next_step = False
-		observation, info = self._environment.reset()
+		# self.rng = np.random.default_rng(self.rng.integers(low=0, high=100)) # refresh the rng
+		self.rng = np.random.default_rng(random.randint(0,100)) # refresh the rng
+		observation, info = self._environment.reset(random_number_generator=self.rng)
 		self._last_info = info
 		return dm_env.restart(observation)
 	
@@ -435,7 +483,6 @@ class EnvWrapper(dm_env.Environment):
 			return self.reset()
 		observation, reward, done, truncated, info = self._environment.step(action)
 		self._reset_next_step = done or truncated
-		self._last_truncated = truncated
 		self._last_info = info
 		# Convert the type of the reward based on the spec, respecting the scalar or array property.
 		reward = tree.map_structure(
@@ -492,19 +539,23 @@ def _convert_to_spec(space: Any,
 	Returns:
 		A dm_env spec or nested structure of specs, corresponding to the input item.
 	"""
-	if isinstance(space, int): # scalar int for number of actions
+	if isinstance(space, int): # scalar int for max idx of an action
 		dtype = type(space)
-		min_val = 0 # minimum action index
-		max_val = space # maximum action index
+		min_val = 0 # minimum action index (inclusive)
+		max_val = space # maximum action index (inclusive)
 		try:
 			assert name=='action'
 		except:
 			raise ValueError('Converting integer to dm_env spec, but name is not action')
-		return specs.BoundedArray(
-			shape=(),
-			dtype=dtype,
-			minimum=min_val,
-			maximum=max_val,
+		# return specs.BoundedArray(
+		# 	shape=(),
+		# 	dtype=dtype,
+		# 	minimum=min_val,
+		# 	maximum=max_val,
+		# 	name=name
+		# )
+		return specs.DiscreteArray(
+			num_values=max_val+1,
 			name=name
 		)
 	elif isinstance(space, np.ndarray):
@@ -532,25 +583,45 @@ def _convert_to_spec(space: Any,
 	
 
 
-def create_random_problem(max_num_blocks=MAX_BLOCKS, max_num_stacks=MAX_STACKS, difficulty=None):
+def create_random_problem(max_num_blocks=mental_blocks_cfg.MAX_BLOCKS, max_num_stacks=mental_blocks_cfg.MAX_STACKS, 
+						  difficulty=None, random_number_generator=np.random, 
+						  cur_curriculum=None):
 	while True:
-		num_blocks = random.choice(list(range(2, max_num_blocks+1))) if difficulty==None else difficulty
+		# num_blocks = random_number_generator.choice(list(range(2, max_num_blocks+1))) if difficulty==None else difficulty
+		weights = [0.1, 0.1, 0.2, 0.2, 0.2, 0.2] # uniform adjusted to puzzle space
+		if cur_curriculum==None: # fixed curriculum
+			weights = [0.1, 0.1, 0.2, 0.2, 0.2, 0.2] # uniform adjusted to puzzle space
+		elif cur_curriculum == 2: # dynamic curriculum
+			weights = [0.9, 0.02, 0.02, 0.02, 0.02, 0.02]
+		elif cur_curriculum == 3:
+			weights = [0.2, 0.7, 0.025, 0.025, 0.025, 0.025]
+		elif cur_curriculum == 4:
+			weights = [0.025, 0.2, 0.7, 0.025, 0.025, 0.025]
+		elif cur_curriculum == 5:
+			weights = [0.05, 0.05, 0.1, 0.75, 0.025, 0.025]
+		elif cur_curriculum == 6:
+			weights = [0.01, 0.01, 0.02, 0.15, 0.8, 0.01]
+		elif cur_curriculum == 7:
+			weights = [0.005, 0.015, 0.020, 0.035, 0.075, 0.85]
+		elif cur_curriculum == 0: # all levels finished, stabalize training 
+			weights = [0.05, 0.05, 0.2, 0.2, 0.25, 0.25]
+		num_blocks = random_number_generator.choice(list(range(2, max_num_blocks+1)), p=weights) if difficulty==None else difficulty
 		# input stacks
 		available_blocks = list(range(num_blocks))
 		input_stacks = []
 		for _ in range(max_num_stacks):
 			if len(available_blocks)==0:
 				continue
-			num_blocks_istack = random.choice(list(range(len(available_blocks)))) #if max_num_stacks>1 else len(available_blocks)
+			num_blocks_istack = random_number_generator.choice(list(range(len(available_blocks)))) #if max_num_stacks>1 else len(available_blocks)
 			curstack = []
 			for _ in range(num_blocks_istack):
-				curblock = random.choice(available_blocks)
+				curblock = random_number_generator.choice(available_blocks)
 				curstack.append(curblock)
 				available_blocks.remove(curblock)
 			if curstack!=[]:
 				input_stacks.append(curstack)
 		if len(available_blocks) != 0:
-			random.shuffle(available_blocks)
+			random_number_generator.shuffle(available_blocks)
 			if len(input_stacks) == 0:
 				input_stacks.append(available_blocks)
 			else:
@@ -562,16 +633,16 @@ def create_random_problem(max_num_blocks=MAX_BLOCKS, max_num_stacks=MAX_STACKS, 
 		for _ in range(max_num_stacks):
 			if len(available_blocks)==0:
 				continue
-			num_blocks_istack = random.choice(list(range(len(available_blocks))))# if max_num_stacks>1 else len(available_blocks)
+			num_blocks_istack = random_number_generator.choice(list(range(len(available_blocks))))# if max_num_stacks>1 else len(available_blocks)
 			curstack = []
 			for _ in range(num_blocks_istack):
-				curblock = random.choice(available_blocks)
+				curblock = random_number_generator.choice(available_blocks)
 				curstack.append(curblock)
 				available_blocks.remove(curblock)
 			if curstack!=[]:
 				goal_stacks.append(curstack)
 		if len(available_blocks) != 0:
-			random.shuffle(available_blocks)
+			random_number_generator.shuffle(available_blocks)
 			if len(goal_stacks) == 0:
 				goal_stacks.append(available_blocks)
 			else:
@@ -584,12 +655,13 @@ def create_random_problem(max_num_blocks=MAX_BLOCKS, max_num_stacks=MAX_STACKS, 
 
 class Test(test_utils.EnvironmentTestMixin, absltest.TestCase):
 	def make_object_under_test(self):
-		num_blocks, input_stacks, goal_stacks = create_random_problem(difficulty=7)
+		rng = np.random.default_rng(1)
+		num_blocks, input_stacks, goal_stacks = create_random_problem(difficulty=7, random_number_generator=rng)
 		# input_stacks = [[0,1,2]]
 		# goal_stacks = [[2,0,1]]
 		print('difficulty', num_blocks, '\ninput stacks', input_stacks, '\ngoal stacks', goal_stacks)
 		environment = Simulator(input_stacks=input_stacks, goal_stacks=goal_stacks)
-		return EnvWrapper(environment)
+		return EnvWrapper(environment, rng)
 	def make_action_sequence(self):
 		for _ in range(200):
 			yield self.make_action()
@@ -597,8 +669,6 @@ class Test(test_utils.EnvironmentTestMixin, absltest.TestCase):
 
 if __name__ == '__main__':
 	# random.seed(3)	
-	
-	
 	# num_blocks, input_stacks, goal_stacks = create_random_problem(difficulty=7)
 	# print('difficulty', num_blocks, '\ninput stacks', input_stacks, '\ngoal stacks', goal_stacks)
 	# environment = Simulator(input_stacks=input_stacks, goal_stacks=goal_stacks)
@@ -608,3 +678,10 @@ if __name__ == '__main__':
 	
 
 	absltest.main()
+	
+	# rng = np.random.default_rng(1)
+	# num_blocks, input_stacks, goal_stacks = create_random_problem(difficulty=7, random_number_generator=rng)
+	# simulator = Simulator(input_stacks=input_stacks, goal_stacks=goal_stacks)
+	# env = EnvWrapper(simulator, rng)
+	# for _ in range(5):
+	# 	env.reset()

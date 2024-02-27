@@ -26,7 +26,7 @@ Array = acme_types.NestedArray
 
 @dataclasses.dataclass
 class Config(basics.Config):
-  q_dim: int = 512
+  q_dim: int = 512 # Yichen edited 512
 
 @dataclasses.dataclass
 class R2D2LossFn(basics.RecurrentLossFn):

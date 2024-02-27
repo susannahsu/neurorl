@@ -121,7 +121,7 @@ class Config(r2d2.R2D2Config):
   agent: str = 'agent'
 
   # Architecture
-  state_dim: int = 512
+  state_dim: int = 512 # Yichen edited 512
 
   #----------------
   # Epsilon schedule
@@ -150,7 +150,7 @@ class Config(r2d2.R2D2Config):
   seed: int = 1
   discount: float = 0.99
   num_steps: int = 6e6
-  max_grad_norm: float = 80.0
+  max_grad_norm: float = 80.0 # Yichen edited 80.0
   adam_eps: float = 1e-3
 
   # Replay options
@@ -597,6 +597,7 @@ def default_adam_constr(config, **kwargs):
   optimizer_chain = [
       optax.clip_by_global_norm(config.max_grad_norm),
       optax.adam(config.learning_rate, eps=config.adam_eps),
+      # optax.adam(1e-2, eps=config.adam_eps), # Yichen edited
     ]
   return optax.chain(*optimizer_chain)
 
@@ -828,7 +829,7 @@ def get_actor_core(
     networks: r2d2_networks.R2D2Networks,
     config: Config,
     evaluation: bool = False,
-    linear_epsilon: bool = True,
+    linear_epsilon: bool = False,
     extract_q_values = lambda preds: preds
 ) -> r2d2_actor.R2D2Policy:
   """Returns ActorCore for R2D2."""

@@ -77,7 +77,7 @@ class Config(basics.Config):
   discount: float = 0.997**4
 
   # Learner options
-  batch_size: Optional[int] = 64
+  batch_size: Optional[int] = 128 # Yichen edited 64
   trace_length: Optional[int] = 20
   sequence_period: Optional[int] = None
 
@@ -91,21 +91,21 @@ class Config(basics.Config):
   tx_pair: rlax.TxPair = rlax.IDENTITY_PAIR
 
   # Replay options
-  samples_per_insert: float = 50.0
+  samples_per_insert: float = 25.0 # Yichen edited 50.0
   min_replay_size: int = 1_000
   max_replay_size: int = 100_000
 
   #Loss hps
   num_bins: Optional[int] = None  # number of bins for two-hot rep
   scalar_step_size: Optional[float] = .25  # step size between bins
-  max_scalar_value: float = 10.0  # number of bins for two-hot rep  max_scalar_value: float = 10.0  # number of bins for two-hot rep
+  max_scalar_value: float = 5 # Yichen edited 10.0  # number of bins for two-hot rep  max_scalar_value: float = 10.0  # number of bins for two-hot rep
   v_target_source: str = 'reanalyze' # this interpolates between mcts output vs. observed return
   reanalyze_ratio: float = 0.5 # percent of time to use mcts vs. observed return
   mask_model: bool = True
 
   # MCTS general hps
   simulation_steps: int = 5
-  num_simulations: int = 4
+  num_simulations: int = 25 # Yichen edited 4
   max_sim_depth: Optional[int] = None
   q_normalize_epsilon: float = 0.01  # copied from `jax_muzero`
   # muzero_policy: str = 'gumbel_muzero'
