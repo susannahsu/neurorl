@@ -4,7 +4,17 @@ from gymnasium import spaces
 from minigrid.wrappers import ObservationWrapper
 from minigrid.core.constants import COLOR_TO_IDX, OBJECT_TO_IDX, STATE_TO_IDX
 
-
+def one_hot(index, n):
+    if index >= n or index < 0:
+        raise ValueError("index must be within the range 0 to n-1")
+    
+    # Initialize a vector of zeros with length n
+    vector = np.zeros(n)
+    
+    # Set the element at the specified index to 1
+    vector[index] = 1
+    
+    return vector
 class RGBImgRoomObsWrapper(ObservationWrapper):
     """
     Wrapper to display only the current room the agent is in as an RGB image.
@@ -93,7 +103,12 @@ class OneHotRoomObsWrapper(ObservationWrapper):
             low=0, high=255, shape=(obs_shape[0], obs_shape[1], num_bits), dtype="uint8"
         )
         self.observation_space = spaces.Dict(
-            {**self.observation_space.spaces, "image": new_image_space}
+            {**self.observation_space.spaces,
+             "image": new_image_space,
+             "direction": spaces.Box(
+                 low=0, high=255, shape=(5,), dtype="uint8"
+             )
+             }
         )
 
     def observation(self, obs):
@@ -122,5 +137,8 @@ class OneHotRoomObsWrapper(ObservationWrapper):
                 out[i, j, len(OBJECT_TO_IDX) + color] = 1
                 out[i, j, len(OBJECT_TO_IDX) + len(COLOR_TO_IDX) + state] = 1
 
-        return {**obs, "image": out}
+        return {**obs,
+                "image": out,
+                "direction": one_hot(obs['direction'], n=5)
+                }
 
