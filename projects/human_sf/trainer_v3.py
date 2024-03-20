@@ -93,7 +93,7 @@ from projects.human_sf import usfa_dyna_offtask as usfa_dyna
 from projects.human_sf import object_usfa_offtask as object_usfa
 from projects.human_sf import object_usfa_dyna_offtask as object_usfa_dyna
 from projects.human_sf import utils as human_proj_utils
-from projects.human_sf.minigrid_room_view_wrapper import RGBImgRoomObsWrapper
+from projects.human_sf.minigrid_room_view_wrapper import RGBImgRoomObsWrapper, OneHotRoomObsWrapper
 
 from projects.human_sf import key_room_v3 as key_room
 
@@ -155,6 +155,7 @@ def make_keyroom_env(
     seed: int,
     room_size: int = 7,
     evaluation: bool = False,
+    evaluate_key_only: bool = True,
     object_options: bool = False,
     flat_task: bool = True,
     steps_per_room: int = 100,
@@ -167,6 +168,7 @@ def make_keyroom_env(
     auto_pickup: bool = True,
     tile_size: int = 8,
     debug: bool = False,
+    symbolic: bool = False,
     **kwargs) -> dm_env.Environment:
   """Loads environments.
   
@@ -200,6 +202,7 @@ def make_keyroom_env(
     basic_only=basic_only,
     key_room_rewards=key_room_rewards,
     training= not evaluation,
+    evaluate_key_only=evaluate_key_only,
     **kwargs)
 
   ####################################
@@ -207,8 +210,12 @@ def make_keyroom_env(
   ####################################
   gym_wrappers = [DictObservationSpaceWrapper]
 
-  gym_wrappers.append(functools.partial(  
-    RGBImgRoomObsWrapper, tile_size=tile_size))
+  if symbolic:
+    gym_wrappers.append(functools.partial(
+      OneHotRoomObsWrapper, tile_size=tile_size))
+  else:
+    gym_wrappers.append(functools.partial(
+      RGBImgRoomObsWrapper, tile_size=tile_size))
 
   if object_options:
     gym_wrappers.append(functools.partial(
@@ -306,6 +313,7 @@ def make_sf_dyna_loss_fn(config, **kwargs):
     # gpi_eval_model=config.gpi_eval_model,
     model_unweighted_coeff=config.model_unweighted_coeff,
     model_discount=config.model_discount,
+    stop_dyna_state_grad=config.stop_dyna_state_grad,
     # task_weighted_cumulant_loss=config.task_weighted_cumulant_loss,
     mask_zero_features=config.mask_zero_features,
     backup_train_task=config.backup_train_task,
@@ -346,8 +354,27 @@ def setup_experiment_inputs(
   task_encoder = lambda obs: hk.nets.MLP(
     (128, 128), activate_final=True)(obs['task'])
 
+  action_names = {
+    0: 'left',
+    1: 'right',
+    2: 'forward',
+    3: 'pickup',
+    4: 'drop',
+    5: 'toggle',
+    6: 'done',
+    7: 'blue ball',
+    8: 'blue box',
+    9: 'green box',
+    10: 'purple box',
+    11: 'grey door',
+    12: 'red door',
+    13: 'grey key',
+    14: 'red key'}
   q_observer  = q_learning.Observer(period=1 if debug else 4000)
-  sf_observer = human_proj_utils.SFObserver(period=1 if debug else 4000, log_dir=log_dir)
+  sf_observer = human_proj_utils.SFObserver(
+    period=1 if debug else 4000,
+    action_names=action_names,
+    log_dir=log_dir)
 
   if agent == 'flat_q':
     # has no mechanism to select from object options since dependent on what agent sees
@@ -926,7 +953,7 @@ def sweep(search: str = 'default'):
             "task_weighted_model": tune.grid_search([False]),
         },
     ]
-  elif search == 'usfa_dyna':
+  elif search == 'usfa_dyna2':
     independent_heads={
       'task_weighted_dyna': tune.grid_search([False]),
       'task_weighted_model': tune.grid_search([False]),
@@ -948,8 +975,9 @@ def sweep(search: str = 'default'):
       'task_weighted_model': tune.grid_search([True]),
       'weighted_coeff': tune.grid_search([1.0]),
       'unweighted_coeff': tune.grid_search([0.0]),
+      # 'model_unweighted_coeff': tune.grid_search([0.0]),
       'sep_task_heads': tune.grid_search([False]),
-      'sf_layers': tune.grid_search([[256, 256]]),
+      'sf_layers': tune.grid_search([[512, 512]]),
       'policy_layers': tune.grid_search([[128, 128]]),
       'policy_rep': tune.grid_search(['task']),
     }
@@ -958,6 +986,7 @@ def sweep(search: str = 'default'):
       'task_weighted_model': tune.grid_search([True]),
       'weighted_coeff': tune.grid_search([1.0]),
       'unweighted_coeff': tune.grid_search([0.0]),
+      'model_unweighted_coeff': tune.grid_search([0.0]),
       'sep_task_heads': tune.grid_search([False]),
       'sf_layers': tune.grid_search([[256, 256]]),
       'policy_layers': tune.grid_search([[128, 128]]),
@@ -984,32 +1013,30 @@ def sweep(search: str = 'default'):
         {
             **shared_settings,
             **shared_task_heads,
-            "group": tune.grid_search(['usfa_dyna-60-shared']),
+            "group": tune.grid_search(['usfa_dyna-65-shared']),
             "env.num_task_rooms": tune.grid_search([2]),
-            "env.terminate_failure": tune.grid_search([True]),
-            'discount': tune.grid_search([.99]),
-            'unweighted_coeff': tune.grid_search([0.0, 1.0]),
-            "tile_size": tune.grid_search([12]),
-            "backup_train_task": tune.grid_search([True, False]),
-            # "env.color_rooms": tune.grid_search([False]),
+            "backup_train_task": tune.grid_search([True]),
+            "stop_dyna_state_grad": tune.grid_search([True, False]),
+            "env.symbolic": tune.grid_search([True, False]),
             # "env.maze_idx": tune.grid_search([1]),
         },
-        {
-            **shared_settings,
-            **independent_heads,
-            "group": tune.grid_search(['usfa_dyna-60-ind']),
-            "env.num_task_rooms": tune.grid_search([2]),
-            "env.terminate_failure": tune.grid_search([True]),
-            'discount': tune.grid_search([.99]),
-            # 'model_discount': tune.grid_search([None]),
-            'sf_layers': tune.grid_search([[128]]),
-            # 'dyna_coeff': tune.grid_search([.1]),
-            'unweighted_coeff': tune.grid_search([1.0, 0.0]),
-            "tile_size": tune.grid_search([12]),
-            "backup_train_task": tune.grid_search([True, False]),
-            # 'state_dim': tune.grid_search([512]),
-            # 'mask_zero_features': tune.grid_search([0.0, .5, .75]),
-        },
+        # {
+        #     **shared_settings,
+        #     **independent_heads,
+        #     "group": tune.grid_search(['usfa_dyna-65-ind']),
+        #     "env.num_task_rooms": tune.grid_search([2]),
+        #     'discount': tune.grid_search([.9]),
+        #     'sf_layers': tune.grid_search([[128, 128]]),
+        #     # 'dyna_coeff': tune.grid_search([.1]),
+        #     # 'unweighted_coeff': tune.grid_search([1.0]),
+        #     "tile_size": tune.grid_search([12]),
+        #     "env.terminate_failure": tune.grid_search([False, True]),
+        #     'loss_fn': tune.grid_search(['qlearning', 'qlambda']),
+        #     'model_discount': tune.grid_search([None, .6]),
+        #     "backup_train_task": tune.grid_search([True, False]),
+        #     # 'state_dim': tune.grid_search([512]),
+        #     # 'mask_zero_features': tune.grid_search([0.0, .5, .75]),
+        # },
         # {
         #     **shared_settings,
         #     **independent_heads_no_dyna,

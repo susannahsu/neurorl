@@ -118,7 +118,19 @@ def make_minigrid_networks(
         else:
           state_features = state_feature_logits
 
+        #----------------------------
+        # discounts
+        #----------------------------
+        discount_logits = muzero_mlps.PredictionMlp(
+          config.feature_layers, 1, name='discounts')(new_state)
+        discount_logits = jnp.squeeze(discount_logits)
+        discount = distrax.Bernoulli(
+          logits=discount_logits).sample(seed=hk.next_rng_key())
+        discount = discount.astype(new_state.dtype)
+
+        #----------------------------
         # OBJECT MASK at next time-step
+        #----------------------------
         action_mask_fn = muzero_mlps.PredictionMlp(
           config.feature_layers,
           num_actions, name='pred_action')
@@ -130,6 +142,8 @@ def make_minigrid_networks(
           state=new_state,
           state_features=state_features,
           state_feature_logits=state_feature_logits,
+          discount_logits=discount_logits,
+          discount=discount,
           action_mask_logits=action_mask_logits,
           action_mask=action_mask)
 

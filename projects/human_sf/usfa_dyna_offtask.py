@@ -82,6 +82,7 @@ class Config(basics.Config):
   trace_length: int = 20
   weighted_coeff: float = 1.0
   task_weighted_dyna: bool = True
+  stop_dyna_state_grad: bool = False
   unweighted_coeff: float = 0.0
   model_unweighted_coeff: float = 0.0
   cat_coeff: float = 1.0
@@ -151,6 +152,8 @@ class ModelOuputs:
   state: jax.Array
   state_features: Optional[jax.Array] = None
   state_feature_logits: Optional[jax.Array] = None
+  discount: Optional[jax.Array] = None
+  discount_logits: Optional[jax.Array] = None
   action_mask: Optional[jax.Array] = None
   action_mask_logits: Optional[jax.Array] = None
   predictions: Optional[jax.Array] = None
@@ -795,15 +798,18 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
   # Model loss
   simulation_steps: int = 5
-  model_discount: float = 0.0
+  model_discount: float = None
   feature_coeff: float = 1.0
   model_sf_coeff: float = 1.0
   model_coeff: float = 1.0
   action_coeff: float = 1.0
+  discount_coeff: float = 1.0
   cat_coeff: float = 1.0
   binary_feature_loss: bool = True
   task_weighted_model: bool = False
   mask_zero_features: float = 0.0
+
+  stop_dyna_state_grad: bool = False
 
   def error(self,
             data,
@@ -1039,6 +1045,14 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     model_actions = roll(actions[:-1])
 
     #----------------------
+    # env discounts
+    #----------------------
+    import ipdb; ipdb.set_trace()
+    # [T] --> [T', k]
+    discount_targets = roll(data.discount[1:])
+    discount_mask = roll(episode_mask[1:])
+
+    #----------------------
     # STATE FEATURES, [T', C]
     #----------------------
     state_features = self.extract_cumulants(data)
@@ -1082,6 +1096,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       (episode_mask[1:num_sf_targets], jnp.zeros(2)))
     sf_mask_rolled = roll(sf_mask)
 
+    # [T, C] --> [T', k, C] for unrolls
     cumulant_mask_rolled = vmap_roll(cumulant_mask)
     # ------------
     # unrolls the model from each time-step in parallel
@@ -1174,7 +1189,14 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       action_mask_logits_,
       action_mask_,
       action_loss_mask_,
+      #
+      discount_logits_,
+      discount_targets_,
+      discount_mask_,
       ):
+      #----------------------------
+      # state features
+      #----------------------------
       def binary_cross_entropy(logits, target):
         return -distrax.Bernoulli(logits).log_prob(target)
       binary_cross_entropy = jax.vmap(binary_cross_entropy)
@@ -1195,6 +1217,9 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       features_mask_T = (features_mask_.sum(-1) > 0).astype(features_mask_.dtype)
       features_loss = episode_mean(features_loss, features_mask_T)  # []
 
+      #----------------------------
+      # successor features
+      #----------------------------
        # [k, C]
       sf_td = sf_target_ - predicted_sf_
       sf_td = sf_td*cumulant_mask_
@@ -1213,6 +1238,9 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         sf_l2 = sf_l2.sum(-1)  # [k]
         sf_loss = episode_mean(sf_l2, sf_mask_)  # []
 
+      #----------------------------
+      # available actions (if change)
+      #----------------------------
       if self.action_mask:
         mask_log_prob = binary_cross_entropy(
           action_mask_logits_, action_mask_)
@@ -1221,9 +1249,20 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       else:
         action_mask_loss = jnp.zeros_like(sf_loss)
 
-      return features_loss, sf_loss, action_mask_loss
+      #----------------------------
+      # discounts
+      #----------------------------
+      import ipdb; ipdb.set_trace()
 
-    feature_loss, sf_loss, action_mask_loss = jax.vmap(compute_losses)(
+      # [k]
+      discount_loss = -distrax.Bernoulli(
+        discount_logits_).log_prob(discount_targets_)
+      # []
+      discount_loss = episode_mean(discount_loss, discount_mask_)  
+
+      return features_loss, sf_loss, action_mask_loss, discount_loss
+
+    feature_loss, sf_loss, action_mask_loss, discount_loss = jax.vmap(compute_losses)(
       model_outputs.state_feature_logits,
       state_features_target,
       state_features_mask_rolled,
@@ -1235,6 +1274,9 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       action_mask_logits,
       action_mask_target,
       action_loss_mask_rolled,
+      model_outputs.discount_logits,
+      discount_targets,
+      discount_mask,
       )
 
     def apply_mask(loss, mask):
@@ -1242,6 +1284,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
     feature_loss = apply_mask(feature_loss, state_features_mask_T)
     sf_loss = apply_mask(sf_loss, sf_mask)
+    discount_loss = apply_mask(discount_loss, discount_mask)
     action_mask_loss = apply_mask(action_mask_loss, action_loss_mask)
     action_mask_loss = action_mask_loss*float(self.action_mask)
 
@@ -1249,12 +1292,14 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       "0.feature_loss": feature_loss,
       "0.sf_loss": sf_loss,
       "1.action_mask_loss": action_mask_loss,
+      "1.discount_loss": discount_loss,
     }
 
     total_loss = (
       feature_loss * self.feature_coeff * self.cat_coeff + 
       sf_loss * self.model_sf_coeff + 
-      action_mask_loss * self.action_coeff * self.cat_coeff
+      action_mask_loss * self.action_coeff * self.cat_coeff + 
+      discount_loss * self.discount_coeff * self.cat_coeff
       )
 
     return total_loss, metrics
@@ -1372,14 +1417,17 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         sampled_actions = sample_from_action_mask(
           action_mask_, sample_key, self.n_actions_dyna)
 
-        # [K+1]
-        sampled_actions = jnp.concatenate(
-          (sampled_actions, optimal_q_action[None]))
+        # # [K+1]
+        # sampled_actions = jnp.concatenate(
+        #   (sampled_actions, optimal_q_action[None]))
       else:
         sampled_actions = optimal_q_action[None]
 
       nactions = len(sampled_actions)
-
+      
+      if self.stop_dyna_state_grad:
+        online_state = jax.lax.stop_gradient(online_state)
+        target_state = jax.lax.stop_gradient(target_state)
       #-----------------------
       # apply model K times for params and target_params
       #-----------------------
@@ -1407,11 +1455,19 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       else:
         next_policy = policy
 
+      next_online_state = model_outputs.state
+      next_target_state = target_model_outputs.state
+      if self.stop_dyna_state_grad:
+        next_online_state = jax.lax.stop_gradient(
+          next_online_state)
+        next_target_state = jax.lax.stop_gradient(
+          next_target_state)
+
       next_predictions = jax.vmap(
         compute_sfs,
         in_axes=(0, 0, None, None), out_axes=0)(
           # [K, 2], [K, D], [C]
-          sf_keys, model_outputs.state, next_task, next_policy)
+          sf_keys, next_online_state, next_task, next_policy)
 
       # using target params, this will define the targets
       key, sf_keys = split_key(key, N=nactions)
@@ -1419,7 +1475,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         compute_target_sfs,
         in_axes=(0, 0, None, None), out_axes=0)(
           # [K, 2], [K, D], [C]
-          sf_keys, target_model_outputs.state, next_task, next_policy)
+          sf_keys, next_target_state, next_task, next_policy)
 
       if self.action_mask:
         next_predictions = batch_mask_predictions(
@@ -1438,12 +1494,14 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       next_state_features = model_outputs.state_features
       next_q_values = next_predictions.q_values
       target_next_sf = target_next_predictions.sf
+      import ipdb; ipdb.set_trace()
+      discount = model_outputs.discount*self.discount
       return td_error_fn(
         sf,                   # [A, C]
         sampled_actions,      # [K]
         jax.lax.stop_gradient(next_state_features),  # [K, C]
         jax.lax.stop_gradient(target_next_sf),             # [K, A, C]
-        discounts_,                                # []
+        jax.lax.stop_gradient(discount),                  # []
         jax.lax.stop_gradient(next_q_values),             # [A]
         )
 
@@ -1697,6 +1755,12 @@ class SfGpiHead(hk.Module):
       policies=policies,
       task=task)         # [D_w]
 
+def get_context(observation):
+  if 'direction' in observation:
+    import ipdb; ipdb.set_trace()
+    return jnp.concatenate((observation['context'], observation['direction']), axis=-1)
+  return observation['context']
+
 
 class UsfaArch(hk.RNNCore):
   """Universal Successor Feature Approximator."""
@@ -1734,7 +1798,7 @@ class UsfaArch(hk.RNNCore):
 
     state_features = inputs.observation['state_features'].astype(
       torso_outputs.image.dtype)
-    context = inputs.observation['context'].astype(
+    context = get_context(inputs.observation).astype(
       torso_outputs.image.dtype)
     context = self._context_embed(context)
     memory_input = jnp.concatenate(
@@ -1780,7 +1844,7 @@ class UsfaArch(hk.RNNCore):
 
     state_features = inputs.observation['state_features'].astype(
       torso_outputs.image.dtype)
-    context = inputs.observation['context'].astype(
+    context = get_context(inputs.observation).astype(
       torso_outputs.image.dtype)
     context = hk.BatchApply(self._context_embed)(context)
     memory_input = jnp.concatenate(
@@ -1888,6 +1952,9 @@ def make_minigrid_networks(
             action_onehot, state)
         new_state = scale_gradient(new_state, config.scale_grad)
 
+        #----------------------------
+        # state features
+        #----------------------------
         state_feature_logits = muzero_mlps.PredictionMlp(
           config.feature_layers,
           state_features_dim,
@@ -1899,10 +1966,23 @@ def make_minigrid_networks(
         else:
           state_features = state_feature_logits
 
+        #----------------------------
+        # discounts
+        #----------------------------
+        discount_logits = muzero_mlps.PredictionMlp(
+          config.feature_layers, 1, name='discounts')(new_state)
+        discount_logits = jnp.squeeze(discount_logits)
+        discount = distrax.Bernoulli(
+          logits=discount_logits).sample(seed=hk.next_rng_key())
+        discount = discount.astype(new_state.dtype)
+
         outputs = ModelOuputs(
           state=new_state,
           state_feature_logits=state_feature_logits,
-          state_features=state_features)
+          state_features=state_features,
+          discount_logits=discount_logits,
+          discount=discount,
+          )
 
         return outputs, new_state
 

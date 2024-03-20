@@ -292,8 +292,9 @@ def plot_sfgpi(
     tasks: np.array,
     frames: np.array,
     include_heatmap: bool = False,
+    action_names: dict = None,
     max_cols: int = 10, title:str = ''):
-  max_len = min(sfs.shape[0], 100)
+  max_len = min(sfs.shape[0], 10)
   sfs = sfs[:max_len]
   train_tasks = train_tasks[:max_len]
   frames = frames[:max_len]
@@ -329,6 +330,7 @@ def plot_sfgpi(
   # Iterate over time steps and plot
   total_plots = total_rows // (2 + N) * cols  # Recalculate total plots based on new row structure
 
+  name_action = lambda a: action_names[int(a)]
   ##########################
   # Iterating over time dimensions
   ##########################
@@ -365,8 +367,8 @@ def plot_sfgpi(
       axs[base_row+1, col].set_xticks(range(N))  # Set tick positions
       axs[base_row+1, col].set_xticklabels(task_labels, rotation=45, fontsize=8)
       axs[base_row+1, col].set_ylim(0, max_q * 1.1)  # Set y-axis limit to 1.
-      axs[base_row+1, col].set_title(f"Chosen={chosen_index+1}, a ={actions[t]}")  # Set y-axis limit to 1.
-
+      axs[base_row+1, col].set_title(f"Chosen={chosen_index+1}, a ={name_action(actions[t])}")  # Set y-axis limit to 1.
+      import ipdb; ipdb.set_trace()
       #------------------
       # Plot heatmap for train_q_values
       #------------------
@@ -404,7 +406,7 @@ def plot_sfgpi(
 
           w_name = non_zero_elements_to_string(train_tasks[t, n])
           axs[new_base+n, col].set_title(
-             f"policy {n+1} for {w_name}\na={a_chosen}, optimal={action_with_highest_q}")
+             f"policy {n+1} for {w_name}\na={name_action(a_chosen)}\noptimal={name_action(action_with_highest_q)}")
           axs[new_base+n, col].set_ylim(0, max_sf * 1.1)  # Set y-axis limit to 1.
           axs[new_base+n, col].axis('on')  # Optionally, turn on the axis if needed
 
@@ -432,6 +434,7 @@ class SFObserver(ActorObserver):
       plot_success_only: bool = False,
       colors=None,
       log_dir: str = None,
+      action_names: dict = None,
       prefix: str = 'SFsObserver'):
     super(SFObserver, self).__init__()
     self.period = period
@@ -440,6 +443,7 @@ class SFObserver(ActorObserver):
     self.failures = 0
     self.idx = -1
     self.logging = True
+    self.action_names = action_names
     self.plot_success_only = plot_success_only
     self._colors = colors or plt.rcParams['axes.prop_cycle']
     self._log_dir = os.path.join(log_dir, 'images')
@@ -540,7 +544,8 @@ class SFObserver(ActorObserver):
       train_tasks=train_tasks[:-1],
       tasks=tasks[:-1],
       frames=frames,
-      title=title
+      title=title,
+      action_names=self.action_names,
       )
 
     wandb_suffix = 'success' if is_success else 'failure'
@@ -548,7 +553,7 @@ class SFObserver(ActorObserver):
 
     if self._log_dir:
       idx = f'{self.successes}' if is_success else f'{self.failures}'
-      file = os.path.join(self._log_dir, f'sfgp-{wandb_suffix}-{idx}.png')
+      file = os.path.join(self._log_dir, f'sfgp-{wandb_suffix}-{task_str}-{idx}.png')
       fig.savefig(file)
       logging.info(f"saved {file}")
     plt.close(fig)
