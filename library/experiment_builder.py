@@ -23,7 +23,8 @@ import os
 # https://github.com/google/jax/issues/8302
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-os.environ["WANDB__SERVICE_WAIT"] = "300"
+os.environ["WANDB__SERVICE_WAIT"] = "600"
+os.environ["WANDB_INIT_TIMEOUT"] = "600"
 
 
 import dataclasses
@@ -125,16 +126,6 @@ def setup_logger_factory(
   def logger_factory(
       name: str,
       steps_key: Optional[str] = None,
-      task_id: Optional[int] = None,
-  ) -> loggers.Logger:
-    if custom_steps_keys is not None:
-      steps_key = custom_steps_keys(name)
-    if use_wandb:
-      wandb.init(**wandb_init_kwargs)
-
-  def logger_factory(
-      name: str,
-      steps_key: Optional[str] = None,
       actor_id: Optional[int] = None,
   ) -> loggers.Logger:
     """Logger factory. initialized wandb (inside process). only 1st process logs to wandb. 
@@ -142,7 +133,10 @@ def setup_logger_factory(
     if custom_steps_keys is not None:
       steps_key = custom_steps_keys(name)
     if use_wandb:
-      wandb.init(**wandb_init_kwargs)
+      try:
+        wandb.init(**wandb_init_kwargs)
+      except:
+        pass
 
     if name == 'actor':
       return experiment_logger.make_logger(
@@ -169,7 +163,6 @@ def setup_logger_factory(
           steps_key=steps_key,
           use_wandb=use_wandb,
           asynchronous=True)
-  return logger_factory
   return logger_factory
 
 
