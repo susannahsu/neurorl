@@ -955,7 +955,8 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
       if self.offtask_goal:
         dyna_tasks = data.observation.observation['offtask_goal'][:nT_cumulants]
-        dyna_tasks = dyna_tasks[: None] # tasks dim
+        dyna_tasks = dyna_tasks[:, None] # tasks dim
+        import ipdb; ipdb.set_trace()
       else:
         dyna_tasks = train_tasks[:nT_cumulants]
       dyna_td_error, dyna_batch_loss, dyna_metrics = multitask_dyna_loss(
@@ -1056,8 +1057,8 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     # env discounts
     #----------------------
     # [T] --> [T', k]
-    discount_targets = roll(data.discount[1:])
-    discount_mask = episode_mask[1:]
+    discount_targets = roll(data.discount[:-1])
+    discount_mask = episode_mask[:-1]
     discount_mask_roll = roll(discount_mask)
 
     #----------------------
@@ -1421,9 +1422,9 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         sampled_actions = sample_from_action_mask(
           action_mask_, sample_key, self.n_actions_dyna)
 
-        # # [K+1]
-        # sampled_actions = jnp.concatenate(
-        #   (sampled_actions, optimal_q_action[None]))
+        # [K+1]
+        sampled_actions = jnp.concatenate(
+          (sampled_actions, optimal_q_action[None]))
       else:
         sampled_actions = optimal_q_action[None]
 
@@ -1766,7 +1767,11 @@ class SfGpiHead(hk.Module):
 
 def get_context(observation):
   if 'direction' in observation and observation['direction'].ndim == observation['context'].ndim:
-    return jnp.concatenate((observation['context'], observation['direction']), axis=-1)
+    print('place carrying')
+    import ipdb; ipdb.set_trace()
+    context = (observation['context'],
+               observation['direction']
+    return jnp.concatenate(context), axis=-1)
   return observation['context']
 
 

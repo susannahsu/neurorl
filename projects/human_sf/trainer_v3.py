@@ -978,8 +978,6 @@ def sweep(search: str = 'default'):
     independent_heads_no_dyna={
       'task_weighted_dyna': tune.grid_search([False]),
       'task_weighted_model': tune.grid_search([False]),
-      # 'weighted_coeff': tune.grid_search([1.0]),
-      # 'unweighted_coeff': tune.grid_search([1.0]),
       'sep_task_heads': tune.grid_search([True]),
       'dyna_coeff': tune.grid_search([0.0]),
       'model_coeff': tune.grid_search([0.0]),
@@ -1030,7 +1028,7 @@ def sweep(search: str = 'default'):
             "group": tune.grid_search(['usfa_dyna-68-shared']),
             "env.num_task_rooms": tune.grid_search([2]),
             "stop_dyna_state_grad": tune.grid_search([True]),
-            "env.symbolic": tune.grid_search([False, True]),
+            "env.symbolic": tune.grid_search([True, False]),
             "backup_train_task": tune.grid_search([True, False]),
             "discount": tune.grid_search([.9, .99]),
             # "env.maze_idx": tune.grid_search([1]),
