@@ -58,6 +58,7 @@ class Config(basics.Config):
   nsamples: int = 0  # no samples outside of train vector
   variance: float = 0.1
 
+  symbolic: bool = False
   relu_layer_0: bool = False
   tile_size: int = 8
   final_conv_dim: int = 16
@@ -795,6 +796,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   n_tasks_dyna: int = 5
   task_weighted_dyna: bool = True
   backup_train_task: bool = True
+  offtask_goal: bool = True
 
   # Model loss
   simulation_steps: int = 5
@@ -806,7 +808,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
   discount_coeff: float = 1.0
   cat_coeff: float = 1.0
   binary_feature_loss: bool = True
-  task_weighted_model: bool = False
+  task_weighted_model: bool = True
   mask_zero_features: float = 0.0
 
   stop_dyna_state_grad: bool = False
@@ -950,13 +952,19 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       nT_cumulants = cumulant_mask.shape[0]
       model_discount = self.discount if self.model_discount is None else self.model_discount
       model_discounts = (data.discount*model_discount).astype(online_preds.sf.dtype)
+
+      if self.offtask_goal:
+        dyna_tasks = data.observation.observation['offtask_goal'][:nT_cumulants]
+        dyna_tasks = dyna_tasks[: None] # tasks dim
+      else:
+        dyna_tasks = train_tasks[:nT_cumulants]
       dyna_td_error, dyna_batch_loss, dyna_metrics = multitask_dyna_loss(
             model_discounts[:nT_cumulants],
             jax.tree_map(lambda x: x[:nT_cumulants], online_preds),
             jax.tree_map(lambda x: x[:nT_cumulants], target_preds),
             online_task[:nT_cumulants],
             online_policy[:nT_cumulants],
-            train_tasks[:nT_cumulants],
+            dyna_tasks,
             policies[:nT_cumulants],
             action_mask[:nT_cumulants],
             cumulant_mask[:nT_cumulants],
@@ -1047,10 +1055,10 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     #----------------------
     # env discounts
     #----------------------
-    import ipdb; ipdb.set_trace()
     # [T] --> [T', k]
     discount_targets = roll(data.discount[1:])
-    discount_mask = roll(episode_mask[1:])
+    discount_mask = episode_mask[1:]
+    discount_mask_roll = roll(discount_mask)
 
     #----------------------
     # STATE FEATURES, [T', C]
@@ -1252,13 +1260,11 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       #----------------------------
       # discounts
       #----------------------------
-      import ipdb; ipdb.set_trace()
-
       # [k]
       discount_loss = -distrax.Bernoulli(
         discount_logits_).log_prob(discount_targets_)
       # []
-      discount_loss = episode_mean(discount_loss, discount_mask_)  
+      discount_loss = episode_mean(discount_loss, discount_mask_)
 
       return features_loss, sf_loss, action_mask_loss, discount_loss
 
@@ -1276,7 +1282,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       action_loss_mask_rolled,
       model_outputs.discount_logits,
       discount_targets,
-      discount_mask,
+      discount_mask_roll,
       )
 
     def apply_mask(loss, mask):
@@ -1355,8 +1361,6 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         _type_: _description_
     """
 
-    num_actions = online_preds.q_values.shape[-1]
-
     ##############
     # prepare function for computing SFs
     ##############
@@ -1424,7 +1428,7 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         sampled_actions = optimal_q_action[None]
 
       nactions = len(sampled_actions)
-      
+
       if self.stop_dyna_state_grad:
         online_state = jax.lax.stop_gradient(online_state)
         target_state = jax.lax.stop_gradient(target_state)
@@ -1489,20 +1493,19 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
       # VMAP over K sampled actions
       td_error_fn = jax.vmap(
         one_step_sf_td,
-        in_axes=(None, 0, 0, 0, None, 0))
+        in_axes=(None, 0, 0, 0, 0, 0))
 
       next_state_features = model_outputs.state_features
       next_q_values = next_predictions.q_values
       target_next_sf = target_next_predictions.sf
-      import ipdb; ipdb.set_trace()
       discount = model_outputs.discount*self.discount
       return td_error_fn(
         sf,                   # [A, C]
         sampled_actions,      # [K]
-        jax.lax.stop_gradient(next_state_features),  # [K, C]
-        jax.lax.stop_gradient(target_next_sf),             # [K, A, C]
-        jax.lax.stop_gradient(discount),                  # []
-        jax.lax.stop_gradient(next_q_values),             # [A]
+        jax.lax.stop_gradient(next_state_features),       # [K, C]
+        jax.lax.stop_gradient(target_next_sf),            # [K, A, C]
+        jax.lax.stop_gradient(discount),                  # [K]
+        jax.lax.stop_gradient(next_q_values),             # [K, A]
         )
 
     #---------------
@@ -1521,6 +1524,12 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
     # sampled_tasks = jax.random.choice(
     #   sample_key, tasks, shape=(ntasks,), replace=False)
 
+    online_state = online_preds.state
+    target_state = target_preds.state
+    if self.stop_dyna_state_grad:
+        online_state = jax.lax.stop_gradient(online_state)
+        target_state = jax.lax.stop_gradient(target_state)
+
     # [M, A, C]
     rng_key, sf_keys = split_key(rng_key, N=ntasks)
     if self.backup_train_task:
@@ -1528,13 +1537,13 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
         compute_sfs,
         in_axes=(0, None, 0, None), out_axes=0)(
           # [M, 2], [D], [C]
-          sf_keys, online_preds.state, sampled_tasks, online_policy)
+          sf_keys, online_state, sampled_tasks, online_policy)
     else:
       predictions = jax.vmap(
         compute_sfs,
         in_axes=(0, None, 0, 0), out_axes=0)(
           # [M, 2], [D], [M, C]
-          sf_keys, online_preds.state, sampled_tasks, sampled_policies)
+          sf_keys, online_state, sampled_tasks, sampled_policies)
 
     if self.action_mask:
       # vmap over K tasks for predictions, repeat action mask
@@ -1550,8 +1559,8 @@ class MtrlDynaUsfaLossFn(basics.RecurrentLossFn):
 
     rng_key, task_keys = split_key(rng_key, N=ntasks)
     td_errors = loss_fn(
-      online_preds.state,  # [D]
-      target_preds.state,  # [D]
+      online_state,  # [D]
+      target_state,  # [D]
       predictions.sf,            # [M, A, C]
       predictions.q_values,      # [M, A, C]
       sampled_tasks,             # [M, C]
@@ -1756,8 +1765,7 @@ class SfGpiHead(hk.Module):
       task=task)         # [D_w]
 
 def get_context(observation):
-  if 'direction' in observation:
-    import ipdb; ipdb.set_trace()
+  if 'direction' in observation and observation['direction'].ndim == observation['context'].ndim:
     return jnp.concatenate((observation['context'], observation['direction']), axis=-1)
   return observation['context']
 
@@ -1779,7 +1787,7 @@ class UsfaArch(hk.RNNCore):
     self._sf_head = sf_head
     self._transition_fn = transition_fn
     self._eval_task_support = eval_task_support
-    self._context_embed = hk.Linear(32)
+    self._context_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal())
     self._policy_rep = policy_rep
     assert policy_rep in ('task', 'task_id')
 
@@ -2023,13 +2031,14 @@ def make_minigrid_networks(
     return UsfaArch(
       torso=networks.OarTorso(
         num_actions=num_actions,
+        image_key='symbols' if config.symbolic else 'image',
+        normalize_image=not config.symbolic,
         vision_torso=networks.BabyAIVisionTorso(
           init_kernel=config.tile_size,
           relu_layer_0=config.relu_layer_0,
           conv_dim=config.final_conv_dim,
           out_dim=config.conv_flat_dim),
-        output_fn=networks.TorsoOutput,
-      ),
+        output_fn=networks.TorsoOutput),
       memory=hk.LSTM(config.state_dim),
       transition_fn=transition_fn,
       sf_head=sf_head,

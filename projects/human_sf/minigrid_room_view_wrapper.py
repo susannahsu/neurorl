@@ -90,25 +90,57 @@ class OneHotRoomObsWrapper(ObservationWrapper):
     without the distraction of other parts of the environment.
     """
 
-    def __init__(self, env, tile_size=8):
+    def __init__(self, env, tile_size=8, include_images=True):
         super().__init__(env)
         self.tile_size = tile_size
+        self.include_images = include_images
 
+        new_spaces = {}
+        ###########################
+        # Images
+        ###########################
+        if include_images:
+          # Assuming a maximum room size to define the observation space.
+          # You might need a more dynamic approach depending on the environment.
+          example_room = env.get_room(0, 0)
+          # Adjust based on your environment's specifications
+          max_room_width = example_room.size[0]
+          # Adjust based on your environment's specifications
+          max_room_height = example_room.size[1]
+          new_image_space = spaces.Box(
+              low=0,
+              high=255,
+              shape=(
+                  max_room_width * tile_size,
+                  max_room_height * tile_size,
+                  3,
+              ),
+              dtype="uint8",
+          )
+          new_spaces.update({"image": new_image_space})
+
+        ###########################
+        # Symbols
+        ###########################
         obs_shape = env.observation_space["image"].shape
-
         # Number of bits per cell
         num_bits = len(OBJECT_TO_IDX) + len(COLOR_TO_IDX) + len(STATE_TO_IDX)
 
-        new_image_space = spaces.Box(
-            low=0, high=255, shape=(obs_shape[0], obs_shape[1], num_bits), dtype="uint8"
+        symbol_space = spaces.Box(
+            low=0, high=255,
+            shape=(obs_shape[0], obs_shape[1], num_bits), dtype="uint8"
         )
+        new_spaces.update({
+          "symbols": symbol_space,
+          "direction": spaces.Box(low=0, high=255, shape=(5,), dtype="uint8")
+        })
+
+        ###########################
+        # Obs Space
+        ###########################
         self.observation_space = spaces.Dict(
             {**self.observation_space.spaces,
-             "image": new_image_space,
-             "direction": spaces.Box(
-                 low=0, high=255, shape=(5,), dtype="uint8"
-             )
-             }
+             **new_spaces,}
         )
 
     def observation(self, obs):
@@ -123,9 +155,9 @@ class OneHotRoomObsWrapper(ObservationWrapper):
         # -------------------
         # generate 1-hot rep
         # -------------------
-
         out = np.zeros(
-            self.observation_space.spaces["image"].shape, dtype="uint8")
+            self.observation_space.spaces["symbols"].shape,
+            dtype="uint8")
 
         for i in range(img.shape[0]):
             for j in range(img.shape[1]):
@@ -137,8 +169,19 @@ class OneHotRoomObsWrapper(ObservationWrapper):
                 out[i, j, len(OBJECT_TO_IDX) + color] = 1
                 out[i, j, len(OBJECT_TO_IDX) + len(COLOR_TO_IDX) + state] = 1
 
-        return {**obs,
-                "image": out,
-                "direction": one_hot(obs['direction'], n=5)
-                }
+        updates = {
+          "symbols": out,
+          "direction": one_hot(obs['direction'], n=5).astype(np.uint8),
+        }
+        if self.include_images:
+          agent_pos = (self.agent_pos[0] - topX, self.agent_pos[1] - topY)
+          updates['image'] = grid.render(
+              self.tile_size,
+              agent_pos,
+              self.agent_dir,
+          )
+          
+        return {
+            **obs,
+            **updates}
 

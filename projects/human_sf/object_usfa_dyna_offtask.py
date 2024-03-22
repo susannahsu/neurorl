@@ -187,6 +187,8 @@ def make_minigrid_networks(
     return ObjectOrientedUsfaArch(
       torso=networks.OarTorso(
         num_actions=num_actions,
+        image_key='symbols' if config.symbolic else 'image',
+        normalize_image=not config.symbolic,
         vision_torso=networks.BabyAIVisionTorso(
           init_kernel=config.tile_size,
           relu_layer_0=config.relu_layer_0,

@@ -521,7 +521,6 @@ class KeyRoom(LevelGen):
       self.task_set = np.array([t.task_array for t in train_tasks])
       self.task_ids = np.identity(len(self.task_set))
       self.task_id_sample = self.task_ids[0]
-
       ####################
       # cumulant mask
       ####################
@@ -582,6 +581,7 @@ class KeyRoom(LevelGen):
           {**self.observation_space.spaces,
            "state_features": cumulants_space,
            "task": copy.deepcopy(cumulants_space),  # equivalent specs
+           "offtask_goal": copy.deepcopy(cumulants_space),  # equivalent specs
            "cumulant_mask": copy.deepcopy(cumulants_space),  # equivalent specs
            "train_tasks": train_task_arrays,
            "context": context_array,
@@ -722,12 +722,13 @@ class KeyRoom(LevelGen):
          colors_to_room={START_ROOM_COLOR:
                          self.get_room(*center_room_coords)})
 
-      # offtask_goal_object = [o for o in potential_objects if o != task_object][0]
-      # self.offtask_goal = self.make_task(
-      #    task_object=offtask_goal_object,
-      #    intermediary_reward=False,
-      #    colors_to_room={START_ROOM_COLOR:
-      #                    self.get_room(*center_room_coords)})
+      offtask_goal_object = [o for o in potential_objects if o != task_object][0]
+
+      self.offtask_goal = self.make_task(
+         task_object=offtask_goal_object,
+         intermediary_reward=False,
+         colors_to_room={START_ROOM_COLOR:
+                         self.get_room(*center_room_coords)})
 
     def place_in_room(
         self, i: int, j: int, obj: WorldObj,
@@ -914,13 +915,14 @@ class KeyRoom(LevelGen):
          colors_to_room=colors_to_room,
          intermediary_reward=self.training or self.test_itermediary_rewards)
 
-      # self.offtask_goal = self.make_task(
-      #    task_object=offtask_goal_object,
-      #    colors_to_room=colors_to_room,
-      #    intermediary_reward=self.test_itermediary_rewards)
+      self.offtask_goal = self.make_task(
+         task_object=offtask_goal_object,
+         colors_to_room=colors_to_room,
+         intermediary_reward=self.test_itermediary_rewards)
 
     def update_obs(self, obs):
       obs['task'] = self.task.task_array
+      obs['offtask_goal'] = self.offtask_goal.task_array
       obs['train_tasks'] = self.task_set
       obs['cumulant_mask'] = self.cumulant_mask
       obs['state_features'] = self.task.state_features

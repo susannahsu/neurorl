@@ -368,7 +368,7 @@ def plot_sfgpi(
       axs[base_row+1, col].set_xticklabels(task_labels, rotation=45, fontsize=8)
       axs[base_row+1, col].set_ylim(0, max_q * 1.1)  # Set y-axis limit to 1.
       axs[base_row+1, col].set_title(f"Chosen={chosen_index+1}, a ={name_action(actions[t])}")  # Set y-axis limit to 1.
-      import ipdb; ipdb.set_trace()
+
       #------------------
       # Plot heatmap for train_q_values
       #------------------

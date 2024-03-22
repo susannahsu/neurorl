@@ -182,6 +182,8 @@ class OarTorso(hk.Module):
                flatten_image: bool = True,
                output_fn: Callable[[Image, Task, Action, Reward], Array] = concat,
                w_init: Optional[hk.initializers.Initializer] = None,
+               image_key: str = 'image',
+               normalize_image: bool = True,
                name='torso'):
     super().__init__(name=name)
     if task_encoder is None:
@@ -189,15 +191,17 @@ class OarTorso(hk.Module):
 
     self._num_actions = num_actions
     self._vision_torso = vision_torso
+    self._image_key = image_key
     self._output_fn = output_fn
     self._flatten_image = flatten_image
     self._task_encoder = task_encoder
+    self._normalize_image = normalize_image
     self._w_init = w_init
 
   def __call__(self, inputs: observation_action_reward.OAR):
-    if len(inputs.observation['image'].shape) == 3:
+    if len(inputs.observation[self._image_key].shape) == 3:
       observation_fn = self.unbatched
-    elif len(inputs.observation['image'].shape) == 4:
+    elif len(inputs.observation[self._image_key].shape) == 4:
       observation_fn = jax.vmap(self.unbatched)
     else:
       raise NotImplementedError
@@ -216,7 +220,13 @@ class OarTorso(hk.Module):
 
     # compute image encoding
     inputs = jax.tree_map(lambda x: x.astype(jnp.float32), inputs)
-    image = self._vision_torso(inputs.observation['image']/255.0)
+    image = inputs.observation[self._image_key]
+    if self._normalize_image:
+      image = image/255.0
+    if self._image_key == 'symbolic':
+      image = hk.Linear(128, w_init=hk.initializers.TruncatedNormal())(image)
+      import ipdb; ipdb.set_trace()
+    image = self._vision_torso(image)
     if self._flatten_image:
       image = jnp.reshape(image, (-1))
 

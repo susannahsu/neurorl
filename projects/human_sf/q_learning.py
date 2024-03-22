@@ -150,6 +150,8 @@ def make_minigrid_networks(
     vision_torso = networks.BabyAIVisionTorso(
           conv_dim=config.out_conv_dim, out_dim=config.state_dim)
     observation_fn = networks.OarTorso(
+      image_key='symbols' if config.symbolic else 'image',
+      normalize_image=not config.symbolic,
       num_actions=num_actions,
       vision_torso=vision_torso,
       task_encoder=task_encoder,
