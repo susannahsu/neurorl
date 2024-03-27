@@ -30,7 +30,7 @@ from typing import Optional, NamedTuple, Any, Callable, List, Iterator
 
 from functools import partial
 from absl import flags
-from absl import app
+from absl import app # for app configurations (distributed commandline flags, custom logging modules)
 from acme.jax import experiments
 from acme.utils import loggers
 from acme.utils import paths
@@ -46,9 +46,8 @@ import library.utils as utils
 
 
 # -----------------------
-# flags
+# command line flags definition, using absl library
 # -----------------------
-
 # Flags which modify the behavior of the launcher.
 flags.DEFINE_string('path', '.', 'config file')
 flags.DEFINE_bool(
@@ -57,12 +56,7 @@ flags.DEFINE_bool(
 flags.DEFINE_integer('seed', 0, 'Random seed (experiment).')
 flags.DEFINE_integer('num_steps', 1_000_000,
                      'Number of environment steps to run for.')
-# flags.DEFINE_integer('num_learner_steps', 20_000_000,
-#                      'Number of learner steps to run for.') # Yichen added
-
-# -----------------------
-# wandb
-# -----------------------
+# flags for wandb configurations
 flags.DEFINE_bool('use_wandb', False, 'whether to log.')
 flags.DEFINE_string('wandb_project', None, 'wand project.')
 flags.DEFINE_string('wandb_entity', None, 'wandb entity')
@@ -70,7 +64,7 @@ flags.DEFINE_string('wandb_group', '', 'same as wandb group. way to group runs.'
 flags.DEFINE_string('wandb_name', '', 'name of run. way to group runs.')
 flags.DEFINE_string('wandb_notes', '', 'notes for wandb.')
 flags.DEFINE_string('folder', '', 'folder for experiments.')
-
+# organize all flags
 FLAGS = flags.FLAGS
 
 Seed = int
@@ -253,13 +247,12 @@ def build_online_experiment_config(
       wandb_init_kwargs=wandb_init_kwargs,
       **logger_factory_kwargs,
   )
-
   evaluator_factories = setup_evaluator_factories(
       builder=builder,
       environment_factory=environment_factory,
       network_factory=network_factory,
       logger_factory=logger_factory,
-      observers=observers)
+      observers=observers) 
 
   return experiments.ExperimentConfig(
       builder=builder,

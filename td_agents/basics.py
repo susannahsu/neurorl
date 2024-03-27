@@ -699,6 +699,7 @@ class BasicActor(core.Actor, Generic[actor_core_lib.State, actor_core_lib.Extras
       self._policy = actor.select_action
     self._get_extras = actor.get_extras
     self._per_episode_update = per_episode_update
+    self._observers[0].evaluator = not (per_episode_update)
 
   @property
   def _params(self):

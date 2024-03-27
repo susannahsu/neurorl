@@ -1,8 +1,9 @@
 '''
 use venv: 
 	source acme/bin/activate
-learn to plan using parse, pop, remove, etc.
-suppose we have 3 regions: current stacks, table stacks, goal stacks
+learn to plan in blocksworld using neural actions parse, pop, remove, etc.
+suppose we have 3 segments in the state: current stacks, table stacks, goal stacks
+	(along with other info, e.g. pointer indices, correct history, etc.)
 '''
 import random
 import dm_env
@@ -12,16 +13,16 @@ from acme import types, specs
 from typing import Any, Dict, Optional
 import tree
 import numpy as np
-from envs import mental_blocks_cfg
+from envs.blocksworld import mental_blocks_cfg
 
 class Simulator():
 	def __init__(self, input_stacks, goal_stacks, 
-			  max_stacks=mental_blocks_cfg.MAX_STACKS, 
-			  max_blocks=mental_blocks_cfg.MAX_BLOCKS, 
-			  max_steps=mental_blocks_cfg.MAX_STEPS,
-			  base_block_reward=mental_blocks_cfg.BASE_BLOCK_REWARD, 
-			  reward_decay_factor=mental_blocks_cfg.BLOCK_REWARD_DECAY_FACTOR,
-			  action_cost=mental_blocks_cfg.ACTION_COST,
+			  max_stacks=mental_blocks_cfg.max_stacks, 
+			  max_blocks=mental_blocks_cfg.max_blocks, 
+			  max_steps=mental_blocks_cfg.max_steps,
+			  base_block_reward=mental_blocks_cfg.base_block_reward, 
+			  reward_decay_factor=mental_blocks_cfg.block_reward_decay_factor,
+			  action_cost=mental_blocks_cfg.action_cost,
 			  difficulty=None,
 			  verbose=False):
 		self.max_stacks = max_stacks
@@ -64,8 +65,8 @@ class Simulator():
 													max_num_stacks=self.max_stacks,
 													difficulty=self.difficulty,
 													random_number_generator=random_number_generator,
-													cur_curriculum=mental_blocks_cfg.CURRICULUM)
-		# print(f"\n\n----- reset\ncurriculum={mental_blocks_cfg.CURRICULUM}, difficulty={num_blocks}\ninput stacks={input_stacks}\ngoal stacks={goal_stacks}")
+													cur_curriculum=mental_blocks_cfg.curriculum)
+		# print(f"\n\n----- reset\ncurriculum={mental_blocks_cfg.curriculum}, difficulty={num_blocks}\ninput stacks={input_stacks}\ngoal stacks={goal_stacks}")
 		self.current_time = 0 # reset time 
 		self.state = self.__create_state_representation() # reset state
 		assert self.state.size == self.state_size 
@@ -583,24 +584,40 @@ def _convert_to_spec(space: Any,
 	
 
 
-def create_random_problem(max_num_blocks=mental_blocks_cfg.MAX_BLOCKS, max_num_stacks=mental_blocks_cfg.MAX_STACKS, 
-						  difficulty=None, random_number_generator=np.random, 
+def create_random_problem(max_num_blocks=mental_blocks_cfg.max_blocks, max_num_stacks=mental_blocks_cfg.max_stacks, 
+						  difficulty=None, # specify the number of blocks in puzzle
+						  random_number_generator=np.random, 
 						  cur_curriculum=None):
+	'''
+	Create a random puzzle for blocksworld planning task.
+
+	max_num_blocks: int. maximum number of blocks possible in the initial/goal configuration
+	max_num_stacks: int. maximum number of stacks possible in the initial/goal configuration
+	difficulty: (default None) int. the specific total number of blocks to have in the initial/goal configuration.
+	random_number_generator: function. random function for sampling blocks
+	cur_curriculum: (default None) int [2,...,max_num_blocks], the curriculum, which determines the distribution of total number of blocks in initial/goal config.
+
+	return 
+		num_blocks: int. total number of blocks in the initial or goal config
+		input_stacks: list of list. initial configuration, each inner list is a stack representation, read from bottom to top.
+		goal_stacks: list of list.
+
+	'''
 	while True:
 		# num_blocks = random_number_generator.choice(list(range(2, max_num_blocks+1))) if difficulty==None else difficulty
 		weights = [0.1, 0.1, 0.2, 0.2, 0.2, 0.2] # uniform adjusted to puzzle space
 		if cur_curriculum==None: # fixed curriculum
 			weights = [0.1, 0.1, 0.2, 0.2, 0.2, 0.2] # uniform adjusted to puzzle space
 		elif cur_curriculum == 2: # dynamic curriculum
-			weights = [0.9, 0.02, 0.02, 0.02, 0.02, 0.02]
+			weights = [1, 0, 0, 0, 0, 0]
 		elif cur_curriculum == 3:
-			weights = [0.2, 0.7, 0.025, 0.025, 0.025, 0.025]
+			weights = [0.3, 0.7, 0, 0, 0, 0]
 		elif cur_curriculum == 4:
-			weights = [0.025, 0.2, 0.7, 0.025, 0.025, 0.025]
+			weights = [0.1, 0.2, 0.7, 0, 0, 0]
 		elif cur_curriculum == 5:
-			weights = [0.05, 0.05, 0.1, 0.75, 0.025, 0.025]
+			weights = [0.03, 0.07, 0.15, 0.75, 0, 0]
 		elif cur_curriculum == 6:
-			weights = [0.01, 0.01, 0.02, 0.15, 0.8, 0.01]
+			weights = [0.01, 0.01, 0.03, 0.15, 0.8, 0]
 		elif cur_curriculum == 7:
 			weights = [0.005, 0.015, 0.020, 0.035, 0.075, 0.85]
 		elif cur_curriculum == 0: # all levels finished, stabalize training 
@@ -612,7 +629,7 @@ def create_random_problem(max_num_blocks=mental_blocks_cfg.MAX_BLOCKS, max_num_s
 		for _ in range(max_num_stacks):
 			if len(available_blocks)==0:
 				continue
-			num_blocks_istack = random_number_generator.choice(list(range(len(available_blocks)))) #if max_num_stacks>1 else len(available_blocks)
+			num_blocks_istack = random_number_generator.choice(list(range(len(available_blocks)))) 
 			curstack = []
 			for _ in range(num_blocks_istack):
 				curblock = random_number_generator.choice(available_blocks)
@@ -620,7 +637,7 @@ def create_random_problem(max_num_blocks=mental_blocks_cfg.MAX_BLOCKS, max_num_s
 				available_blocks.remove(curblock)
 			if curstack!=[]:
 				input_stacks.append(curstack)
-		if len(available_blocks) != 0:
+		if len(available_blocks) != 0: # remaining blocks will be added to the last stack
 			random_number_generator.shuffle(available_blocks)
 			if len(input_stacks) == 0:
 				input_stacks.append(available_blocks)
@@ -633,7 +650,7 @@ def create_random_problem(max_num_blocks=mental_blocks_cfg.MAX_BLOCKS, max_num_s
 		for _ in range(max_num_stacks):
 			if len(available_blocks)==0:
 				continue
-			num_blocks_istack = random_number_generator.choice(list(range(len(available_blocks))))# if max_num_stacks>1 else len(available_blocks)
+			num_blocks_istack = random_number_generator.choice(list(range(len(available_blocks))))
 			curstack = []
 			for _ in range(num_blocks_istack):
 				curblock = random_number_generator.choice(available_blocks)
@@ -641,16 +658,15 @@ def create_random_problem(max_num_blocks=mental_blocks_cfg.MAX_BLOCKS, max_num_s
 				available_blocks.remove(curblock)
 			if curstack!=[]:
 				goal_stacks.append(curstack)
-		if len(available_blocks) != 0:
+		if len(available_blocks) != 0: # remaining blocks will be added to the last stack
 			random_number_generator.shuffle(available_blocks)
 			if len(goal_stacks) == 0:
 				goal_stacks.append(available_blocks)
 			else:
 				for ab in available_blocks:
 					goal_stacks[-1].append(ab)		
-		if input_stacks != goal_stacks: # found valid problem
-			break
-	return num_blocks, input_stacks, goal_stacks
+		if input_stacks != goal_stacks: # found valid puzzle config, return
+			return num_blocks, input_stacks, goal_stacks
 
 
 class Test(test_utils.EnvironmentTestMixin, absltest.TestCase):

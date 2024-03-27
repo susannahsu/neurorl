@@ -1,51 +1,17 @@
-"""
-Running experiments:
---------------------
+'''
+run parallel
 
-# DEBUGGING, single stream
-python -m ipdb -c continue configs/imagination_trainer.py \
-  --search='initial' \
-  --parallel='none' \
-  --run_distributed=False \
-  --debug=True \
-  --use_wandb=True \
-  --wandb_entity=wcarvalho92 \
-  --wandb_project=imagination_debug
-
-# DEBUGGING, turn off JIT
-JAX_DISABLE_JIT=1 python -m ipdb -c continue configs/imagination_trainer.py \
-  --search='initial' \
-  --parallel='none' \
-  --run_distributed=False \
-  --debug=True \
-  --use_wandb=False \
-  --wandb_entity=wcarvalho92 \
-  --wandb_project=imagination_debug
-
-
-# DEBUGGING, parallel
-python -m ipdb -c continue configs/imagination_trainer.py \
+python configs/parse_trainer.py \
   --search='initial' \
   --parallel='sbatch' \
-  --debug_parallel=True \
-  --run_distributed=False \
+  --num_actors=1 \
   --use_wandb=True \
-  --wandb_entity=wcarvalho92 \
-  --wandb_project=imagination_debug \
-
-
-# launching jobs on slurm
-python configs/imagination_trainer.py \
-  --search='initial' \
-  --parallel='sbatch' \
+  --partition=gpu \
+  --wandb_entity=yichenli \
+  --wandb_project=parse \
   --run_distributed=True \
-  --use_wandb=True \
-  --partition=kempner \
-  --account=kempner_fellows \
-  --wandb_entity=wcarvalho92 \
-  --wandb_project=imagination
-
-"""
+  --time=0-8:00:00 
+'''
 import functools 
 from typing import Dict
 
@@ -77,14 +43,13 @@ from td_agents import q_learning, basics, muzero
 from library import muzero_mlps
 
 from library.dm_env_wrappers import GymWrapper
-#import library.env_wrappers as env_wrappers
 import library.experiment_builder as experiment_builder
 import library.parallel as parallel
 import library.utils as utils
 import library.networks as networks
 
-from envs.blocksworld import mental_blocks
-from envs.blocksworld import mental_blocks_cfg
+from envs.blocksworld import parse
+from envs.blocksworld import parse_cfg
 
 # -----------------------
 # command line flags definition, using absl library
@@ -113,7 +78,7 @@ class QConfig(q_learning.Config):
   Inheriting from class Config in q_learning.py and basics.py.
 
   If want to use these specific configurations, 
-    need to replace experiment configuration settings with this class.
+    need to replace experiment configuration settings by this class.
   """
   q_dim: int = 512 
   state_dim: int = 512
@@ -122,11 +87,14 @@ class QConfig(q_learning.Config):
 def observation_encoder(
     inputs: acme_wrappers.observation_action_reward.OAR,
     num_actions: int,
-    max_num_stacks: int=mental_blocks_cfg.max_stacks,
-    max_num_blocks: int=mental_blocks_cfg.max_blocks):
+    num_fibers: int,
+    num_areas: int,
+    max_assemblies: int=parse_cfg.max_assemblies,
+    max_num_stacks: int=parse_cfg.max_stacks,
+    max_blocks: int=parse_cfg.max_blocks):
   """
   A neural network to encode the environment observation / state.
-  In the case of blocksworld planning, 
+  In the case of parsing blocks, 
     it creates embeddings for different stacks, pointer info, 
     and embeddings for previous reward and action,
     then it concatenates all embeddings as input.
@@ -136,37 +104,25 @@ def observation_encoder(
     The output of the neural network, ie. the encoded representation.
   """
   # embeddings for different elements in state repr
-  cur_stack_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal())
-  table_stack_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal())
-  goal_stack_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal())
-  intersection_embed = hk.Linear(16, w_init=hk.initializers.TruncatedNormal())
-  cur_pointer_embed = hk.Linear(16, w_init=hk.initializers.TruncatedNormal())
-  table_pointer_embed = hk.Linear(16, w_init=hk.initializers.TruncatedNormal())
-  input_parsed_embed = hk.Linear(8, w_init=hk.initializers.TruncatedNormal())
-  goal_parsed_embed = hk.Linear(8, w_init=hk.initializers.TruncatedNormal())
+  fiber_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal())
+  area_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal())
   # embeddings for prev reward and action
   reward_embed = hk.Linear(16, w_init=hk.initializers.RandomNormal())
   action_embed = hk.Linear(16, w_init=hk.initializers.TruncatedNormal())
   # backbone of the encoder: mlp with relu
-  mlp = hk.nets.MLP([256,256,256], activate_final=False) # default RELU activations between layers (and after final layer)
+  mlp = hk.nets.MLP([256,256,256], activate_final=True) # default RELU activations between layers (and after final layer)
   def fn(x, dropout_rate=None):
     # concatenate embeddings and previous reward and action
     x = jnp.concatenate((
-        cur_stack_embed(x.observation[:max_num_stacks*max_num_blocks, :].reshape(-1)),
-        table_stack_embed(x.observation[max_num_stacks*max_num_blocks:max_num_stacks*max_num_blocks+max_num_blocks, :].reshape(-1)),
-        goal_stack_embed(x.observation[max_num_stacks*max_num_blocks+max_num_blocks:2*max_num_stacks*max_num_blocks+max_num_blocks, :].reshape(-1)),
-        intersection_embed(x.observation[2*max_num_stacks*max_num_blocks+max_num_blocks:2*max_num_stacks*max_num_blocks+max_num_blocks+max_num_stacks, :].reshape(-1)),
-        cur_pointer_embed(x.observation[-4, :].reshape(-1)),
-        table_pointer_embed(x.observation[-3, :].reshape(-1)),
-        input_parsed_embed(x.observation[-2, :].reshape(-1)),
-        goal_parsed_embed(x.observation[-1, :].reshape(-1)),
+        fiber_embed(x.observation[:num_fibers].reshape(-1)),
+        area_embed(jax.nn.one_hot(x.observation[num_fibers:], max_assemblies).reshape(-1)),
         reward_embed(jnp.expand_dims(x.reward, 0)), 
         action_embed(jax.nn.one_hot(x.action, num_actions))  
       ))
     # relu first, then mlp, relu
     x = jax.nn.relu(x)
     x = mlp(x, dropout_rate=dropout_rate)
-    return jax.nn.relu(x)
+    return x
   # If there's a batch dim, applies vmap first.
   has_batch_dim = inputs.reward.ndim > 0
   if has_batch_dim: # have batch dimension
@@ -181,13 +137,14 @@ def make_qlearning_networks(
   """
   Builds default R2D2 networks for Q-learning based on the environment specifications and configurations.
   """
-
   num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum) + 1
+  assert num_actions == parse_cfg.num_actions
 
   def make_core_module() -> q_learning.R2D2Arch:
 
     observation_fn = functools.partial(
-      observation_encoder, num_actions=num_actions)
+      observation_encoder, 
+      num_actions=num_actions, num_fibers=parse_cfg.num_fibers, num_areas=parse_cfg.num_areas)
     return q_learning.R2D2Arch(
       torso=hk.to_module(observation_fn)('obs_fn'),
       memory=networks.DummyRNN(),  # nothing happens
@@ -198,113 +155,6 @@ def make_qlearning_networks(
     env_spec, make_core_module)
 
 
-def make_muzero_networks(
-    env_spec: specs.EnvironmentSpec,
-    config: muzero.Config,
-    **kwargs) -> muzero.MuZeroNetworks:
-  """Builds default MuZero networks for BabyAI tasks."""
-
-  num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum) + 1
-
-  def make_core_module() -> muzero.MuZeroNetworks:
-
-    ###########################
-    # Setup observation and state functions
-    ###########################
-    observation_fn = functools.partial(observation_encoder,
-                                       num_actions=num_actions)
-    observation_fn = hk.to_module(observation_fn)('obs_fn')
-    state_fn = networks.DummyRNN()
-
-    ###########################
-    # Setup transition function: ResNet
-    ###########################
-    def transition_fn(action: int, state: State):
-      action_onehot = jax.nn.one_hot(
-          action, num_classes=num_actions)
-      assert action_onehot.ndim in (1, 2), "should be [A] or [B, A]"
-
-      def _transition_fn(action_onehot, state):
-        """ResNet transition model that scales gradient."""
-        # action: [A]
-        # state: [D]
-        out = muzero_mlps.SimpleTransition(
-            num_blocks=config.transition_blocks)(
-            action_onehot, state)
-        out = muzero.scale_gradient(out, config.scale_grad)
-        return out, out
-
-      if action_onehot.ndim == 2:
-        _transition_fn = jax.vmap(_transition_fn)
-      return _transition_fn(action_onehot, state)
-    transition_fn = hk.to_module(transition_fn)('transition_fn')
-
-    ###########################
-    # Setup prediction functions: policy, value, reward
-    ###########################
-    root_value_fn = hk.nets.MLP(
-        (128, 32, config.num_bins), name='pred_root_value')
-    root_policy_fn = hk.nets.MLP(
-        (128, 32, num_actions), name='pred_root_policy')
-    model_reward_fn = hk.nets.MLP(
-        (32, 32, config.num_bins), name='pred_model_reward')
-
-    if config.seperate_model_nets:
-      # what is typically done
-      model_value_fn = hk.nets.MLP(
-          (128, 32, config.num_bins), name='pred_model_value')
-      model_policy_fn = hk.nets.MLP(
-          (128, 32, num_actions), name='pred_model_policy')
-    else:
-      model_value_fn = root_value_fn
-      model_policy_fn = root_policy_fn
-
-    def root_predictor(state: State):
-      assert state.ndim in (1, 2), "should be [D] or [B, D]"
-
-      def _root_predictor(state: State):
-        policy_logits = root_policy_fn(state)
-        value_logits = root_value_fn(state)
-
-        return muzero.RootOutput(
-            state=state,
-            value_logits=value_logits,
-            policy_logits=policy_logits,
-        )
-      if state.ndim == 2:
-        _root_predictor = jax.vmap(_root_predictor)
-      return _root_predictor(state)
-
-    def model_predictor(state: State):
-      assert state.ndim in (1, 2), "should be [D] or [B, D]"
-
-      def _model_predictor(state: State):
-        reward_logits = model_reward_fn(state)
-
-        policy_logits = model_policy_fn(state)
-        value_logits = model_value_fn(state)
-
-        return muzero.ModelOutput(
-            new_state=state,
-            value_logits=value_logits,
-            policy_logits=policy_logits,
-            reward_logits=reward_logits,
-        )
-      if state.ndim == 2:
-        _model_predictor = jax.vmap(_model_predictor)
-      return _model_predictor(state)
-
-    return muzero.MuZeroArch(
-        observation_fn=observation_fn,
-        state_fn=state_fn,
-        transition_fn=transition_fn,
-        root_pred_fn=root_predictor,
-        model_pred_fn=model_predictor)
-
-  return muzero.make_network(
-    environment_spec=env_spec,
-    make_core_module=make_core_module,
-    **kwargs)
   
 class QObserver(basics.ActorObserver):
   """
@@ -321,11 +171,23 @@ class QObserver(basics.ActorObserver):
     self.prefix = prefix
     self.idx = -1
     self.logging = True
-    self.action_dict = {0:"next_stack", 1:"previous_stack",
-                        2:"next_table", 3:"previous_table",
-                        4:"remove", 5:"add",
-                        6:"parse_input", 7:"parse_goal"}
-    self.evaluator = evaluator # only process curriculum updates during evaluator mode
+    self.action_dict = {0: ('disinhibit_fiber', 'BLOCKS', 'G0_N0'),
+                        1: ('inhibit_fiber', 'BLOCKS', 'G0_N0'),
+                        2: ('disinhibit_fiber', 'BLOCKS', 'G0_N1'),
+                        3: ('inhibit_fiber', 'BLOCKS', 'G0_N1'),
+                        4: ('disinhibit_fiber', 'BLOCKS', 'G0_N2'),
+                        5: ('inhibit_fiber', 'BLOCKS', 'G0_N2'),
+                        6: ('disinhibit_fiber', 'G0_N0', 'G0_N1'),
+                        7: ('inhibit_fiber', 'G0_N0', 'G0_N1'),
+                        8: ('disinhibit_fiber', 'G0_N0', 'G0_N2'),
+                        9: ('inhibit_fiber', 'G0_N0', 'G0_N2'),
+                        10: ('disinhibit_fiber', 'G0_N0', 'G0_H'),
+                        11: ('inhibit_fiber', 'G0_N0', 'G0_H'),
+                        12: ('disinhibit_fiber', 'G0_N1', 'G0_N2'),
+                        13: ('inhibit_fiber', 'G0_N1', 'G0_N2'),
+                        14: ('project_star', None),
+                        15: ('activate_block', 'next'),
+                        16: ('activate_block', 'previous')}
 
   def wandb_log(self, d: dict):
     if self.logging:
@@ -363,7 +225,7 @@ class QObserver(basics.ActorObserver):
     Should be time-step after selecting action"""
     self.timesteps.append(timestep)
 
-  def get_metrics(self, max_steps:int = mental_blocks_cfg.max_steps) -> Dict[str, any]:
+  def get_metrics(self, max_steps:int = parse_cfg.max_steps) -> Dict[str, any]:
     """Returns metrics collected for the current episode."""
     if self.idx==0 or (not self.idx % self.period == 0):
       return
@@ -389,161 +251,46 @@ class QObserver(basics.ActorObserver):
     results["q_values"] = q_values
     results["rewards"] = rewards
     results["observations"] = observations 
-    # # plot reward vs q value pred
-    # fig, ax = plt.subplots()
-    # ax.plot(q_values, label='q_values')
-    # ax.plot(rewards, label='rewards')
-    # ax.set_xlabel('step')
-    # total_reward = rewards.sum()
-    # ax.set_title(f"Total reward:\nR={total_reward}")
-    # ax.legend()
-    # ax.set_ylim(-1.1, 1.1)
-    # ax.set_xlim(0, max_steps)
-    # self.wandb_log({f"{self.prefix}/reward_prediction": wandb.Image(fig)}) # Log the plot to wandb
-    # plt.close(fig) # Close the plot
+    # plot reward vs q value pred
+    fig, ax = plt.subplots()
+    ax.plot(q_values, label='q_values')
+    ax.plot(rewards, label='rewards')
+    ax.set_xlabel('step')
+    total_reward = rewards.sum()
+    ax.set_title(f"Total reward:\nR={total_reward}")
+    ax.legend()
+    ax.set_ylim(-1.1, 1.1)
+    ax.set_xlim(0, max_steps)
+    self.wandb_log({f"{self.prefix}/reward_prediction": wandb.Image(fig)}) # Log the plot to wandb
+    plt.close(fig) # Close the plot
     # plot each state action in the episode
-    fig, ax = plt.subplots(max_steps//10, 10, figsize=(50,9*(max_steps//10))) # 10 plots a row
-    stateh = observations[0].shape[0]
-    statew = observations[0].shape[1]
-    extent = (0, statew, stateh, 0)
-    for t in range(npreds):
-      irow = t//10
-      jcol = t%10
-      ax[irow,jcol].imshow(observations[t], cmap="binary", vmin=0, vmax=1, extent=extent)
-      ax[irow,jcol].grid(color='gray', linewidth=2)
-      ax[irow,jcol].set_xticks(np.arange(statew))
-      ax[irow,jcol].set_yticks(np.arange(stateh))
-      ax[irow,jcol].set_title(f"A={action_names[t]}\nR={rewards[t]}\nQ={q_values[t]}")
-    fig.suptitle(f"Curriculum={mental_blocks_cfg.curriculum}, up_pressure={mental_blocks_cfg.up_pressure}, down_pressure={mental_blocks_cfg.down_pressure}")
-    self.wandb_log({f"{self.prefix}/trajectory": wandb.Image(fig)})
-    plt.close(fig)
+    # fig, ax = plt.subplots(max_steps//10, 10, figsize=(50,9*(max_steps//10))) # 10 plots a row
+    # stateh = observations[0].shape[0]
+    # statew = observations[0].shape[1]
+    # extent = (0, statew, stateh, 0)
+    # for t in range(npreds):
+    #   irow = t//10
+    #   jcol = t%10
+    #   ax[irow,jcol].imshow(observations[t], cmap="binary", vmin=0, vmax=1, extent=extent)
+    #   ax[irow,jcol].grid(color='gray', linewidth=2)
+    #   ax[irow,jcol].set_xticks(np.arange(statew))
+    #   ax[irow,jcol].set_yticks(np.arange(stateh))
+    #   ax[irow,jcol].set_title(f"A={action_names[t]}\nR={rewards[t]}\nQ={q_values[t]}")
+    # self.wandb_log({f"{self.prefix}/trajectory": wandb.Image(fig)})
+    # plt.close(fig)
     
     # current episode reward
     episode_reward = jnp.sum(rewards)
     print('current episode rewards', episode_reward)
+    results['episode_reward'] = episode_reward
     
-    print("\n\n\n self.evaluator", self.evaluator)
-    if not self.evaluator:
-      print("not in eval mode yet, skip curriculum adjustment.")  
-      return
-
-    # determine the next curriculum
-    cur_curriculum = mental_blocks_cfg.curriculum
-    episode_reward_threshold = mental_blocks_cfg.episode_reward_threshold # current upper threshold
-    episode_reward_lb = mental_blocks_cfg.episode_reward_lowerbound if (cur_curriculum==None or cur_curriculum==0) else -(mental_blocks_cfg.episode_reward_lowerbound_factor**cur_curriculum)
-    up_pressure = mental_blocks_cfg.up_pressure # load current up pressure
-    down_pressure = mental_blocks_cfg.down_pressure # load current up pressure
-    if cur_curriculum==None: 
-      print("no dynamic curriculum, use fixed distribution.", cur_curriculum)
-    elif episode_reward > episode_reward_lb and cur_curriculum==0: 
-      print("continuing final stabalizing ", cur_curriculum)
-      episode_reward_threshold = mental_blocks_cfg.threshold3
-      up_pressure, down_pressure = 0, 0
-    elif episode_reward < episode_reward_threshold and cur_curriculum==2: 
-      print("continuing easiest curriculum ", cur_curriculum)
-      episode_reward_threshold = mental_blocks_cfg.threshold1
-      up_pressure, down_pressure = 0, 0
-    elif episode_reward_lb < episode_reward < episode_reward_threshold:
-      print("continuing current curriculum ", cur_curriculum)
-      episode_reward_threshold = mental_blocks_cfg.threshold2 if cur_curriculum==3 else mental_blocks_cfg.threshold3
-      up_pressure, down_pressure = 0, 0
-    elif episode_reward < episode_reward_lb and cur_curriculum==0: 
-      down_pressure += 1 # cumulate down pressure until reach the threshold
-      if down_pressure >= mental_blocks_cfg.down_pressure_threshold: # down pressure enough, decrement
-        cur_curriculum = mental_blocks_cfg.max_blocks # fall back to highest curriculum level
-        print("stop stabalizing, fall back to the highest curriculum ", cur_curriculum)
-        episode_reward_threshold = mental_blocks_cfg.threshold3
-        down_pressure = 0 # reset down pressure
-      up_pressure = 0 # down pressure not enough, only reset up pressure
-    elif episode_reward < episode_reward_lb and cur_curriculum>2: 
-      down_pressure += 1 # culumate pressure until reach the threshold
-      if down_pressure >= mental_blocks_cfg.down_pressure_threshold: # down pressure enough, decrement
-        cur_curriculum -= 1 # fall back to prev curriculum level
-        down_pressure = 0 # reset down pressure
-        print("curriculum decreased to ", cur_curriculum)
-      up_pressure = 0  # down pressure not enough, only reset up pressure
-      if cur_curriculum == 2:
-        episode_reward_threshold = mental_blocks_cfg.threshold1
-      else:
-        episode_reward_threshold = mental_blocks_cfg.threshold3 if cur_curriculum > 3 else mental_blocks_cfg.threshold2
-    elif episode_reward > episode_reward_threshold and cur_curriculum < mental_blocks_cfg.max_blocks:
-      up_pressure += 1 # cumulate up pressure until reach the threshold
-      if up_pressure >= mental_blocks_cfg.up_pressure_threshold: # up pressure enough, increment
-        cur_curriculum += 1 # increase curriculum level
-        up_pressure = 0 # reset up pressure
-        print("curriculum increased to ", cur_curriculum)
-      down_pressure = 0 # up pressure not enough, only reset down pressure
-      episode_reward_threshold = mental_blocks_cfg.threshold2 if cur_curriculum == 3 else mental_blocks_cfg.threshold3
-    elif episode_reward > episode_reward_threshold and cur_curriculum == mental_blocks_cfg.max_blocks:
-      up_pressure += 1 # cumulate up pressure until reach the threshold
-      if up_pressure >= mental_blocks_cfg.up_pressure_threshold: # up pressure enough, increment
-        cur_curriculum = 0 # set to wide distribution to stabalize training
-        print("start final stabalizing, curriculum set to ", cur_curriculum)
-        episode_reward_threshold = mental_blocks_cfg.threshold3
-        up_pressure = 0 # reset up pressure
-      down_pressure = 0 # up pressure not enough, only reset down pressure
-    else:
-      raise ValueError(f"Curriculum determination case not found. cur_curriculum {cur_curriculum}, upper threshold: {episode_reward_threshold}, observer episode reward: {episode_reward}")
-    print(f"\tcur threshold {episode_reward_threshold}, up pressure {up_pressure}, down pressure {down_pressure}")
-    
-    # update values in mental_blocks_cfg.py file to reflect changes
-    mental_blocks_cfg.curriculum = cur_curriculum
-    mental_blocks_cfg.up_pressure = up_pressure
-    mental_blocks_cfg.down_pressure = down_pressure
-    mental_blocks_cfg.episode_reward_threshold = episode_reward_threshold # upper bound episode reward
-    
-    # log results
-    results["curriculum"] = mental_blocks_cfg.curriculum
-    results["up_pressure"] = mental_blocks_cfg.up_pressure
-    results["down_pressure"] = mental_blocks_cfg.down_pressure
-    results["episode_reward_threshold"] = mental_blocks_cfg.episode_reward_threshold
-    results["episode_reward_lb"] = episode_reward_lb
-
     return results
   
-
-class MuObserver(QObserver):
-  def __init__(self,
-               period=5000,
-               prefix: str = 'MuObserver'):
-    super(MuObserver, self).__init__()
-    self.period = period
-    self.prefix = prefix
-  def get_metrics(self, max_steps:int = 100) -> Dict[str, any]:
-    """Returns metrics collected for the current episode."""
-    if not self.idx % self.period == 0:
-      return
-    if not self.logging:
-      return
-    print('\nlogging!')
-    # first prediction is empty (None)
-    npreds = len(self.actor_states[1:])
-    # print(npreds, self.actor_states[1:])
-    actions = jnp.stack(self.actions)[:npreds]
-    action_names = [self.action_dict[a.item()] for a in actions]
-    rewards = jnp.stack([t.reward for t in self.timesteps[1:]])
-    observations = jnp.stack([t.observation.observation for t in self.timesteps[1:]])
-    # plot each state action in the episode
-    fig, ax = plt.subplots(max_steps//10, 10, figsize=(50,9*(max_steps//10))) # 10 plots a row
-    stateh = observations[0].shape[0]
-    statew = observations[0].shape[1]
-    extent = (0, statew, stateh, 0)
-    for t in range(npreds):
-      irow = t//10
-      jcol = t%10
-      ax[irow,jcol].imshow(observations[t], cmap="binary", vmin=0, vmax=1, extent=extent)
-      ax[irow,jcol].grid(color='gray', linewidth=2)
-      ax[irow,jcol].set_xticks(np.arange(statew))
-      ax[irow,jcol].set_yticks(np.arange(stateh))
-      ax[irow,jcol].set_title(f"A={action_names[t]}\nR={rewards[t]}")
-    self.wandb_log({f"{self.prefix}/trajectory": wandb.Image(fig)})
-    plt.close(fig)
-
 def make_environment(seed: int ,
                      difficulty=None, # None or int {2,3,...,max_blocks}
                      evaluation: bool = False,
-                     action_cost: float = 1e-3,
-                     max_steps: int = 100,
+                     action_cost: float = parse_cfg.action_cost,
+                     max_steps: int = parse_cfg.max_steps,
                      **kwargs) -> dm_env.Environment:
   """
   Initializes and wraps the environment simulator with specific settings.
@@ -554,19 +301,13 @@ def make_environment(seed: int ,
   del seed
   del evaluation
   
-  # create dummy problem to initialize the env obj
-  _, input_stacks, goal_stacks = mental_blocks.create_random_problem(difficulty=difficulty, 
-                                                                    cur_curriculum=mental_blocks_cfg.curriculum)
-
-  # create simulator
-  environment = mental_blocks.Simulator(input_stacks=input_stacks, goal_stacks=goal_stacks, 
-                                        action_cost=action_cost, max_steps=max_steps,
-                                        difficulty=difficulty)
-  
+  # create dm_env
+  sim = parse.Simulator(max_blocks=parse_cfg.max_blocks)
+  parse_cfg.num_fibers = sim.num_fibers
+  parse_cfg.num_areas = sim.num_areas
+  parse_cfg.num_actions = sim.num_actions
   rng = np.random.default_rng(1)
-  
-  # dm_env
-  env =  mental_blocks.EnvWrapper(environment, rng)
+  env = parse.EnvWrapper(sim, rng)
 
   # add acme wrappers
   wrapper_list = [
@@ -605,7 +346,7 @@ def setup_experiment_inputs(
       config=config,
       ActorCls=functools.partial(
         basics.BasicActor,
-        observers=[QObserver(period=1 if debug else 100000)],
+        observers=[QObserver(period=1 if debug else 50000)],
         ),
       LossFn=q_learning.R2D2LossFn(
           discount=config.discount,
@@ -616,54 +357,6 @@ def setup_experiment_inputs(
           bootstrap_n=config.bootstrap_n,
       ))
     network_factory = functools.partial(make_qlearning_networks, config=config)
-  elif agent == 'muzero':
-    config = muzero.Config(**config_kwargs)
-
-    import mctx
-    # currently using same policy in learning and acting
-    mcts_policy = functools.partial(
-      mctx.gumbel_muzero_policy,
-      max_depth=config.max_sim_depth,
-      num_simulations=config.num_simulations,
-      gumbel_scale=config.gumbel_scale)
-
-    discretizer = utils.Discretizer(
-                  num_bins=config.num_bins,
-                  max_value=config.max_scalar_value,
-                  tx_pair=config.tx_pair,
-              )
-
-    builder = basics.Builder(
-      config=config,
-      get_actor_core_fn=functools.partial(
-          muzero.get_actor_core,
-          mcts_policy=mcts_policy,
-          discretizer=discretizer,
-      ),
-      ActorCls=functools.partial(
-        basics.BasicActor,
-        observers=[MuObserver(period=1 if debug else 10000)],
-        ),
-      optimizer_cnstr=muzero.muzero_optimizer_constr,
-      LossFn=muzero.MuZeroLossFn(
-          discount=config.discount,
-          importance_sampling_exponent=config.importance_sampling_exponent,
-          burn_in_length=config.burn_in_length,
-          max_replay_size=config.max_replay_size,
-          max_priority_weight=config.max_priority_weight,
-          bootstrap_n=config.bootstrap_n,
-          discretizer=discretizer,
-          mcts_policy=mcts_policy,
-          simulation_steps=config.simulation_steps,
-          #reanalyze_ratio=config.reanalyze_ratio,
-          reanalyze_ratio=0.25, # how frequently to tune value loss wrt tree node values (faster but less accurate)
-          root_policy_coef=config.root_policy_coef,
-          root_value_coef=config.root_value_coef,
-          model_policy_coef=config.model_policy_coef,
-          model_value_coef=config.model_value_coef,
-          model_reward_coef=config.model_reward_coef,
-      ))
-    network_factory = functools.partial(make_muzero_networks, config=config)
   else:
     raise NotImplementedError(agent)
 
@@ -886,35 +579,17 @@ def sweep(search: str = 'default'):
   if search == 'initial':
     space = [
         {
-            "group": tune.grid_search(['51Q']),
-            "num_steps": tune.grid_search([200e6]),
-            "env.action_cost": tune.grid_search([1e-2]),
+            "group": tune.grid_search(['1P']),
+
+            "num_steps": tune.grid_search([50e6]),
             "max_grad_norm": tune.grid_search([80.0]),
             "learning_rate": tune.grid_search([1e-4]),
             "epsilon_begin": tune.grid_search([0.9]),
-            # "seed": tune.grid_search([1]), 
-
-            # "agent": tune.grid_search(['muzero']),
-            # "num_bins": tune.grid_search([1001]),  # for muzero
-            # "num_simulations": tune.grid_search([5]), # for muzero
-
             "agent": tune.grid_search(['qlearning']),
             "state_dim": tune.grid_search([512]),
             "q_dim": tune.grid_search([512]),
-            # "env.difficulty": tune.grid_search([6]),
         }
     ]
-  elif search == 'muzero':
-    space = [
-        {
-            "agent": tune.grid_search(['muzero']),
-            "num_steps": tune.grid_search([50e6]),
-            "seed": tune.grid_search([1]),
-            # "seed": tune.grid_search([1]),
-            "env.difficulty": tune.grid_search([2,3,7]),
-        }
-    ]
-
   else:
     raise NotImplementedError(search)
 
