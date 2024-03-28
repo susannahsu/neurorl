@@ -1,14 +1,11 @@
 '''
 learning parse 1 stack of blocks into the brain
 '''
-from envs.blocksworld.AC.bw_apps import *
-from envs.blocksworld import parse_cfg
-from envs.blocksworld import utils
+import numpy as np
+import random
 
-import copy
-import pprint
-import sys
-import itertools
+from envs.blocksworld.cfg import configurations
+from envs.blocksworld import utils
 
 import dm_env
 from dm_env import test_utils
@@ -17,54 +14,35 @@ from acme import types, specs
 from typing import Any, Dict, Optional
 import tree
 
+cfg = configurations['parse']
 
 class Simulator():
+	# brain only represent 1 stack
 	def __init__(self, 
-					max_blocks, # max number of blocks to parse
-					max_stacks = parse_cfg.max_stacks, # default 1, brain should only take 1 stack
-					max_steps = parse_cfg.max_steps,
-					action_cost = parse_cfg.action_cost,
-					reward_decay_factor = parse_cfg.reward_decay_factor,
-					episode_max_reward = parse_cfg.episode_max_reward,
-					verbose=False):
-		prefix = "G"
-		node_areas = []
-		for j in range(max_stacks):
-			node_areas_stack_j = []
-			for k in range(MAX_NODES_AREAS):
-				node_areas_stack_j.append(str(j)+"_N"+str(k))
-			node_areas.append(node_areas_stack_j)
-		node_areas = node_areas
-		head_areas = []
-		for j in range(max_stacks):
-			head_areas.append(str(j)+"_H")
-		regions = []
-		for j in range(max_stacks):
-			regions_stack_j = node_areas[j] + [head_areas[j]]
-			regions.append(regions_stack_j)
-		print(f"parse.py Simulator max_stacks={max_stacks}, regions={regions}")
-		oa = add_prefix(regions=[item for sublist in regions for item in sublist], prefix=prefix)
-		oa = oa + [RELOCATED]
-		self.prefix = prefix
-		self.other_areas = oa
-		self.all_areas = [BLOCKS]
-		self.all_areas.extend(self.other_areas) 
-		self.head = [element for element in self.all_areas if '_H' in element][0]
-		self.action_dict = self.__create_action_dictionary() 
-		self.num_actions = len(self.action_dict)
-
-		self.action_cost = action_cost
-		self.verbose = verbose
-		self.max_steps = max_steps # max steps allowed in episode
+				max_blocks = cfg['max_blocks'], # max number of blocks to parse
+				max_steps = cfg['max_steps'],
+				action_cost = cfg['action_cost'],
+				reward_decay_factor = cfg['reward_decay_factor'],
+				episode_max_reward = cfg['episode_max_reward'],
+				skip_relocated = cfg['skip_relocated'],
+				verbose=False):
+		self.all_areas, self.head, self.relocated_area, self.blocks_area = utils.init_simulator_areas()
 		self.max_blocks = max_blocks
-		self.episode_max_reward = episode_max_reward
+		self.max_steps = max_steps # max steps allowed in episode
+		self.action_cost = action_cost
 		self.reward_decay_factor = reward_decay_factor
+		self.episode_max_reward = episode_max_reward
+		self.skip_relocated = skip_relocated
+		self.verbose = verbose
+		self.action_dict = self.create_action_dictionary() 
+		self.num_actions = len(self.action_dict)
 
 		self.num_blocks = max_blocks # TODO: make it random
 		self.goal = list(range(self.num_blocks))# TODO: randomly shuffle block id
+
 		self.correct_record = np.zeros_like(self.goal) # binary record for how many blocks are correct
-		self.unit_reward = self.episode_max_reward / sum([self.reward_decay_factor**(b+1) for b in range(len(self.goal))])
-		self.state, self.state_change_dict, self.area_state_dict, self.fiber_state_dict, self.assembly_dict, self.last_active_assembly = self.__create_state_representation()
+		self.unit_reward = utils.calculate_unit_reward(self.reward_decay_factor, len(self.goal), self.episode_max_reward)
+		self.state, self.state_change_dict, self.area_state_dict, self.fiber_state_dict, self.assembly_dict, self.last_active_assembly = self.create_state_representation()
 		self.num_fibers = len(self.fiber_state_dict.keys())
 		self.num_areas = len(self.area_state_dict.keys())
 		self.num_assemblies = 0 # total number of assemblies ever created
@@ -74,18 +52,29 @@ class Simulator():
 		
 		
 	def reset(self, num_blocks=None, random_number_generator=np.random):
+		'''
+		Reset environment for new episode.
+		Return:
+			state: (numpy array with float32)
+			info: (any=None)
+		'''
 		self.num_blocks = self.max_blocks if num_blocks==None else num_blocks # TODO: make it random
 		self.goal = list(range(self.num_blocks)) # TODO: make it random
-		self.unit_reward = self.episode_max_reward / sum([self.reward_decay_factor**(b+1) for b in range(len(self.goal))])
-		self.state, self.state_change_dict, self.area_state_dict, self.fiber_state_dict, self.assembly_dict, self.last_active_assembly = self.__create_state_representation()
+		self.unit_reward = utils.calculate_unit_reward(self.reward_decay_factor, len(self.goal), self.episode_max_reward)
+		self.state, self.state_change_dict, self.area_state_dict, self.fiber_state_dict, self.assembly_dict, self.last_active_assembly = self.create_state_representation()
 		self.all_correct = False # if the brain has represented all blocks correctly
 		self.correct_record = np.zeros_like(self.goal)
 		self.num_assemblies = 0
 		self.just_projected = False
 		self.current_time = 0
-		return self.state.copy(), None
+		info = None
+		return self.state.copy(), info
 
 	def close(self):
+		'''
+		Close and clear the environment.
+		Return nothing.
+		'''
 		self.current_time = 0
 		self.state = None
 		self.state_change_dict = None 
@@ -100,6 +89,11 @@ class Simulator():
 		return 
 
 	def sample_expert_demo(self, nblocks=None):
+		'''
+		Return:
+			expert_demo: (list of int)
+				list of expert actions to solve the puzzle.
+		'''
 		# [15,10,0,  14,   11,1, 15,6,2,  14,   7,3, 15,12,4,  14,   13,5, 0,8,15,  14,   1,9, 2,6,15,  14,   3,7, 4,12,15,  14]
 		actions_block0 = [15,10,0] # optimal action indices for parsing first block
 		actions_block1 = [11,1,15,6,2] # ... for parsing the second block
@@ -140,7 +134,12 @@ class Simulator():
 
 	def step(self, action_idx):
 		'''
-		Return: new state, reward, terminated, truncated, info
+		Return: 
+			state: (numpy array with float32)
+			reward: (float)
+			terminated: (boolean)
+			truncated: (boolean)
+			info: (any=None)
 		'''
 		action_tuple = self.action_dict[int(action_idx)] # (action name, *kwargs)
 		action_name = action_tuple[0]
@@ -158,27 +157,27 @@ class Simulator():
 			self.state[state_change_tuple[0]] = state_change_tuple[1] # update state
 			self.just_projected = False
 		elif action_name == "project_star": # state_change_tuple = ([],[]) 
-			astart = area_state_dict[BLOCKS] # starting index of area state including blocks area 
+			astart = area_state_dict[self.blocks_area] # starting index of area state including blocks area 
 			if [*self.last_active_assembly.values()].count(-1)==len(self.last_active_assembly): # BAD, project when no active winners exist
 				reward -= self.action_cost 
 			elif self.just_projected: # BAD, consecutive project
 				reward -= self.action_cost
 			else: # GOOD, valid project
-				self.state, self.assembly_dict, self.fiber_state_dict, self.last_active_assembly, self.num_assemblies = utils.synthetic_project(self.state, self.assembly_dict, self.fiber_state_dict, self.last_active_assembly, self.num_assemblies, self.verbose)
+				self.assembly_dict, self.last_active_assembly, self.num_assemblies = utils.synthetic_project(self.state, self.assembly_dict, self.fiber_state_dict, self.last_active_assembly, self.num_assemblies, self.verbose, blocks_area=self.blocks_area)
 				for area_name in self.last_active_assembly.keys():  # update state for each area
-					if (parse_cfg.skip_relocated and area_name==RELOCATED) or (area_name==BLOCKS):
+					if (self.skip_relocated and area_name==self.relocated_area) or (area_name==self.blocks_area):
 						continue # only node and head areas need to update
 					# update last active assembly in state 
 					self.state[self.area_state_dict[area_name]] = self.last_active_assembly[area_name] 
-					# update the number of BLOCKS related assemblies in this area
+					# update the number of self.blocks_area related assemblies in this area
 					count = 0 
 					for assembly_info in self.assembly_dict[area_name]:
 						connected_areas, connected_assemblies = assembly_info[0], assembly_info[1]
-						if BLOCKS in connected_areas:
+						if self.blocks_area in connected_areas:
 							count += 1
 					self.state[self.area_state_dict[area_name]+1] = count
 				# readout stack	
-				readout = utils.synthetic_readout(self.assembly_dict, self.last_active_assembly, self.head, self.num_blocks)
+				readout = utils.synthetic_readout(self.assembly_dict, self.last_active_assembly, self.head, self.num_blocks, self.blocks_area)
 				r, self.all_correct, self.correct_record = utils.calculate_readout_reward(readout, self.goal, self.correct_record, self.unit_reward, self.reward_decay_factor)
 				reward += r 
 			self.just_projected = True
@@ -189,7 +188,7 @@ class Simulator():
 				reward -= self.action_cost
 			else: # GOOD, valid activate
 				self.state[state_change_tuple[0]] = newbidx # update block id in state vec
-				self.last_active_assembly[BLOCKS] = newbidx # update the last active assembly
+				self.last_active_assembly[self.blocks_area] = newbidx # update the last active assembly
 				if bidx == -1: # if no block activated before, and now has activated
 					self.num_assemblies += 1 # increment assembly number record
 			self.just_projected = False
@@ -203,26 +202,32 @@ class Simulator():
 
 
 		
-	def __create_state_representation(self):
+	def create_state_representation(self):
 		'''
 		Initialize the episode state in the environmenmt. 
 		Return:
-			state: state representation (numpy array float32)
+			state: (numpy array with float32)
+				state representation
 				[fiber inhibition status...,
 				last activated assembly idx in the area, number of blocks-connected assemblies in the area, ...]
-			dictionary: map action index to change in state vector
+			dictionary: (dict)
+				map action index to change in state vector
 				{action_idx: ([state vector indices needed to be modified], [new values in these state indices])}
-			area_state_dict: map area name to indices in state vector
+			area_state_dict: (dict)
+				map area name to indices in state vector
 				{area: [corresponding indices in state vector]}
-			fiber_state_dict: mapping state vector index to fiber between two areas
+			fiber_state_dict: (dict)
+				mapping state vector index to fiber between two areas
 				{state idx: (area1, area2)}
-			assembly_dict: dictionary storing assembly associations that currently exist in the brain
+			assembly_dict: (dict)
+				dictionary storing assembly associations that currently exist in the brain
 				{area: [assembly_idx0[source areas[A0, A1], source assembly_idx[a0, a1]], 
 						assembly_idx1[[A3], [a3]], 
 						assembly_idx2[[A4], [a4]], 
 						...]}
 				i.e. area has assembly_idx0, which is associated/projected from area A0 assembly a0, and area A1 assembly a1
-			last_active_assembly: dictionary storing the latest activated assembly idx in each area
+			last_active_assembly: (dict)
+				dictionary storing the latest activated assembly idx in each area
 				{area: assembly_idx}
 				assembly_idx = -1 means that no previously activated assembly exists
 		'''
@@ -238,12 +243,12 @@ class Simulator():
 		# encode fiber inhibition status
 		area_pairs = [] # record pairs of areas already visited
 		for area1 in self.all_areas:
-			if parse_cfg.skip_relocated and area1==RELOCATED:
+			if self.skip_relocated and area1==self.relocated_area:
 				continue
 			last_active_assembly[area1] = -1
 			assembly_dict[area1] = [] # will become {area: [a_id 0[source a_name[A1, A2], source a_id [a1, a2]], 1[[A3], [a3]], 2[(A4, a4)], ...]}
 			for area2 in self.all_areas:
-				if parse_cfg.skip_relocated and area2==RELOCATED:
+				if self.skip_relocated and area2==self.relocated_area:
 					continue
 				if area1 == area2: # no need for fiber to the same area itself
 					continue
@@ -268,14 +273,14 @@ class Simulator():
 		# information for project star
 		dictionary[action_idx] = ([],[]) # no pre-specified new state values
 		action_idx += 1
-		# encode area state (i.e. most recent assembly idx in each area, and the number of BLOCKS-related assemblies in each area)
+		# encode area state (i.e. most recent assembly idx in each area, and the number of self.blocks_area-related assemblies in each area)
 		# no need to encode area inhibition status since assuming action bundle
 		for area_name in self.all_areas: # iterate all areas
-			if parse_cfg.skip_relocated and area_name==RELOCATED:
+			if self.skip_relocated and area_name==self.relocated_area:
 				continue
 			# store the starting state vec index for current area
 			area_state_dict[area_name] = state_vector_idx
-			if area_name==BLOCKS: # the state of blocks area only occupies one index
+			if area_name==self.blocks_area: # the state of blocks area only occupies one index
 				blocks_state_idx = state_vector_idx
 				state_vec.append(-1) # most recent assembly idx, -1 meaning no assembly record
 				state_vector_idx += 1
@@ -283,7 +288,7 @@ class Simulator():
 			else:
 				state_vec.append(-1) # most recent assembly idx, -1 meaning no assembly record
 				state_vector_idx += 1 # increment current index
-				state_vec.append(0) # number of BLOCKS-connected assemblies
+				state_vec.append(0) # number of self.blocks_area-connected assemblies
 				state_vector_idx += 1
 		# info for activate next block
 		dictionary[action_idx] = (blocks_state_idx, +1) 
@@ -291,27 +296,28 @@ class Simulator():
 		# info for activate previous block
 		dictionary[action_idx] = (blocks_state_idx, -1) 
 		# initialize assembly dict for blocks area
-		assembly_dict[BLOCKS] = [[[],[]] for _ in range(self.num_blocks)] 
+		assembly_dict[self.blocks_area] = [[[],[]] for _ in range(self.num_blocks)] 
 		return np.array(state_vec, dtype=np.float32), dictionary, \
 				area_state_dict, fiber_state_dict, assembly_dict, last_active_assembly
 
 
-	def __create_action_dictionary(self):
+	def create_action_dictionary(self):
 		'''
 		Create action dictionary: a dict that contains mapping of action index to action name
-		Return dictonary {action_idx : (action name, *kwargs)}
+		Assuming action bundle: disinhibit_fiber entails disinhibiting the two areas and the fiber, opening the fibers in both directions
+		Return:
+			dictonary: (dict) 
+				{action_idx : (action name, *kwargs)}
 		'''
-		# action bundle: disinhibit_fiber entails disinhibiting the two areas and the fiber
-		# disinhibit_fiber entails opening the fibers in both directions
 		idx = 0 # action idx
 		dictionary = {} # action idx --> action name
 		area_pairs = [] # store pairs of areas already visited
 		# disinhibit and inhibit fibers
 		for area1 in self.all_areas:
-			if parse_cfg.skip_relocated and area1==RELOCATED:
+			if self.skip_relocated and area1==self.relocated_area:
 				continue
 			for area2 in self.all_areas:
-				if parse_cfg.skip_relocated and area2==RELOCATED:
+				if self.skip_relocated and area2==self.relocated_area:
 					continue
 				if area1 == area2: # no need for fiber to the same area itself
 					continue
@@ -340,7 +346,7 @@ class Simulator():
 def test_simulator(max_blocks=7, expert=True, repeat=10, verbose=False):
 	import time
 	sim = Simulator(max_blocks=max_blocks, verbose=verbose)
-	pprint.pprint(sim.action_dict)
+	print(sim.action_dict)
 	start_time = time.time()
 	print(f'initial state: {sim.state}')
 	for num_blocks in range(1, max_blocks+1):
@@ -354,7 +360,7 @@ def test_simulator(max_blocks=7, expert=True, repeat=10, verbose=False):
 				next_state, reward, terminated, truncated, info = sim.step(action_idx)
 				rtotal += reward
 				print(f't={t}, r={reward}, action={action_idx} {sim.action_dict[action_idx]}, done={terminated}, truncated={truncated}, \n\tnext state={next_state}')
-			readout = utils.synthetic_readout(sim.assembly_dict, sim.last_active_assembly, sim.head, len(sim.goal))
+			readout = utils.synthetic_readout(sim.assembly_dict, sim.last_active_assembly, sim.head, len(sim.goal), sim.blocks_area)
 			print(f'\nend of episode, synthetic readout {readout}, total reward={rtotal}')
 			print(f'episode time lapse: {time.time()-start_time}')
 			if expert:
@@ -385,7 +391,6 @@ class EnvWrapper(dm_env.Environment):
 
 	def reset(self) -> dm_env.TimeStep:
 		self._reset_next_step = False
-		# self.rng = np.random.default_rng(self.rng.integers(low=0, high=100)) # refresh the rng
 		self.rng = np.random.default_rng(random.randint(0,100)) # refresh the rng
 		observation, info = self._environment.reset(random_number_generator=self.rng)
 		self._last_info = info
@@ -459,7 +464,7 @@ def _convert_to_spec(space: Any,
 			name=name
 		)
 	elif isinstance(space, np.ndarray): # observation
-		min_val, max_val = space.min(), 20
+		min_val, max_val = space.min(), cfg['max_assemblies']
 		try:
 			assert name=='observation'
 		except:	

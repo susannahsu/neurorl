@@ -1,46 +1,160 @@
+import copy
+import itertools
+import pprint
+import numpy as np
 
-def top(assembly_dict, last_active_assembly, head):
+from envs.blocksworld.AC import bw_apps
+
+
+def init_simulator_areas(max_stacks=1, 
+							max_node_areas=3, 
+							prefix="G", 
+							relocated_area="RELOCATED", 
+							blocks_area="BLOCKS"):
 	'''
-	Return: top area name, top area assembly id, top block idx
+	Initialize the list of area names in the brain, and the head area name.
+	Input:
+		max_stacks: (int = 1)
+			max number of stacks that a brain can represent. 
+			should be 1 for parse/add/remove/plan simulator.
+		max_node_areas: (int = 3)
+			number of node areas in the brain, not including the head area.
+		prefix: (string = "G")
+			prefix attached to each area name
+		relocated_area: (string = "RELOCATED")
+			name of the relocated area in the brain.
+			usually this area is ignored in the simulator.
+		blocks_area: (string = "BLOCKS")
+			name of the blocks area (i.e. the lexicon area)
+	Return:
+		all_areas: (list of strings)
+			list containing the names of all areas in the brain (including head, nodes, blocks, and relocated)
+		head: (string)
+			the name of the head area
+	'''
+	assert max_stacks == 1, f"envs.blocksworld.utils max_stacks should be 1, but has {max_stacks}"
+	# generate names for node areas
+	node_areas = []
+	for j in range(max_stacks):
+		node_areas_stack_j = []
+		for k in range(max_node_areas):
+			node_areas_stack_j.append(str(j)+"_N"+str(k))
+		node_areas.append(node_areas_stack_j)
+	node_areas = node_areas
+	head_areas = []
+	for j in range(max_stacks):
+		head_areas.append(str(j)+"_H")
+	regions = [] # all areas together
+	for j in range(max_stacks):
+		regions_stack_j = node_areas[j] + [head_areas[j]]
+		regions.append(regions_stack_j)
+	other_areas = bw_apps.add_prefix(regions=[item for sublist in regions for item in sublist], prefix=prefix)
+	other_areas = other_areas + [relocated_area]
+	all_areas = [blocks_area]
+	all_areas.extend(other_areas) 
+	head = [element for element in all_areas if '_H' in element][0]
+	return all_areas, head, relocated_area, blocks_area
+
+
+def top(assembly_dict, 
+		last_active_assembly, 
+		head, 
+		blocks_area="BLOCKS"):
+	'''
+	Get the top area in the brain, this will be the area that directly connects from head area.
+	Input: (can be retrieved from Simulator)
+		assembly_dict: (dict) 
+			dictionary of assembly associations that currently exist in the brain
+			{area: [assembly_idx0[source areas[A0, A1], source assembly_idx[a0, a1]], 
+					assembly_idx1[[A3], [a3]], 
+					assembly_idx2[[A4], [a4]], 
+					...]}
+			i.e. area has assembly_idx0, which is associated/projected from area A0 assembly a0, and area A1 assembly a1
+		last_active_assembly: (dict) 
+			the latest activated assembly idx in each area
+			{area: assembly_idx}
+			assembly_idx = -1 means that no previously activated assembly exists
+		head: (string) 
+			the head node area's name in the brain
+	Return: 
+		area: (string)
+			top area name
+		a: (int)
+			top area assembly id
+		bid: (int)
+			top block idx
 	'''
 	if last_active_assembly[head] == -1:
 		return None, None, None
 	area, a, bid = None, None, None
 	candidate_areas, candidate_as = assembly_dict[head][last_active_assembly[head]]
 	for area, a in zip(candidate_areas, candidate_as):
-		if BLOCKS in assembly_dict[area][a][0]:
-			idx = assembly_dict[area][a][0].index(BLOCKS)
+		if blocks_area in assembly_dict[area][a][0]:
+			idx = assembly_dict[area][a][0].index(blocks_area)
 			bid = assembly_dict[area][a][1][idx]
 			area = area
 			a = a
 			bid = bid
 	return area, a, bid
 
-def is_last_block(assembly_dict, head, top_area, top_area_a):
+
+def is_last_block(assembly_dict, 
+					head, 
+					top_area, 
+					top_area_a, 
+					blocks_area="BLOCKS"):
 	'''
-	Return True if the top_area_a assembly in top_area is the last block in the chain
+	Check if top_area_a assembly in top_area represents the last block in the chain
 	'''
-	if top_area==None:
+	if top_area==None: # no top area given
 		return True
-	# check if the block encoded in top area assembly a is the only block in the brain
-	for A in assembly_dict[top_area][top_area_a][0]:
-		if A != BLOCKS and A != head: # assembly is connected with other node areas
+	for A in assembly_dict[top_area][top_area_a][0]: # check if the block encoded in top area assembly a is the only block in the brain
+		if A != blocks_area and A != head: # assembly is connected with other node areas
 			if ('_N0' in top_area and '_N1' in A) or ('_N1' in top_area and '_N2' in A) or ('_N2' in top_area and '_N0' in A):
 				return False
 	return True
 
-def all_fiber_closed(state, fiber_state_dict):
+
+def all_fiber_closed(state, 
+						fiber_state_dict):
 	'''
-	Check the state vector and return True if all fibers are closed, False otherwise.
+	Check whether all fibers in the state vector are closed.
+	Input:
+		fiber_state_dict: (dict)
+			mapping state vector index to fiber between two areas
+			{state idx: (area1, area2)}
+	Return: True or False
 	'''
 	return np.all([state[i]==0 for i in fiber_state_dict.keys()])
 
 
-def synthetic_readout(assembly_dict, last_active_assembly, head, readout_length):
+def synthetic_readout(assembly_dict, 
+						last_active_assembly, 
+						head, 
+						readout_length, 
+						blocks_area="BLOCKS"):
 	'''
-	Read out the current chain of blocks representation from the brain.
-		Assuming the brain only represents max 1 stack. 
-	Return a list of blocks (chained from head/top to bottom).
+	Read out the current chain of blocks representation from the brain. (Assuming the brain only represents max 1 stack.)
+	Input: (most of them can be retrieved from Simulator)
+		assembly_dict: (dict) 
+			assembly associations that currently exist in the brain
+			{area: [assembly_idx0[source areas[A0, A1], source assembly_idx[a0, a1]], 
+					assembly_idx1[[A3], [a3]], 
+					assembly_idx2[[A4], [a4]], 
+					...]}
+			i.e. area has assembly_idx0, which is associated/projected from area A0 assembly a0, and area A1 assembly a1
+		last_active_assembly: (dict) 
+			the latest activated assembly idx in each area
+			{area: assembly_idx}
+			assembly_idx = -1 means that no previously activated assembly exists
+		head: (string) 
+			the head node area's name in the brain
+		readout_length: (int) 
+			length of the readout list (i.e. number of blocks)
+	Return:
+		readout: (list of int) 
+			list of blocks readout from the brain (chained from head/top to bottom).
+			will be of length readout_length. invalid/empty block locations will be filled with None.
 	'''
 	readout = [] # list of blocks (assuming only 1 stack in the brain)
 	if len(assembly_dict[head])==0 or last_active_assembly[head]==-1:
@@ -55,17 +169,17 @@ def synthetic_readout(assembly_dict, last_active_assembly, head, readout_length)
 		if area==None and area_a==None: # if current area is not available
 			readout.append(None)
 			continue
-		elif BLOCKS in assembly_dict[area][area_a][0]: # if current area is connected with BLOCKS, decode
-			ba = assembly_dict[area][area_a][0].index(BLOCKS)
+		elif blocks_area in assembly_dict[area][area_a][0]: # if current area is connected with blocks_area, decode
+			ba = assembly_dict[area][area_a][0].index(blocks_area)
 			bidx = assembly_dict[area][area_a][1][ba]
 			readout.append(bidx)
-		else: # current area is not connected with BLOCKS
+		else: # current area is not connected with blocks_area
 			readout.append(None)
 		# find the next area to decode
 		areas_from_area, aidx_from_area = assembly_dict[area][area_a] # assemblies connected with current area
 		new_area, new_area_a = None, None 
 		for A, a in zip(areas_from_area, aidx_from_area): # iterate through current assembly's connections
-			if (A != BLOCKS) and (A != prev_area): # next area to decode
+			if (A != blocks_area) and (A != prev_area): # next area to decode
 				if ('_N0' in area and '_N1' in A) or ('_N1' in area and '_N2' in A) or ('_N2' in area and '_N0' in A):
 					new_area, new_area_a = A, a
 					break
@@ -74,9 +188,15 @@ def synthetic_readout(assembly_dict, last_active_assembly, head, readout_length)
 	return readout
 
 
-def check_prerequisite(arr, k, value=1):
+def check_prerequisite(arr, 
+						k, 
+						value=1):
 	'''
-	Return True if the first k elements in arr are all equal to value.
+	Check if the first k elements in arr are all equal to value.
+	Input: 
+		arr: (list or numpy array)
+		k: (int)
+		value: (int or float)
 	'''
 	if len(arr) < k:
 		raise ValueError(f"!!!Warning, in utils.check_prerequisite, k={k} is out of range {len(arr)}")
@@ -86,12 +206,57 @@ def check_prerequisite(arr, k, value=1):
 	return True
 
 
-def calculate_readout_reward(readout, goal, correct_record, unit_reward, reward_decay_factor):
+def calculate_unit_reward(reward_decay_factor, 
+							num_items, 
+							episode_max_reward=1):
+	'''
+	Calculate the unit reward to use for the episode. 
+	This will ensure that the total episode reward will be episode_max_reward + action costs.
+	Assume there will be reward given for each correct item in the list (e.g. each block correct in parse/add/remove/plan).
+	Input:
+		reward_decay_factor: (float > 0)
+			reward for getting item at index i correct = unit_reward * (reward_decay_factor**i).
+			for descending reward (first index is most rewarding), use 0 < factor < 1
+			for ascending reward (last index is most reward), use factor > 1
+		num_items: (int)
+			total number of items that can receive correct reward in the episode.
+			e.g. total number of blocks to parse
+		episode_max_reward: (float = 1)
+	Return:
+		unit_reward: (float)
+	'''
+	return episode_max_reward / sum([reward_decay_factor**i for i in range(num_items)])
+
+
+def calculate_readout_reward(readout, 
+								goal, 
+								correct_record, 
+								unit_reward, 
+								reward_decay_factor):
 	'''
 	Calculate score by comparing current readout with goal. 
 		Reward decays from top to bottom block.
 		Reward a block only if all its previous (higher) blocks are correct.
-	Return: reward, all_correct (boolean), correct_record (binary array)
+	Input: 
+		readout: (list or numpy array of int)
+			current readout from the brain (chain of blocks from top to bottom)
+		goal: (list of int)
+			the goal chain of blocks (from top to bottom) to be matched
+		correct_record: (numpy array with binary values)
+			binary record fro how many blocks are already correct in this episode (index 0 records 1-block-correct).
+			will not get reward anymore if the index was already correct in the episode.
+		unit_reward: (float)
+			the smallest amount of reward to give for a correct index.
+		reward_decay_factor: (float)
+			scaling factor applied on the unit_reward when assigning reward.
+			each correct index will get a reward that is exponential to the unit_reward by this factor.
+			for example, reward for getting index i correct = unit_reward * (reward_decay_factor**i).
+			for descending reward (first index is most rewarding), use 0 < factor < 1
+			for ascending reward (last index is most reward), use factor > 1
+	Return: 
+		reward: (float)
+		all_correct: (boolean)
+		correct_record: (numpy array with binary values)
 	'''
 	score = 0
 	num_correct = 0
@@ -102,13 +267,50 @@ def calculate_readout_reward(readout, goal, correct_record, unit_reward, reward_
 			num_correct += 1
 			# only reward new correct blocks in this episode
 			if correct_record[jblock]==0 and check_prerequisite(prerequisite, jblock):
-				score += unit_reward * (reward_decay_factor**(jblock+1)) # reward decays by position: first block is most rewarding
+				score += unit_reward * (reward_decay_factor**jblock) # reward scales by position
 				correct_record[jblock] = 1 # set the block record to 1, record correct history for episode
 	all_correct = (num_correct > 0) and (num_correct == len(goal))
 	return score, all_correct, correct_record
 
 
-def synthetic_project(state, assembly_dict, fiber_state_dict, last_active_assembly, num_assemblies, verbose=False, max_project_round=5):
+def synthetic_project(state, 
+						assembly_dict, 
+						fiber_state_dict, 
+						last_active_assembly,
+						num_assemblies, 
+						verbose=False, 
+						max_project_round=5, 
+						blocks_area="BLOCKS"):
+	'''
+	Strong project with symbolic assemblies.
+	Input: (most of them can be retrieved from Simulator)
+		state: (numpy array with float32)
+			state vector, used for forming projection map
+		assembly_dict: (dict)
+			dictionary storing assembly associations that currently exist in the brain
+			{area: [assembly_idx0[source areas[A0, A1], source assembly_idx[a0, a1]], 
+					assembly_idx1[[A3], [a3]], 
+					assembly_idx2[[A4], [a4]], 
+					...]}
+			i.e. area has assembly_idx0, which is associated/projected from area A0 assembly a0, and area A1 assembly a1
+		fiber_state_dict: (dict)
+			mapping state vector index to fiber between two areas
+			{state idx: (area1, area2)}
+		last_active_assembly: (dict) 
+			dictionary storing the latest activated assembly idx in each area
+			{area: assembly_idx}
+			assembly_idx = -1 means that no previously activated assembly exists
+		num_assemblies: (int)
+			total number of assemblies exist in the brain
+		verbose: (boolean=False) 
+			True or False
+		max_project_round: (int=5)
+			maximum number of project rounds (usually <=5 is enough).
+	Return:
+		assembly_dict: (dict)
+		last_active_assembly: (dict)
+		num_assemblies: (int)
+	'''
 	prev_last_active_assembly = copy.deepcopy(last_active_assembly) # {area: idx}
 	prev_assembly_dict = copy.deepcopy(assembly_dict) # {area: [a_id 0[source a_name[A1, A2], source a_id [a1, a2]], 1[[A3], [a3]], 2[(A4, a4)], ...]}
 	new_num_assemblies = num_assemblies # current total number of assemblies in the brain
@@ -127,14 +329,14 @@ def synthetic_project(state, assembly_dict, fiber_state_dict, last_active_assemb
 		for idx in fiber_state_dict.keys(): # get opened fibers from state vector
 			if state[idx]==1: # fiber is open
 				area1, area2 = fiber_state_dict[idx] # get areas on both ends
-				if area1 != BLOCKS: # skip if this is blocks area
+				if area1 != blocks_area: # skip if this is blocks area
 					opened_areas = set([area1]).union(opened_areas)
-				if area2 != BLOCKS:
+				if area2 != blocks_area:
 					opened_areas = set([area2]).union(opened_areas)
 				# check eligibility of areas, can only be source if there exists last active assembly in the area
-				if (prev_last_active_assembly[area1] != -1) and (area2 != BLOCKS): # blocks area cannot receive
+				if (prev_last_active_assembly[area1] != -1) and (area2 != blocks_area): # blocks area cannot receive
 					receive_from[area2] = set([area1]).union(receive_from.get(area2, set())) # area1 as source, to destination area2
-				if (prev_last_active_assembly[area2] != -1) and (area1 != BLOCKS): # bidirectional, area2 can also be source
+				if (prev_last_active_assembly[area2] != -1) and (area1 != blocks_area): # bidirectional, area2 can also be source
 					receive_from[area1] = set([area2]).union(receive_from.get(area1, set())) # area2 source, area1 destination
 		print(f'prev_last_active_assembly: {prev_last_active_assembly}, opened_areas: {opened_areas}, receive_from: {pprint.pprint(receive_from)}, prev_assembly_dict: {pprint.pprint(prev_assembly_dict)}') if verbose else 0
 		# Do project
@@ -144,7 +346,7 @@ def synthetic_project(state, assembly_dict, fiber_state_dict, last_active_assemb
 			sources = list(receive_from[destination]) # all input sources
 			sources_permutation = list(itertools.permutations(sources)) # permutation of the sources, list of tuples
 			active_assembly_id_in_destination = -1 # assume no matching connection exists by default
-			print(f'{destination} as destination, permutations of sources: {sources_permutation}') if verbose else 0
+			print(f'{destination} as destination') if verbose else 0
 			# search if destination area already has an assembly connected with input sources
 			for assembly_idx, assembly_content in enumerate(prev_assembly_dict[destination]): # check existing assembly in dest one by one
 				connected_areas, connected_assembly_ids = assembly_content # assembly_content: [[Area1, Area2, ...], [assembly1, assembly2, ...]]
@@ -159,7 +361,7 @@ def synthetic_project(state, assembly_dict, fiber_state_dict, last_active_assemb
 					if match: # everything match, the exact connection from all input sources to destination already exists
 						active_assembly_id_in_destination = assembly_idx 
 						print("\t\tMatch!") if verbose else 0
-						assert active_assembly_id_in_destination >= 0, raise ValueError(f"\t\tFound matching connection between source and dest, but assembly_idx in dest is {active_assembly_id_in_destination}")
+						assert active_assembly_id_in_destination >= 0, f"\t\tFound matching connection between source and dest, but assembly_idx in dest is {active_assembly_id_in_destination}"
 						break # exit the search
 				if set(sources).issubset(set(connected_areas)): # if dest assembly connects with all source areas (only names match) and other areas
 					print("\t\tCandidate (subset)?") if verbose else 0 # TODO: merge this if with previous if?
@@ -170,59 +372,52 @@ def synthetic_project(state, assembly_dict, fiber_state_dict, last_active_assemb
 					if match: # everything match, there is connection from all input sources (and some other areas) to destination
 						active_assembly_id_in_destination = assembly_idx
 						print("\t\tMatch!") if verbose else 0
-						assert active_assembly_id_in_destination >= 0, raise ValueError(f"\t\tFound matching connection between source and dest, but assembly_idx in dest is {active_assembly_id_in_destination}")
+						assert active_assembly_id_in_destination >= 0, f"\t\tFound matching connection between source and dest, but assembly_idx in dest is {active_assembly_id_in_destination}"
 						break
 			# no existing connection match, search if any of the sources is already connected with the latest activated assembly in dest
 			if (active_assembly_id_in_destination == -1) and (prev_last_active_assembly[destination] != -1):
-				print("\tsearching for partial candidates...") if verbose else 0
-				dest_idx = prev_last_active_assembly[destination]
-				print(f'\t\t dest_idx={dest_idx}, prev_assembly_dict[destination]={prev_assembly_dict[destination]}') if verbose else 0
+				dest_idx = prev_last_active_assembly[destination] # last activated assembly in dest
 				connected_areas, connected_assembly_ids = prev_assembly_dict[destination][dest_idx][0], prev_assembly_dict[destination][dest_idx][1]
-				for source in sources:
-					if (source in connected_areas) and (connected_assembly_ids[connected_areas.index(source)] == prev_last_active_assembly[source]):
-						# if both area name and index matches
+				print(f'\tsearching for partial candidates...\n\t\tlast activated assembly in dest: {dest_idx}, {prev_assembly_dict[destination][dest_idx]}') if verbose else 0
+				for source in sources: # check if any source assemblies is connected with the last activated assembly in dest
+					if (source in connected_areas) and (connected_assembly_ids[connected_areas.index(source)] == prev_last_active_assembly[source]): # both area name and index match
 						print(f"\t\tPartial candidate Match! {source} {prev_last_active_assembly[source]}") if verbose else 0
-						active_assembly_id_in_destination = dest_idx
-				# if partial candidate not found, search for non-optimal partial candidate (source connects to a dest assembly that is not currently activated)
-				if active_assembly_id_in_destination == -1: 
-					print("\tsearching for non-optimal partial candidates...") if verbose else 0
-					for source in sources:
+						active_assembly_id_in_destination = dest_idx # all source assemblies will converge to the last activated assembly in dest
+				if active_assembly_id_in_destination == -1: # partial candidate not found, search for non-optimal partial candidate (source assembly connects to a dest assembly that is not currently activated)
+					print("\t\tnot found.\n\tsearching for non-optimal partial candidates...") if verbose else 0
+					for source in sources: # check if any source assemblies connect to dest area
 						if destination in prev_assembly_dict[source][prev_last_active_assembly[source]][0]:
-							source_a_idx = prev_assembly_dict[source][prev_last_active_assembly[source]][0].index(destination)
-							active_assembly_id_in_destination = prev_assembly_dict[source][prev_last_active_assembly[source]][1][source_a_idx]
+							source_a_idx = prev_assembly_dict[source][prev_last_active_assembly[source]][0].index(destination) # locate the old dest assembly that connects with active source assembly
+							active_assembly_id_in_destination = prev_assembly_dict[source][prev_last_active_assembly[source]][1][source_a_idx] # all source assemblies will converge to this old dest assembly
 							print(f"\t\tnon-optimal partial candidate Match! source {source} {prev_last_active_assembly[source]} --> dest {active_assembly_id_in_destination}") if verbose else 0
 			print(f"\tsearch ends, active_assembly_id_in_destination={active_assembly_id_in_destination}") if verbose else 0
-			# still no existing connection match, create new assembly in destination
-			if active_assembly_id_in_destination == -1:
+			if active_assembly_id_in_destination == -1: # if still no existing connection match, create new assembly in destination
 				assembly_dict[destination].append([sources, [prev_last_active_assembly[S] for S in sources]]) # [[A1, A2, ...], [a1, a2, ...]]
 				active_assembly_id_in_destination = len(assembly_dict[destination])-1 # new assembly id
 				new_num_assemblies += 1 # increment total number of assemblies in brain
-				print(f'\tcreated bew assembly in destination, new assembly id {active_assembly_id_in_destination}') if verbose else 0
-			assert len(assembly_dict[destination]) > active_assembly_id_in_destination, raise ValueError(f"new_dest_id={active_assembly_id_in_destination} out of bound of assembly_dict[destination]: {assembly_dict[destination]}")
+				print(f'\tcreated new assembly in destination, id {active_assembly_id_in_destination}') if verbose else 0
+			assert len(assembly_dict[destination]) > active_assembly_id_in_destination, f"new_dest_id={active_assembly_id_in_destination} out of bound of assembly_dict[destination]: {assembly_dict[destination]}"
 			# reflect the newly activated destination assembly in source areas, update destination assembly dict if necessary
 			for source in sources:
 				print(f"\tchecking assembly dict for source {source}...") if verbose else 0
 				match = False # checks if prev_assembly_dict[source][prev_last_active_assembly[source]] contains any assembly in dest
 				for i, (A, a) in enumerate(zip(prev_assembly_dict[source][prev_last_active_assembly[source]][0], prev_assembly_dict[source][prev_last_active_assembly[source]][1])):
 					print(f'\t\tlast active source is connected to: A={A}, a={a}') if verbose else 0
-					# check if any of the connected areas from source is destination
-					if A==destination: # prev_assembly_dict[source][prev_last_active_assembly[source]] contains any assembly in dest
+					if A==destination: # source already has a connection to dest, may need to update this connection
 						match = True 
-						if (a!=active_assembly_id_in_destination): # if the last activate source a is connected with wrong dest a
-							# replace source a --> destination new a
-							updateidx = None
-							if destination in assembly_dict[source][prev_last_active_assembly[source]][0]:
+						if (a!=active_assembly_id_in_destination): # source connects with another assembly in dest
+							updateidx = None # replace the connection, become source current active assembly --> dest current active assembly
+							if destination in assembly_dict[source][prev_last_active_assembly[source]][0]: # using new dict as update may relate to the newly created dest assembly
 								updateidx = assembly_dict[source][prev_last_active_assembly[source]][0].index(destination)
 							if updateidx != None:
 								assembly_dict[source][prev_last_active_assembly[source]][1][updateidx] = active_assembly_id_in_destination
 								print("\t\tsource dict area match dest. Update source dict.") if verbose else 0
-							# for symmetry, also check dest dict
+							# for symmetry, also check dest dict, remove the connection btw dest old assembly and source, add new connection if needed
 							old_dest_id = prev_assembly_dict[source][prev_last_active_assembly[source]][1][i]
 							new_dest_id = active_assembly_id_in_destination
 							new_source_id = prev_last_active_assembly[source]
 							for AA, aa in zip(prev_assembly_dict[destination][old_dest_id][0], prev_assembly_dict[destination][old_dest_id][1]):
-								if (AA==source):
-									# remove assembly from the destination old area to the new source assembly
+								if (AA==source): # remove connection between the dest old assembly and the new source assembly
 									popidx = None
 									if AA in assembly_dict[destination][old_dest_id][0]:
 										popidx = assembly_dict[destination][old_dest_id][0].index(AA)
@@ -232,19 +427,15 @@ def synthetic_project(state, assembly_dict, fiber_state_dict, last_active_assemb
 										assembly_dict[destination][old_dest_id][0].pop(popidx)
 										assembly_dict[destination][old_dest_id][1].pop(popidx)
 										print(f"\t\tdest dict old id removed, old_dest_id={old_dest_id}, AA={AA}, aa={aa}") if verbose else 0
-									# add the new connection from new dest id to new source id
-									try:
-										if AA not in assembly_dict[destination][new_dest_id][0]:  ## TODO
-											assembly_dict[destination][new_dest_id][0].append(AA)
-											assembly_dict[destination][new_dest_id][1].append(aa)
-											print(f'\t\tdest dict new id added, new_dest_id={new_dest_id}, AA={AA}, aa={aa}') if verbose else 0
-									except:
-										print(f"assembly_dict[destination]:{assembly_dict[destination]}, new_dest_id={new_dest_id}, source={source}, AA={AA}, aa={aa}")
-									else:
+									# add new connection from dest assembly to activated source assembly
+									if AA not in assembly_dict[destination][new_dest_id][0]: 
+										assembly_dict[destination][new_dest_id][0].append(AA)
+										assembly_dict[destination][new_dest_id][1].append(aa)
+										print(f'\t\tdest dict new id added, new_dest_id={new_dest_id}, AA={AA}, aa={aa}') if verbose else 0
+									else: # or update existing dest assembly
 										idx = assembly_dict[destination][new_dest_id][0].index(AA)
 										assembly_dict[destination][new_dest_id][1][idx] = aa
 										print(f"\t\tdest dict new id updated, new_dest_id={new_dest_id}, AA={AA}, aa={aa}") if verbose else 0
-				# TODO: check if this block needs indent to if A==destination
 				# check if new dest dict needs to be updated wrt source
 				popidx = None
 				for j, (AA, aa) in enumerate(zip(assembly_dict[destination][active_assembly_id_in_destination][0], assembly_dict[destination][active_assembly_id_in_destination][1])):
@@ -306,15 +497,14 @@ def synthetic_project(state, assembly_dict, fiber_state_dict, last_active_assemb
 			if len(opened_areas)==0:
 				all_visited = True
 				print('\tall_visited=True') if verbose else 0
-		# Project completes, update assembly dict
+		# Current project round completes, update assembly dict
 		prev_assembly_dict = assembly_dict
 		prev_last_active_assembly = last_active_assembly
 		iround += 1
 	# All project rounds complete
 	num_assemblies = new_num_assemblies
-	assembly_dict = prev_assembly_dict
-	last_active_assembly = prev_last_active_assembly
-	print(f"\n--------------------- end of project rounds, num_assemblies={num_assemblies}, last_active_assembly={last_active_assembly}, assembly_dict: ") if verbose else 0
-	pprint.pprint(assembly_dict) if verbose else 0
-	return state, assembly_dict, fiber_state_dict, last_active_assembly, num_assemblies
+	assembly_dict = copy.deepcopy(prev_assembly_dict)
+	last_active_assembly = copy.deepcopy(prev_last_active_assembly)
+	print(f"\n--------------------- end of all project rounds, num_assemblies={num_assemblies}, last_active_assembly={last_active_assembly}, assembly_dict:{pprint.pprint(assembly_dict)}") if verbose else 0
+	return assembly_dict, last_active_assembly, num_assemblies
 

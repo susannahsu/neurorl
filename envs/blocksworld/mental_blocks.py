@@ -262,9 +262,9 @@ class Simulator():
 	
 
 	def __decode_curstack(self):
-		cur_stacks = []
+		cur_stacks = [] 
 		for istack in range(self.max_stacks):
-			stack = []
+			stack = [] # blocks from top to bottom
 			for jblock in range(self.max_blocks):
 				if np.any(self.state[istack*self.max_blocks+jblock]==1):
 					stack.append(np.argmax(self.state[istack*self.max_blocks+jblock]).item())

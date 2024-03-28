@@ -1,16 +1,28 @@
 '''
-run parallel
+// interactive session
+salloc -p gpu_test -t 0-03:00 --mem=8000 --gres=gpu:1
+module load python/3.10.12-fasrc01
+mamba activate neurorl
 
+// launch parallel job
 python configs/parse_trainer.py \
   --search='initial' \
   --parallel='sbatch' \
   --num_actors=1 \
   --use_wandb=True \
-  --partition=gpu \
+  --partition=gpu_test \
   --wandb_entity=yichenli \
   --wandb_project=parse \
   --run_distributed=True \
-  --time=0-8:00:00 
+  --time=0-6:00:00 
+
+// test in interactive session
+python configs/parse_trainer.py \
+  --search='initial' \
+  --parallel='none' \
+  --run_distributed=True \
+  --debug=True \
+  --use_wandb=False 
 '''
 import functools 
 from typing import Dict
@@ -49,7 +61,9 @@ import library.utils as utils
 import library.networks as networks
 
 from envs.blocksworld import parse
-from envs.blocksworld import parse_cfg
+from envs.blocksworld.cfg import configurations 
+cfg = configurations['parse']
+
 
 # -----------------------
 # command line flags definition, using absl library
@@ -70,28 +84,13 @@ FLAGS = flags.FLAGS
 State = jax.Array
 
 
-@dataclasses.dataclass
-class QConfig(q_learning.Config):
-  """
-  Class of Q-learning configuration.
-  Declaring Q-learning specific parameters.
-  Inheriting from class Config in q_learning.py and basics.py.
-
-  If want to use these specific configurations, 
-    need to replace experiment configuration settings by this class.
-  """
-  q_dim: int = 512 
-  state_dim: int = 512
-
-
 def observation_encoder(
     inputs: acme_wrappers.observation_action_reward.OAR,
     num_actions: int,
     num_fibers: int,
     num_areas: int,
-    max_assemblies: int=parse_cfg.max_assemblies,
-    max_num_stacks: int=parse_cfg.max_stacks,
-    max_blocks: int=parse_cfg.max_blocks):
+    max_assemblies: int=cfg['max_assemblies'],
+    max_blocks: int=cfg['max_blocks']):
   """
   A neural network to encode the environment observation / state.
   In the case of parsing blocks, 
@@ -138,13 +137,13 @@ def make_qlearning_networks(
   Builds default R2D2 networks for Q-learning based on the environment specifications and configurations.
   """
   num_actions = int(env_spec.actions.maximum - env_spec.actions.minimum) + 1
-  assert num_actions == parse_cfg.num_actions
+  assert num_actions == cfg['num_actions']
 
   def make_core_module() -> q_learning.R2D2Arch:
 
     observation_fn = functools.partial(
       observation_encoder, 
-      num_actions=num_actions, num_fibers=parse_cfg.num_fibers, num_areas=parse_cfg.num_areas)
+      num_actions=num_actions, num_fibers=cfg['num_fibers'], num_areas=cfg['num_areas'])
     return q_learning.R2D2Arch(
       torso=hk.to_module(observation_fn)('obs_fn'),
       memory=networks.DummyRNN(),  # nothing happens
@@ -164,30 +163,29 @@ class QObserver(basics.ActorObserver):
   """
   def __init__(self,
                period: int = 5000,
-               prefix: str = 'QObserver',
-               evaluator: bool = False):
+               prefix: str = 'QObserver'):
     super(QObserver, self).__init__()
     self.period = period
     self.prefix = prefix
     self.idx = -1
     self.logging = True
-    self.action_dict = {0: ('disinhibit_fiber', 'BLOCKS', 'G0_N0'),
-                        1: ('inhibit_fiber', 'BLOCKS', 'G0_N0'),
-                        2: ('disinhibit_fiber', 'BLOCKS', 'G0_N1'),
-                        3: ('inhibit_fiber', 'BLOCKS', 'G0_N1'),
-                        4: ('disinhibit_fiber', 'BLOCKS', 'G0_N2'),
-                        5: ('inhibit_fiber', 'BLOCKS', 'G0_N2'),
-                        6: ('disinhibit_fiber', 'G0_N0', 'G0_N1'),
-                        7: ('inhibit_fiber', 'G0_N0', 'G0_N1'),
-                        8: ('disinhibit_fiber', 'G0_N0', 'G0_N2'),
-                        9: ('inhibit_fiber', 'G0_N0', 'G0_N2'),
-                        10: ('disinhibit_fiber', 'G0_N0', 'G0_H'),
-                        11: ('inhibit_fiber', 'G0_N0', 'G0_H'),
-                        12: ('disinhibit_fiber', 'G0_N1', 'G0_N2'),
-                        13: ('inhibit_fiber', 'G0_N1', 'G0_N2'),
-                        14: ('project_star', None),
-                        15: ('activate_block', 'next'),
-                        16: ('activate_block', 'previous')}
+    # self.action_dict = {0: ('disinhibit_fiber', 'BLOCKS', 'G0_N0'),
+    #                     1: ('inhibit_fiber', 'BLOCKS', 'G0_N0'),
+    #                     2: ('disinhibit_fiber', 'BLOCKS', 'G0_N1'),
+    #                     3: ('inhibit_fiber', 'BLOCKS', 'G0_N1'),
+    #                     4: ('disinhibit_fiber', 'BLOCKS', 'G0_N2'),
+    #                     5: ('inhibit_fiber', 'BLOCKS', 'G0_N2'),
+    #                     6: ('disinhibit_fiber', 'G0_N0', 'G0_N1'),
+    #                     7: ('inhibit_fiber', 'G0_N0', 'G0_N1'),
+    #                     8: ('disinhibit_fiber', 'G0_N0', 'G0_N2'),
+    #                     9: ('inhibit_fiber', 'G0_N0', 'G0_N2'),
+    #                     10: ('disinhibit_fiber', 'G0_N0', 'G0_H'),
+    #                     11: ('inhibit_fiber', 'G0_N0', 'G0_H'),
+    #                     12: ('disinhibit_fiber', 'G0_N1', 'G0_N2'),
+    #                     13: ('inhibit_fiber', 'G0_N1', 'G0_N2'),
+    #                     14: ('project_star', None),
+    #                     15: ('activate_block', 'next'),
+    #                     16: ('activate_block', 'previous')}
 
   def wandb_log(self, d: dict):
     if self.logging:
@@ -225,24 +223,22 @@ class QObserver(basics.ActorObserver):
     Should be time-step after selecting action"""
     self.timesteps.append(timestep)
 
-  def get_metrics(self, max_steps:int = parse_cfg.max_steps) -> Dict[str, any]:
+  def get_metrics(self, max_steps:int = cfg['max_steps']) -> Dict[str, any]:
     """Returns metrics collected for the current episode."""
     if self.idx==0 or (not self.idx % self.period == 0):
       return
     if not self.logging:
       return 
-    ##################################
-    # successor features
-    ##################################
     print('\nlogging!')
     # first prediction is empty (None)
     results = {}
+    action_dict = cfg['action_dict']
     q_values = [s.predictions for s in self.actor_states[1:]]
     q_values = jnp.stack(q_values)
     npreds = len(q_values)
     actions = jnp.stack(self.actions)[:npreds]
     q_values = rlax.batched_index(q_values, actions)
-    action_names = [self.action_dict[a.item()] for a in actions]
+    action_names = [action_dict[a.item()] for a in actions]
     rewards = jnp.stack([t.reward for t in self.timesteps[1:]])
     observations = jnp.stack([t.observation.observation for t in self.timesteps[1:]])
     # log the metrics
@@ -278,34 +274,36 @@ class QObserver(basics.ActorObserver):
     #   ax[irow,jcol].set_title(f"A={action_names[t]}\nR={rewards[t]}\nQ={q_values[t]}")
     # self.wandb_log({f"{self.prefix}/trajectory": wandb.Image(fig)})
     # plt.close(fig)
+    for t in range(npreds): # print actions 
+      print(f"t={t}, A={action_names[t]}, R={rewards[t]}, Q={q_values[t]}")
     
     # current episode reward
     episode_reward = jnp.sum(rewards)
-    print('current episode rewards', episode_reward)
+    print(f'current episode rewards {episode_reward}')
     results['episode_reward'] = episode_reward
     
     return results
   
 def make_environment(seed: int ,
-                     difficulty=None, # None or int {2,3,...,max_blocks}
                      evaluation: bool = False,
-                     action_cost: float = parse_cfg.action_cost,
-                     max_steps: int = parse_cfg.max_steps,
+                     action_cost: float = cfg['action_cost'],
+                     max_steps: int = cfg['max_steps'],
                      **kwargs) -> dm_env.Environment:
   """
   Initializes and wraps the environment simulator with specific settings.
-
-  Returns a dm_env.Environment object, 
-    with multiple elements wrapped together (simulator, observation, action, reward, single precision).
+  Returns:
+    dm_env.Environment object
+      with multiple elements wrapped together (simulator, observation, action, reward, single precision).
   """
   del seed
   del evaluation
   
   # create dm_env
-  sim = parse.Simulator(max_blocks=parse_cfg.max_blocks)
-  parse_cfg.num_fibers = sim.num_fibers
-  parse_cfg.num_areas = sim.num_areas
-  parse_cfg.num_actions = sim.num_actions
+  sim = parse.Simulator(max_blocks=cfg['max_blocks'])
+  cfg['num_fibers'] = sim.num_fibers
+  cfg['num_areas'] = sim.num_areas
+  cfg['num_actions'] = sim.num_actions
+  cfg['action_dict'] = sim.action_dict
   rng = np.random.default_rng(1)
   env = parse.EnvWrapper(sim, rng)
 
@@ -346,7 +344,7 @@ def setup_experiment_inputs(
       config=config,
       ActorCls=functools.partial(
         basics.BasicActor,
-        observers=[QObserver(period=1 if debug else 50000)],
+        observers=[QObserver(period=1 if debug else 5000)],
         ),
       LossFn=q_learning.R2D2LossFn(
           discount=config.discount,
@@ -579,9 +577,9 @@ def sweep(search: str = 'default'):
   if search == 'initial':
     space = [
         {
-            "group": tune.grid_search(['1P']),
-
+            "group": tune.grid_search(['2P']),
             "num_steps": tune.grid_search([50e6]),
+
             "max_grad_norm": tune.grid_search([80.0]),
             "learning_rate": tune.grid_search([1e-4]),
             "epsilon_begin": tune.grid_search([0.9]),
