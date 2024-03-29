@@ -13,7 +13,14 @@ from typing import Any, Dict, Optional
 import tree
 
 cfg = configurations['remove']
-
+'''
+TODO
+	align parameters in parse and remove
+	edit parse to generate expert demo for arbitrary lists
+	allow parse to take goal as input argument
+	match the state vector in parse and remove
+	match the action dict in parse and remove
+'''
 class Simulator(ParseSimulator):
 	def __init__(self, 
 				original_stack=None, # original stack of blocks before adding
@@ -41,13 +48,15 @@ class Simulator(ParseSimulator):
 		self.num_blocks = len(self.goal) # total number of blocks in the readout stack
 		self.correct_record = np.zeros_like(self.goal) # binary record for how many blocks are correct
 		self.unit_reward = utils.calculate_unit_reward(self.reward_decay_factor, len(self.goal), self.episode_max_reward)
-		self.state, self.state_change_dict, self.stimulate_state_dict, self.fiber_state_dict, self.assembly_dict, self.last_active_assembly = self.create_state_representation()
-		self.num_fibers = len(self.fiber_state_dict.keys())
+		self.state, self.action_to_statechange, self.stimulate_state_dict, self.stateidx_to_fibername, self.assembly_dict, self.last_active_assembly = self.create_state_representation()
+		self.num_fibers = len(self.stateidx_to_fibername.keys())
 		self.num_assemblies = 0 # total number of assemblies ever created
 		self.just_projected = False # record if the previous action was project
 		self.current_time = 0 # current step in the episode
 		self.all_correct = False # whether the brain has represented all blocks correctly
 
+	def __str__(self):
+		pass
 		
 	def reset(self, original_stack=None, random_number_generator=np.random):
 		self.original_stack = list(range(self.max_blocks)) if original_stack==None else original_stack # stack before adding. TODO: randomly shuffle block id
@@ -56,7 +65,7 @@ class Simulator(ParseSimulator):
 		self.num_blocks = len(self.goal) # total number of blocks in readout stack
 		assert self.num_blocks <= self.max_blocks, f"number of blocks ({self.num_blocks}) exceeds max ({self.max_blocks})"
 		self.unit_reward = utils.calculate_unit_reward(self.reward_decay_factor, len(self.goal), self.episode_max_reward)
-		self.state, self.state_change_dict, self.stimulate_state_dict, self.fiber_state_dict, self.assembly_dict, self.last_active_assembly = self.create_state_representation()
+		self.state, self.action_to_statechange, self.stimulate_state_dict, self.stateidx_to_fibername, self.assembly_dict, self.last_active_assembly = self.create_state_representation()
 		self.all_correct = False 
 		self.correct_record = np.zeros_like(self.goal)
 		self.num_assemblies = 0
@@ -68,8 +77,8 @@ class Simulator(ParseSimulator):
 	def close(self):
 		self.current_time = 0
 		self.state = None
-		self.state_change_dict = None 
-		self.fiber_state_dict = None 
+		self.action_to_statechange = None 
+		self.stateidx_to_fibername = None 
 		self.assembly_dict = None 
 		self.last_active_assembly = None
 		self.all_correct = False 
@@ -84,9 +93,9 @@ class Simulator(ParseSimulator):
 		top_area_name, top_area_a, top_block_idx = utils.top(self.assembly_dict, self.last_active_assembly, self.head)
 		# first check if any fiber needs to be inhibited
 		inhibit_actions = []
-		for stateidx in self.fiber_state_dict:
+		for stateidx in self.stateidx_to_fibername:
 			if self.state[stateidx] == 1:
-				inhibit_actions.append(("inhibit_fiber", self.fiber_state_dict[stateidx][0], self.fiber_state_dict[stateidx][1]))
+				inhibit_actions.append(("inhibit_fiber", self.stateidx_to_fibername[stateidx][0], self.stateidx_to_fibername[stateidx][1]))
 			assert self.state[stateidx]==0, f"something wrong with fiber status in state vector {self.state}, idx {stateidx} should be inhibited"
 		for action in inhibit_actions:
 			final_actions.append( list(self.action_dict.keys())[list(self.action_dict.values()).index(action)] )
@@ -127,9 +136,9 @@ class Simulator(ParseSimulator):
 	def step(self, action_idx):
 		action_tuple = self.action_dict[action_idx] # (action name, *kwargs)
 		action_name = action_tuple[0]
-		state_change_tuple = self.state_change_dict[action_idx] # (state vec index, new state value)
-		fiber_state_dict = self.fiber_state_dict # {state vec idx: (area1, area2)} 
-		# area_state_dict = self.area_state_dict # {area_name: state vec starting idx}
+		state_change_tuple = self.action_to_statechange[action_idx] # (state vec index, new state value)
+		stateidx_to_fibername = self.stateidx_to_fibername # {state vec idx: (area1, area2)} 
+		# area_to_stateidx = self.area_to_stateidx # {area_name: state vec starting idx}
 		reward = -self.action_cost # default cost for performing any action
 		terminated = False
 		truncated = False
@@ -146,21 +155,21 @@ class Simulator(ParseSimulator):
 			elif self.just_projected: # BAD, consecutive project
 				reward -= self.action_cost
 			else: # GOOD, valid project
-				self.assembly_dict, self.last_active_assembly, self.num_assemblies = utils.synthetic_project(self.state, self.assembly_dict, self.fiber_state_dict, self.last_active_assembly, self.num_assemblies, self.verbose, blocks_area=self.blocks_area)
+				self.assembly_dict, self.last_active_assembly, self.num_assemblies = utils.synthetic_project(self.state, self.assembly_dict, self.stateidx_to_fibername, self.last_active_assembly, self.num_assemblies, self.verbose, blocks_area=self.blocks_area)
 				'''
 				# update neuron state for each area
 				for area_name in self.last_active_assembly.keys(): 
 					if (self.skip_relocated and area_name==self.relocated_area) or (area_name==self.blocks_area):
 						continue # only node and head areas need to update
 					# update last active assembly id in each area
-					self.state[self.area_state_dict[area_name]] = self.last_active_assembly[area_name] 
+					self.state[self.area_to_stateidx[area_name]] = self.last_active_assembly[area_name] 
 					# update the number of self.blocks_area related assemblies in each area
 					count = 0 
 					for assembly in self.assembly_dict[area_name]:
 						connected_areas, connected_area_idxs = assembly[0], assembly[1]
 						if self.blocks_area in connected_areas:
 							count += 1
-					self.state[self.area_state_dict[area_name]+1] = count
+					self.state[self.area_to_stateidx[area_name]+1] = count
 				'''
 				readout = utils.synthetic_readout(self.assembly_dict, self.last_active_assembly, self.head, self.num_blocks, self.blocks_area)
 				r, self.all_correct, self.correct_record = utils.calculate_readout_reward(readout, self.goal, self.correct_record, self.unit_reward, self.reward_decay_factor)
@@ -191,7 +200,7 @@ class Simulator(ParseSimulator):
 				if (self.skip_relocated and area_name==self.relocated_area) or (area_name==self.blocks_area):
 					continue # only node and head areas need to update
 				# update last active assembly id in each area
-				self.state[self.area_state_dict[area_name]] = self.last_active_assembly[area_name] 
+				self.state[self.area_to_stateidx[area_name]] = self.last_active_assembly[area_name] 
 			'''
 			if self.state[state_change_tuple[0]] == state_change_tuple[1]: # BAD, fiber is already stimulated
 				reward -= self.action_cost
@@ -207,7 +216,7 @@ class Simulator(ParseSimulator):
 		self.current_time += 1 # increment step in the episode 
 		if self.current_time >= self.max_steps:
 			truncated = True
-		terminated = self.all_correct and utils.all_fiber_closed(self.state, self.fiber_state_dict)
+		terminated = self.all_correct and utils.all_fiber_closed(self.state, self.stateidx_to_fibername)
 		return self.state.copy(), reward, terminated, truncated, info
 
 
@@ -228,8 +237,8 @@ class Simulator(ParseSimulator):
 		action_idx = 0 # initialize the action index for iteration, the order should match that in self.action_dict
 		state_vector_idx = 0 # initialize the idx in state vec to be changed
 		# blocks_state_idx = None # idx in state vec for the currently activated block id
-		# area_state_dict = {} # dict of state vector index for each area
-		fiber_state_dict = {} # mapping of state vec index to fiber name
+		# area_to_stateidx = {} # dict of state vector index for each area
+		stateidx_to_fibername = {} # mapping of state vec index to fiber name
 		stimulate_state_dict = {}
 		assembly_dict = {} # {(area1, area2): (assembly idx 1, assembly idx 2)}
 		last_active_assembly = {} # {area: assembly_idx}
@@ -248,7 +257,7 @@ class Simulator(ParseSimulator):
 				if area1 == area2: # no need for fiber to the same area itself
 					continue
 				if (("_H" in area1) and (area2==self.blocks_area)) or (("_H" in area2) and (area1==self.blocks_area)):
-					# for HEADS fibers, only consider N0, N1, N2, do not consider connection with self.blocks_area
+					# HEADS only connects to N0, N1, N2, not BLOCKS
 					continue
 				if [area1, area2] in area_pairs: # skip already encoded area pairs
 					continue
@@ -260,7 +269,7 @@ class Simulator(ParseSimulator):
 				action_idx += 1
 				# add the current fiber state to state vector
 				state_vec.append(0) # fiber should be locked in the beginning
-				fiber_state_dict[state_vector_idx] = (area1, area2) # add pair to corresponding state idx
+				stateidx_to_fibername[state_vector_idx] = (area1, area2) # add pair to corresponding state idx
 				state_vector_idx += 1 # increment state idx
 				# stimulate status
 				if ('_H' in area1) or (area2==self.blocks_area):
@@ -299,7 +308,7 @@ class Simulator(ParseSimulator):
 			if self.skip_relocated and area_name==self.relocated_area:
 				continue
 			# store the starting state vec index for current area
-			area_state_dict[area_name] = state_vector_idx
+			area_to_stateidx[area_name] = state_vector_idx
 			if area_name==self.blocks_area: # the state of blocks area only occupies one index
 				blocks_state_idx = state_vector_idx
 				state_vec.append(-1) # most recent assembly idx, -1 meaning no assembly record
@@ -327,7 +336,7 @@ class Simulator(ParseSimulator):
 		return np.array(state_vec, dtype=np.float32), \
 					dictionary, \
 					stimulate_state_dict, \
-					fiber_state_dict, \
+					stateidx_to_fibername, \
 					assembly_dict, \
 					last_active_assembly
 

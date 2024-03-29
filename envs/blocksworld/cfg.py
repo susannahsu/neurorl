@@ -1,7 +1,7 @@
 configurations = {
 'mental_blocks':
 	{
-	'cfg': 'mental_blocks'
+	'cfg': 'mental_blocks',
 	'skip_relocated': True , # skip area RELOCATED
 	'max_stacks': 2 , # maximum number of stacks allowed
 	'max_blocks': 7 , # maximum number of blocks allowed in each stack
@@ -27,7 +27,7 @@ configurations = {
 	'cfg': 'parse',
 	'skip_relocated': True, # skip area RELOCATED
 	'max_blocks': 7, # maximum number of blocks allowed in each stack
-	'max_steps': 50, # maximum number of actions allowed in each episode
+	'max_steps': 100, # maximum number of actions allowed in each episode
 	'episode_max_reward': 1, # base reward for getting 1 block correct, cumulates with more blocks correct
 	'reward_decay_factor': 0.9, # reward discount factor, descending (first index is most rewarding) if 0 < factor < 1, ascending if factor > 1
 	'action_cost': 1e-3, # cost for performing any action
@@ -35,6 +35,7 @@ configurations = {
 	'num_fibers': None, # number of fibers in the brain, will be filled once env is created
 	'num_areas': None, # number of areas in the brain, will be filled once env is created
 	'num_actions': None, # number of actions, will be filled once env is created
+	'area_status': ['last_activated', 'num_block_assemblies', 'num_total_assemblies'], # area attributes to encode in state
 	},
 
 'remove':
@@ -50,6 +51,7 @@ configurations = {
 	'num_fibers': None, # number of fibers in the brain, will be filled once env is created
 	'num_areas': None, # number of areas in the brain, will be filled once env is created
 	'num_actions': None, # number of actions, will be filled once env is created
+	'area_status': ['last_activated', 'num_block_assemblies', 'num_total_assemblies'], # area attributes to encode in state
 	},
 
 'add':
@@ -65,6 +67,7 @@ configurations = {
 	'num_fibers': None, # number of fibers in the brain, will be filled once env is created
 	'num_areas': None, # number of areas in the brain, will be filled once env is created
 	'num_actions': None, # number of actions, will be filled once env is created
+	'area_status': ['last_activated', 'num_block_assemblies', 'num_total_assemblies'], # area attributes to encode in state
 	},
 
 }

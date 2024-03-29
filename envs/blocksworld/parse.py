@@ -25,6 +25,7 @@ class Simulator():
 				reward_decay_factor = cfg['reward_decay_factor'],
 				episode_max_reward = cfg['episode_max_reward'],
 				skip_relocated = cfg['skip_relocated'],
+				area_status = cfg['area_status'],
 				verbose=False):
 		self.all_areas, self.head, self.relocated_area, self.blocks_area = utils.init_simulator_areas()
 		self.max_blocks = max_blocks
@@ -34,38 +35,65 @@ class Simulator():
 		self.episode_max_reward = episode_max_reward
 		self.skip_relocated = skip_relocated
 		self.verbose = verbose
+		self.area_status = area_status # area attributes to encode in state, default ['last_activated', 'num_block_assemblies', 'num_total_assemblies']
 		self.action_dict = self.create_action_dictionary() 
 		self.num_actions = len(self.action_dict)
-
-		self.num_blocks = max_blocks # TODO: make it random
-		self.goal = list(range(self.num_blocks))# TODO: randomly shuffle block id
+		
+		self.num_blocks, self.goal = self.create_episode() 
 
 		self.correct_record = np.zeros_like(self.goal) # binary record for how many blocks are correct
 		self.unit_reward = utils.calculate_unit_reward(self.reward_decay_factor, len(self.goal), self.episode_max_reward)
-		self.state, self.state_change_dict, self.area_state_dict, self.fiber_state_dict, self.assembly_dict, self.last_active_assembly = self.create_state_representation()
-		self.num_fibers = len(self.fiber_state_dict.keys())
-		self.num_areas = len(self.area_state_dict.keys())
-		self.num_assemblies = 0 # total number of assemblies ever created
+		self.state, self.action_to_statechange, self.area_to_stateidx, self.stateidx_to_fibername, self.assembly_dict, self.last_active_assembly = self.create_state_representation()
+		self.num_fibers = len(self.stateidx_to_fibername.keys())
+		self.num_areas = len(self.area_to_stateidx.keys())
+		self.num_assemblies = self.max_blocks # total number of assemblies ever created
 		self.just_projected = False # record if the previous action was project
 		self.current_time = 0 # current step in the episode
-		self.all_correct = False # if the brain has represented all blocks correctly
+		self.all_correct = False # if the most recent readout has everything correct
 		
-		
-	def reset(self, num_blocks=None, random_number_generator=np.random):
+	def create_episode(self, shuffle=False, difficulty_mode=False, cur_curriculum_level=None):
+		goal = [None] * self.max_blocks # dummy goal template, to be filled
+		num_blocks = None # actual number of blocks in the stack, to be modified
+		if difficulty_mode=='curriculum':
+			assert cur_curriculum_level!=None, f"requested curriculum but current level is not given"
+			num_blocks = self.sample_from_curriculum(cur_curriculum_level)
+		elif difficulty_mode=='uniform' or (type(difficulty_mode)==int and difficulty_mode==0): # uniform mode
+			num_blocks = random.randint(1, self.max_blocks)
+		elif type(difficulty_mode)==bool and (difficulty_mode==False): # default max blocks to parse
+			num_blocks = self.max_blocks
+		elif type(difficulty_mode)==int:
+			assert 1<=difficulty_mode<=self.max_blocks, \
+				f"invalid difficulty mode: {difficulty_mode}, should be 'curriculum', or 0, or values in [1, {self.max_blocks}]"
+			num_blocks = difficulty_mode
+		else:
+			raise ValueError(f"unrecognized difficulty mode {difficulty_mode} (type {type(difficulty_mode)})")
+		assert num_blocks <= self.max_blocks, \
+			f"number of actual blocks to parse {num_blocks} should be smaller than max_blocks {self.max_blocks}"
+		stack = list(range(num_blocks)) # the actual blocks in the stack, to be filled
+		if shuffle:
+			random.shuffle(stack)
+		goal[:num_blocks] = stack
+		return num_blocks, goal
+
+	def sample_from_curriculum(self, cur_curriculum_level):
+		assert 1 <= curriculum <= self.max_blocks
+		level = curriculum
+		return level
+
+	def reset(self, shuffle=False, difficulty_mode=False, cur_curriculum_level=None):
 		'''
 		Reset environment for new episode.
 		Return:
 			state: (numpy array with float32)
 			info: (any=None)
 		'''
-		self.num_blocks = self.max_blocks if num_blocks==None else num_blocks # TODO: make it random
-		self.goal = list(range(self.num_blocks)) # TODO: make it random
+		self.num_blocks, self.goal = self.create_episode(shuffle=shuffle, difficulty_mode=difficulty_mode, cur_curriculum_level=cur_curriculum_level)
 		self.unit_reward = utils.calculate_unit_reward(self.reward_decay_factor, len(self.goal), self.episode_max_reward)
-		self.state, self.state_change_dict, self.area_state_dict, self.fiber_state_dict, self.assembly_dict, self.last_active_assembly = self.create_state_representation()
-		self.all_correct = False # if the brain has represented all blocks correctly
+		self.state, self.action_to_statechange, self.area_to_stateidx, self.stateidx_to_fibername, self.assembly_dict, self.last_active_assembly = self.create_state_representation()
+		self.all_correct = False
 		self.correct_record = np.zeros_like(self.goal)
-		self.num_assemblies = 0
 		self.just_projected = False
+		self.num_assemblies = self.max_blocks
 		self.current_time = 0
 		info = None
 		return self.state.copy(), info
@@ -75,61 +103,84 @@ class Simulator():
 		Close and clear the environment.
 		Return nothing.
 		'''
-		self.current_time = 0
-		self.state = None
-		self.state_change_dict = None 
-		self.area_state_dict = None 
-		self.fiber_state_dict = None 
-		self.assembly_dict = None 
-		self.last_active_assembly = None
-		self.all_correct = False # if the brain has represented all blocks correctly
-		self.correct_record = np.zeros_like(self.goal)
-		self.num_assemblies = 0
-		self.just_projected = False
+		del self.state
+		del self.action_to_statechange, self.area_to_stateidx, self.stateidx_to_fibername, self.assembly_dict, self.last_active_assembly
+		del self.correct_record
+		del self.all_correct, self.just_projected
+		del self.current_time, self.num_assemblies
 		return 
 
-	def sample_expert_demo(self, nblocks=None):
+
+
+	def sample_expert_demo(self):
 		'''
 		Return:
 			expert_demo: (list of int)
 				list of expert actions to solve the puzzle.
 		'''
-		# [15,10,0,  14,   11,1, 15,6,2,  14,   7,3, 15,12,4,  14,   13,5, 0,8,15,  14,   1,9, 2,6,15,  14,   3,7, 4,12,15,  14]
-		actions_block0 = [15,10,0] # optimal action indices for parsing first block
-		actions_block1 = [11,1,15,6,2] # ... for parsing the second block
-		actions_block2 = [7,3,15,12,4] # ... for parsing the third block
-		actions_block3 = [13,5,0,8,15]
-		actions_block4 = [1,9,2,6,15]
-		if nblocks==None:
-			nblocks = self.num_blocks
-		expert_demo = []
-		if nblocks>0:
-			random.shuffle(actions_block0)
-			expert_demo += actions_block0
-			expert_demo += [14]
-			nblocks -= 1
-		if nblocks>0:
-			random.shuffle(actions_block1)
-			expert_demo += actions_block1
-			expert_demo += [14]
-			nblocks -= 1
+		stack = self.goal[:self.num_blocks]
+		actions = []
+		action_module0 = [10,0] # optimal fiber actions for parsing first block
+		action_module1 = [11,1,6,2] # ... second block
+		action_module2 = [7,3,12,4] # ... third block
+		action_module3 = [13,5,0,8] # ... fourth block
+		action_module4 = [1,9,2,6] # ... fifth block
+		inhibit_action_module0 = [11, 1] # close fibers to terminate episode after module0
+		inhibit_action_module1 = [7, 3] 
+		inhibit_action_module2 = [13, 5]
+		inhibit_action_module3 = [1, 9]
+		inhibit_action_module4 = [3, 7]
+		project_star = [18]
+		activate_next_block = [19]
+		activate_prev_block = [20]
+		activated_block = -1 # currently activated block id in BLOCKS area
+		if len(stack)>0: # module 0
+			tmp_actions = []
+			tmp_actions += utils.go_activate_block(activated_block, stack[0], activate_next_block, activate_prev_block)
+			tmp_actions += action_module0
+			random.shuffle(tmp_actions)
+			actions += tmp_actions
+			actions += project_star
+			activated_block = stack.pop(0)
+		if len(stack)>0: # module 1
+			tmp_actions = []
+			tmp_actions += utils.go_activate_block(activated_block, stack[0], activate_next_block, activate_prev_block)
+			tmp_actions += action_module1
+			random.shuffle(tmp_actions)
+			actions += tmp_actions
+			actions += project_star
+			activated_block = stack.pop(0)
+		else: # no more blocks after module0
+			tmp_actions = inhibit_action_module0
+			random.shuffle(tmp_actions)
+			actions += tmp_actions
+			return actions
+		if len(stack)==0: # no more blocks after module1
+			tmp_actions = inhibit_action_module1
+			random.shuffle(tmp_actions)
+			actions += tmp_actions
+			return actions
 		imodule = 0
-		while nblocks > 0:
+		while True: # loop through module 2,3,4
+			tmp_actions = []
+			tmp_actions += utils.go_activate_block(activated_block, stack[0], activate_next_block, activate_prev_block)
 			if imodule%3 == 0:
-				random.shuffle(actions_block2)
-				expert_demo += actions_block2
-				expert_demo += [14]
+				actions += action_module2
 			elif imodule%3 == 1:
-				random.shuffle(actions_block3)
-				expert_demo += actions_block3
-				expert_demo += [14]
-			if imodule%3 == 2:
-				random.shuffle(actions_block4)
-				expert_demo += actions_block4
-				expert_demo += [14]
-			nblocks -= 1
+				actions += action_module3
+			elif imodule%3 == 2:
+				actions += action_module4
+			random.shuffle(tmp_actions)
+			actions += tmp_actions
+			actions += project_star
+			activated_block = stack.pop(0)
+			if len(stack)==0:
+				tmp_actions = [inhibit_action_module2, inhibit_action_module3, inhibit_action_module4][imodule%3]
+				random.shuffle(tmp_actions)
+				actions += tmp_actions
+				return actions
 			imodule += 1
-		return expert_demo
+		
 		
 
 	def step(self, action_idx):
@@ -143,9 +194,9 @@ class Simulator():
 		'''
 		action_tuple = self.action_dict[int(action_idx)] # (action name, *kwargs)
 		action_name = action_tuple[0]
-		state_change_tuple = self.state_change_dict[int(action_idx)] # (state vec index, new state value)
-		fiber_state_dict = self.fiber_state_dict # {state vec idx: (area1, area2)} 
-		area_state_dict = self.area_state_dict # {area_name: state vec starting idx}
+		state_change_tuple = self.action_to_statechange[int(action_idx)] # (state index, new state value)
+		stateidx_to_fibername = self.stateidx_to_fibername # {state vec idx: (area1, area2)} 
+		area_to_stateidx = self.area_to_stateidx # {area_name: state vec starting idx}
 		reward = -self.action_cost # default cost for performing any action
 		terminated = False # whether the episode ended
 		truncated = False # end due to max steps
@@ -157,47 +208,49 @@ class Simulator():
 			self.state[state_change_tuple[0]] = state_change_tuple[1] # update state
 			self.just_projected = False
 		elif action_name == "project_star": # state_change_tuple = ([],[]) 
-			astart = area_state_dict[self.blocks_area] # starting index of area state including blocks area 
-			if [*self.last_active_assembly.values()].count(-1)==len(self.last_active_assembly): # BAD, project when no active winners exist
+			if [*self.last_active_assembly.values()].count(-1)==len(self.last_active_assembly): # BAD, no active assembly exists
 				reward -= self.action_cost 
 			elif self.just_projected: # BAD, consecutive project
 				reward -= self.action_cost
 			else: # GOOD, valid project
-				self.assembly_dict, self.last_active_assembly, self.num_assemblies = utils.synthetic_project(self.state, self.assembly_dict, self.fiber_state_dict, self.last_active_assembly, self.num_assemblies, self.verbose, blocks_area=self.blocks_area)
+				self.assembly_dict, self.last_active_assembly, self.num_assemblies = utils.synthetic_project(self.state, self.assembly_dict, self.stateidx_to_fibername, self.last_active_assembly, self.num_assemblies, self.verbose, blocks_area=self.blocks_area)
 				for area_name in self.last_active_assembly.keys():  # update state for each area
 					if (self.skip_relocated and area_name==self.relocated_area) or (area_name==self.blocks_area):
 						continue # only node and head areas need to update
 					# update last active assembly in state 
-					self.state[self.area_state_dict[area_name]] = self.last_active_assembly[area_name] 
+					assert self.area_status[0] == 'last_activated', f"idx 0 in self.area_status {self.area_status} should be last_activated"
+					self.state[area_to_stateidx[area_name][self.area_status[0]]] = self.last_active_assembly[area_name] 
 					# update the number of self.blocks_area related assemblies in this area
+					assert self.area_status[1] == 'num_block_assemblies', f"idx 1 in self.area_status {self.area_status} should be num_block_assemblies"
 					count = 0 
 					for assembly_info in self.assembly_dict[area_name]:
 						connected_areas, connected_assemblies = assembly_info[0], assembly_info[1]
 						if self.blocks_area in connected_areas:
 							count += 1
-					self.state[self.area_state_dict[area_name]+1] = count
-				# readout stack	
-				readout = utils.synthetic_readout(self.assembly_dict, self.last_active_assembly, self.head, self.num_blocks, self.blocks_area)
+					self.state[area_to_stateidx[area_name][self.area_status[1]]] = count
+					# update the number of total assemblies in this area
+					assert self.area_status[2] == 'num_total_assemblies', f"idx 2 in self.area_status {self.area_status} should be num_total_assemblies"
+					self.state[area_to_stateidx[area_name][self.area_status[2]]] = len(self.assembly_dict[area_name])
+				# readout stack	and compute reward
+				readout = utils.synthetic_readout(self.assembly_dict, self.last_active_assembly, self.head, len(self.goal), self.blocks_area)
 				r, self.all_correct, self.correct_record = utils.calculate_readout_reward(readout, self.goal, self.correct_record, self.unit_reward, self.reward_decay_factor)
 				reward += r 
 			self.just_projected = True
 		elif action_name == "activate_block":
 			bidx = int(self.state[state_change_tuple[0]]) # currently activated block id
-			newbidx = int(bidx) + state_change_tuple[1] # the new block id to be activated (prev or next block)
-			if newbidx < 0 or newbidx >= self.num_blocks: # BAD, new block id is out of range
+			newbidx = int(bidx) + state_change_tuple[1] # the new block id to be activated (prev -1 or next +1)
+			if newbidx < 0 or newbidx >= self.max_blocks: # BAD, new block id is out of range
 				reward -= self.action_cost
 			else: # GOOD, valid activate
 				self.state[state_change_tuple[0]] = newbidx # update block id in state vec
 				self.last_active_assembly[self.blocks_area] = newbidx # update the last active assembly
-				if bidx == -1: # if no block activated before, and now has activated
-					self.num_assemblies += 1 # increment assembly number record
 			self.just_projected = False
 		else:
 			raise ValueError(f"\tError: action_idx {action_idx} is not recognized!")
 		self.current_time += 1 # increment step in the episode 
 		if self.current_time >= self.max_steps:
 			truncated = True
-		terminated = self.all_correct and utils.all_fiber_closed(self.state, self.fiber_state_dict)
+		terminated = self.all_correct and utils.all_fiber_closed(self.state, self.stateidx_to_fibername)
 		return self.state.copy(), reward, terminated, truncated, info
 
 
@@ -208,15 +261,18 @@ class Simulator():
 		Return:
 			state: (numpy array with float32)
 				state representation
-				[fiber inhibition status...,
-				last activated assembly idx in the area, number of blocks-connected assemblies in the area, ...]
-			dictionary: (dict)
+				[goal stack,
+				fiber inhibition status,
+				last activated assembly idx in the area, 
+				number of blocks-connected assemblies in each area,
+				number of all assemblies in each area]
+			action_to_statechange: (dict)
 				map action index to change in state vector
 				{action_idx: ([state vector indices needed to be modified], [new values in these state indices])}
-			area_state_dict: (dict)
+			area_to_stateidx: (dict)
 				map area name to indices in state vector
 				{area: [corresponding indices in state vector]}
-			fiber_state_dict: (dict)
+			stateidx_to_fibername: (dict)
 				mapping state vector index to fiber between two areas
 				{state idx: (area1, area2)}
 			assembly_dict: (dict)
@@ -232,73 +288,96 @@ class Simulator():
 				assembly_idx = -1 means that no previously activated assembly exists
 		'''
 		state_vec = [] # state vector
-		dictionary = {} # action -> state change, {action_idx: ([state vector indices needed to be modified], [new values in these state indices])}
+		action_to_statechange = {} # action -> state change, {action_idx: ([state vector indices needed to be modified], [new values in these state indices])}
 		action_idx = 0 # action index, the order should match that in self.action_dict
 		state_vector_idx = 0 # initialize the idx in state vec to be changed
-		blocks_state_idx = None # idx in state vec for the currently activated block id
-		area_state_dict = {} # dict of index of each area
-		fiber_state_dict = {} # mapping of state vec index to fiber name
+		area_to_stateidx = {} # dict of index of each area
+		stateidx_to_fibername = {} # mapping of state vec index to fiber name
 		assembly_dict = {} # {area: [assembly1 associations...]}
 		last_active_assembly = {} # {area: assembly_idx}
+		# encode goal stack
+		for b in self.goal:
+			if b==None:  # filler for empty block
+				state_vec.append(-1)
+			else:
+				state_vec.append(b)
+			state_vector_idx += 1 # increment state index
 		# encode fiber inhibition status
 		area_pairs = [] # record pairs of areas already visited
 		for area1 in self.all_areas:
 			if self.skip_relocated and area1==self.relocated_area:
 				continue
-			last_active_assembly[area1] = -1
+			last_active_assembly[area1] = -1 # initialize area with no activated assembly
 			assembly_dict[area1] = [] # will become {area: [a_id 0[source a_name[A1, A2], source a_id [a1, a2]], 1[[A3], [a3]], 2[(A4, a4)], ...]}
 			for area2 in self.all_areas:
-				if self.skip_relocated and area2==self.relocated_area:
-					continue
-				if area1 == area2: # no need for fiber to the same area itself
-					continue
-				if (("_H" in area1) and ("_N0" not in area2)) or (("_H" in area2) and ("_N0" not in area1)):
-					# for HEADS fibers, only consider N0. other fibers with HEADS are not considered
-					continue
-				if [area1, area2] in area_pairs: # skip already encoded area pairs
-					continue
-				# disinhibit fiber
-				dictionary[action_idx] = ([state_vector_idx], 1) # fiber open
-				action_idx += 1
-				# inhibit fiber
-				dictionary[action_idx] = ([state_vector_idx], 0) # fiber close
-				action_idx += 1
-				# add the current fiber state to state vector
+				if (self.skip_relocated and area2==self.relocated_area) or (area1==area2) or ([area1, area2] in area_pairs): 
+					continue # skip relocated area, self connection, already encoded area pairs
+				# if (("_H" in area1) and ("_N0" not in area2)) or (("_H" in area2) and ("_N0" not in area1)):
+				if (("_H" in area1) and (area2==self.blocks_area)) or (("_H" in area2) and (area1==self.blocks_area)):
+					continue # for HEADS fibers, only consider N0, N1, N2, do not connect to blocks
+				# add fiber status to state vector
 				state_vec.append(0) # fiber should be locked upon initialization
-				fiber_state_dict[state_vector_idx] = (area1, area2) # state element represents this fiber
-				state_vector_idx += 1 # increment state idx
+				stateidx_to_fibername[state_vector_idx] = (area1, area2) # record state idx -> fiber name
+				# action -> state change: disinhibit fiber
+				assert self.action_dict[action_idx][0]=="disinhibit_fiber" and self.action_dict[action_idx][1]==area1 and self.action_dict[action_idx][2]==area2, \
+						f"action_index {action_idx} should have (disinhibit_fiber, {area1}, {area2}), but action_dict has {self.action_dict}"
+				action_to_statechange[action_idx] = ([state_vector_idx], 1) # fiber open
+				action_idx += 1
+				# action -> state change: inhibit fiber
+				assert self.action_dict[action_idx][0]=="inhibit_fiber" and self.action_dict[action_idx][1]==area1 and self.action_dict[action_idx][2]==area2, \
+						f"action_index {action_idx} should have (inhibit_fiber, {area1}, {area2}), but action_dict has {self.action_dict}"
+				action_to_statechange[action_idx] = ([state_vector_idx], 0) # fiber close
+				action_idx += 1
+				# increment state idx
+				state_vector_idx += 1
 				# update visited area_pairs
 				area_pairs.append([area1, area2])
 				area_pairs.append([area2, area1])
-		# information for project star
-		dictionary[action_idx] = ([],[]) # no pre-specified new state values
+		# action -> state change: strong project (i.e. project star)
+		assert self.action_dict[action_idx][0]=="project_star", \
+			f"action_index {action_idx} should have (project_star, None), but action_dict has {self.action_dict}"
+		action_to_statechange[action_idx] = ([],[]) # no pre-specified new state values, things will be updated after project
 		action_idx += 1
-		# encode area state (i.e. most recent assembly idx in each area, and the number of self.blocks_area-related assemblies in each area)
-		# no need to encode area inhibition status since assuming action bundle
-		for area_name in self.all_areas: # iterate all areas
-			if self.skip_relocated and area_name==self.relocated_area:
-				continue
-			# store the starting state vec index for current area
-			area_state_dict[area_name] = state_vector_idx
-			if area_name==self.blocks_area: # the state of blocks area only occupies one index
-				blocks_state_idx = state_vector_idx
-				state_vec.append(-1) # most recent assembly idx, -1 meaning no assembly record
-				state_vector_idx += 1
-				continue
-			else:
-				state_vec.append(-1) # most recent assembly idx, -1 meaning no assembly record
-				state_vector_idx += 1 # increment current index
-				state_vec.append(0) # number of self.blocks_area-connected assemblies
-				state_vector_idx += 1
-		# info for activate next block
-		dictionary[action_idx] = (blocks_state_idx, +1) 
+		# encode area status, no need to encode area inhibition status since assuming action bundle
+		for istatus, status_name in enumerate(self.area_status): 
+			for area_name in self.all_areas: 
+				if self.skip_relocated and area_name==self.relocated_area:
+					continue
+				if istatus==0: # encode last activated assembly index in this area
+					area_to_stateidx[area_name] = {status_name: state_vector_idx} # area -> state idx
+					state_vec.append(-1) # initialize most recent assembly as none 
+				elif istatus==1: # encode number of blocks-connected assemblies in this area
+					area_to_stateidx[area_name][status_name] = state_vector_idx # area -> state idx
+					if area_name==self.blocks_area:
+						state_vec.append(self.max_blocks)
+					else:
+						state_vec.append(0)
+				elif istatus==2: # encode number of total assemblies in this area
+					area_to_stateidx[area_name][status_name] = state_vector_idx # area -> state idx
+					if area_name==self.blocks_area:
+						state_vec.append(self.max_blocks)
+					else:
+						state_vec.append(0)
+				else:
+					raise ValueError(f"there are only {len(self.area_status)} status for each area in state, but requesting {istatus}")
+				state_vector_idx += 1 # increment state vector idx
+		# action -> state change: activate next block assembly
+		assert self.action_dict[action_idx][0]=="activate_block" and self.action_dict[action_idx][1]=="next", \
+			f"action_index {action_idx} should have (activate_block, next), but action_dict has {self.action_dict}"
+		action_to_statechange[action_idx] = (area_to_stateidx[self.blocks_area][self.area_status[0]], +1) 
 		action_idx += 1
-		# info for activate previous block
-		dictionary[action_idx] = (blocks_state_idx, -1) 
-		# initialize assembly dict for blocks area
-		assembly_dict[self.blocks_area] = [[[],[]] for _ in range(self.num_blocks)] 
-		return np.array(state_vec, dtype=np.float32), dictionary, \
-				area_state_dict, fiber_state_dict, assembly_dict, last_active_assembly
+		assert self.action_dict[action_idx][0]=="activate_block" and self.action_dict[action_idx][1]=="previous", \
+			f"action_index {action_idx} should have (activate_block, previous), but action_dict has {self.action_dict}"
+		# action -> state change: activate previous block assembly
+		action_to_statechange[action_idx] = (area_to_stateidx[self.blocks_area][self.area_status[0]], -1) 
+		# initialize assembly dict for blocks area, other areas will be updated during project
+		assembly_dict[self.blocks_area] = [[[],[]] for _ in range(self.max_blocks)] 
+		return np.array(state_vec, dtype=np.float32), \
+				action_to_statechange, \
+				area_to_stateidx, \
+				stateidx_to_fibername, \
+				assembly_dict, \
+				last_active_assembly
 
 
 	def create_action_dictionary(self):
@@ -310,21 +389,17 @@ class Simulator():
 				{action_idx : (action name, *kwargs)}
 		'''
 		idx = 0 # action idx
-		dictionary = {} # action idx --> action name
+		dictionary = {} # action idx --> (action name, *kwargs)
 		area_pairs = [] # store pairs of areas already visited
 		# disinhibit and inhibit fibers
 		for area1 in self.all_areas:
 			if self.skip_relocated and area1==self.relocated_area:
 				continue
 			for area2 in self.all_areas:
-				if self.skip_relocated and area2==self.relocated_area:
-					continue
-				if area1 == area2: # no need for fiber to the same area itself
-					continue
-				if (("_H" in area1) and ("_N0" not in area2)) or (("_H" in area2) and ("_N0" not in area1)):
-					continue # for HEADS fibers, only consider N0. other fibers with HEADS are not considered
-				if [area1, area2] in area_pairs: # skip already included pairs
-					continue 
+				if (self.skip_relocated and area2==self.relocated_area) or (area1==area2) or ([area1, area2] in area_pairs):
+					continue  # skip relocated area, self connection, already encoded area pairs
+				if (("_H" in area1) and (area2==self.blocks_area)) or (("_H" in area2) and (area1==self.blocks_area)):
+					continue # HEADS will connect with N0, N1, N2, but not BLOCKS
 				dictionary[idx] = ("disinhibit_fiber", area1, area2)
 				idx += 1
 				dictionary[idx] = ("inhibit_fiber", area1, area2)
@@ -348,10 +423,10 @@ def test_simulator(max_blocks=7, expert=True, repeat=10, verbose=False):
 	sim = Simulator(max_blocks=max_blocks, verbose=verbose)
 	print(sim.action_dict)
 	start_time = time.time()
-	print(f'initial state: {sim.state}')
-	for num_blocks in range(1, max_blocks+1):
+	print(f'initial state for new simulator: {sim.state}')
+	for difficulty in range(max_blocks+1):
 		for _ in range(repeat):
-			print(f'\n\n------------ initial state of {num_blocks} blocks\n{sim.reset(num_blocks=num_blocks)[0]}')
+			print(f'\n\n------------ repeat {repeat}, state after reset\t{sim.reset(shuffle=True, difficulty_mode=difficulty)[0]}')
 			expert_demo = sim.sample_expert_demo() if expert else None
 			rtotal = 0 # total reward of episode
 			nsteps = sim.max_steps if (not expert) else len(expert_demo)
@@ -359,13 +434,15 @@ def test_simulator(max_blocks=7, expert=True, repeat=10, verbose=False):
 				action_idx = random.choice(list(range(sim.num_actions))) if (not expert) else expert_demo[t]
 				next_state, reward, terminated, truncated, info = sim.step(action_idx)
 				rtotal += reward
-				print(f't={t}, r={reward}, action={action_idx} {sim.action_dict[action_idx]}, done={terminated}, truncated={truncated}, \n\tnext state={next_state}')
+				print(f't={t},\tr={round(reward, 5)},\taction={action_idx}\t{sim.action_dict[action_idx]},\ttruncated={truncated},\tdone={terminated},\n\tjust_projected={sim.just_projected}, all_correct={sim.all_correct}, correct_record={sim.correct_record}')
+				print(f'\tnext state {next_state}\t')
 			readout = utils.synthetic_readout(sim.assembly_dict, sim.last_active_assembly, sim.head, len(sim.goal), sim.blocks_area)
-			print(f'\nend of episode, synthetic readout {readout}, total reward={rtotal}')
-			print(f'episode time lapse: {time.time()-start_time}')
+			print(f'end of episode (difficulty={difficulty}), num_blocks={sim.num_blocks}, synthetic readout {readout}, goal {sim.goal}, total reward={rtotal}, time lapse={time.time()-start_time}')
 			if expert:
-				assert readout == sim.goal
-				assert np.isclose(rtotal, sim.episode_max_reward-sim.action_cost*nsteps)
+				assert readout == sim.goal, f"readout {readout} and goal {sim.goal} should be the same"
+				assert terminated, "episode should be done"
+				assert np.isclose(rtotal, sim.episode_max_reward-sim.action_cost*nsteps), \
+						f"rtotal {rtotal} and theoretical total {sim.episode_max_reward-sim.action_cost*nsteps} should be roughly the same"
 
 
 
@@ -379,7 +456,7 @@ class EnvWrapper(dm_env.Environment):
 		https://github.com/google-deepmind/dm_env/
 		https://github.com/google-deepmind/acme/
 	'''
-	def __init__(self, environment: Simulator, random_number_generator):
+	def __init__(self, environment: Simulator, shuffle=True, difficulty_mode='uniform', cur_curriculum_level=None):
 		self._environment = environment
 		self._reset_next_step = True
 		self._last_info = None
@@ -387,12 +464,13 @@ class EnvWrapper(dm_env.Environment):
 		act_space = self._environment.num_actions-1 # maximum action index
 		self._observation_spec = _convert_to_spec(obs_space, name='observation')
 		self._action_spec = _convert_to_spec(act_space, name='action')
-		self.rng = random_number_generator
+		self.shuffle = shuffle # whether to shuffle blocks for each episode
+		self.difficulty_mode = difficulty_mode
+		self.cur_curriculum_level = cur_curriculum_level
 
 	def reset(self) -> dm_env.TimeStep:
 		self._reset_next_step = False
-		self.rng = np.random.default_rng(random.randint(0,100)) # refresh the rng
-		observation, info = self._environment.reset(random_number_generator=self.rng)
+		observation, info = self._environment.reset(shuffle=self.shuffle, difficulty_mode=self.difficulty_mode, cur_curriculum_level=self.cur_curriculum_level)
 		self._last_info = info
 		return dm_env.restart(observation)
 	
@@ -498,8 +576,8 @@ class Test(test_utils.EnvironmentTestMixin, absltest.TestCase):
 
 if __name__ == "__main__":
 
-	random.seed(1)
-	test_simulator(max_blocks=2, expert=True, repeat=1, verbose=False)
+	# random.seed(1)
+	test_simulator(max_blocks=7, expert=True, repeat=100, verbose=False)
 	
 	absltest.main()
 

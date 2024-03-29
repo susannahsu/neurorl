@@ -56,6 +56,34 @@ def init_simulator_areas(max_stacks=1,
 	return all_areas, head, relocated_area, blocks_area
 
 
+def go_activate_block(curblock, newblock, action_goto_next, action_goto_prev):
+	'''
+	Input:
+		curblock: (int)
+			currently activated block assembly id in BLOCKS area
+			should be in range [-1, max blocks in brain]
+		newblock: (int)
+			the new blockid to be activated
+		action_goto_next: (list of int)
+			a list of action indices to activate the next block assembly
+		action_goto_prev: (list of int)
+			a list of action indices to activate the previous block assembly
+	Return:
+		actions: (list of int)
+			list of action indices to activate newblock id
+	'''
+	actions = []
+	diff = curblock-newblock
+	while diff != 0:
+		if diff > 0:
+			actions += action_goto_prev
+			curblock -= 1
+		else:	
+			actions += action_goto_next
+			curblock += 1
+		diff = curblock-newblock
+	return actions
+
 def top(assembly_dict, 
 		last_active_assembly, 
 		head, 
@@ -116,16 +144,16 @@ def is_last_block(assembly_dict,
 
 
 def all_fiber_closed(state, 
-						fiber_state_dict):
+						stateidx_to_fibername):
 	'''
 	Check whether all fibers in the state vector are closed.
 	Input:
-		fiber_state_dict: (dict)
+		stateidx_to_fibername: (dict)
 			mapping state vector index to fiber between two areas
 			{state idx: (area1, area2)}
 	Return: True or False
 	'''
-	return np.all([state[i]==0 for i in fiber_state_dict.keys()])
+	return np.all([state[i]==0 for i in stateidx_to_fibername.keys()])
 
 
 def synthetic_readout(assembly_dict, 
@@ -243,7 +271,7 @@ def calculate_readout_reward(readout,
 		goal: (list of int)
 			the goal chain of blocks (from top to bottom) to be matched
 		correct_record: (numpy array with binary values)
-			binary record fro how many blocks are already correct in this episode (index 0 records 1-block-correct).
+			binary record fro how many blocks are already correct in this episode (index 0 records the correctness of block idx 0).
 			will not get reward anymore if the index was already correct in the episode.
 		unit_reward: (float)
 			the smallest amount of reward to give for a correct index.
@@ -256,8 +284,13 @@ def calculate_readout_reward(readout,
 	Return: 
 		reward: (float)
 		all_correct: (boolean)
+			whether current readout has all blocks correct
 		correct_record: (numpy array with binary values)
+			history of correct in the episode.
+			note that correct_record all values==1 does not equal all_correct=True for the current readout.
+			(e.g. got all blocks correct in the past but mess up something later)
 	'''
+	assert len(readout) == len(goal), f"readout length {len(readout)} and goal length {len(goal)} should match."
 	score = 0
 	num_correct = 0
 	prerequisite = [0 for _ in range(len(goal))] # the second block will received reward only if first block is also readout correctly
@@ -265,17 +298,18 @@ def calculate_readout_reward(readout,
 		if readout[jblock] == goal[jblock]: # block match
 			prerequisite[jblock] = 1
 			num_correct += 1
-			# only reward new correct blocks in this episode
-			if correct_record[jblock]==0 and check_prerequisite(prerequisite, jblock):
+			if correct_record[jblock]==0 and check_prerequisite(prerequisite, jblock): # reward new correct blocks in this episode
 				score += unit_reward * (reward_decay_factor**jblock) # reward scales by position
-				correct_record[jblock] = 1 # set the block record to 1, record correct history for episode
+				correct_record[:jblock+1] = 1 # set the block record and all preceeding record to 1, record history for episode
 	all_correct = (num_correct > 0) and (num_correct == len(goal))
+	if all_correct:
+		assert np.all([r==1 for r in correct_record])
 	return score, all_correct, correct_record
 
 
 def synthetic_project(state, 
 						assembly_dict, 
-						fiber_state_dict, 
+						stateidx_to_fibername, 
 						last_active_assembly,
 						num_assemblies, 
 						verbose=False, 
@@ -293,7 +327,7 @@ def synthetic_project(state,
 					assembly_idx2[[A4], [a4]], 
 					...]}
 			i.e. area has assembly_idx0, which is associated/projected from area A0 assembly a0, and area A1 assembly a1
-		fiber_state_dict: (dict)
+		stateidx_to_fibername: (dict)
 			mapping state vector index to fiber between two areas
 			{state idx: (area1, area2)}
 		last_active_assembly: (dict) 
@@ -301,7 +335,7 @@ def synthetic_project(state,
 			{area: assembly_idx}
 			assembly_idx = -1 means that no previously activated assembly exists
 		num_assemblies: (int)
-			total number of assemblies exist in the brain
+			total number of assemblies exist in the brain (including blocks lexicon)
 		verbose: (boolean=False) 
 			True or False
 		max_project_round: (int=5)
@@ -326,9 +360,9 @@ def synthetic_project(state,
 		receive_from = {} # {destination_area: [source_area1, source_area2, ...]}
 		all_visited = False # whether all opened areas are visited 
 		opened_areas = {} # open areas in this round
-		for idx in fiber_state_dict.keys(): # get opened fibers from state vector
+		for idx in stateidx_to_fibername.keys(): # get opened fibers from state vector
 			if state[idx]==1: # fiber is open
-				area1, area2 = fiber_state_dict[idx] # get areas on both ends
+				area1, area2 = stateidx_to_fibername[idx] # get areas on both ends
 				if area1 != blocks_area: # skip if this is blocks area
 					opened_areas = set([area1]).union(opened_areas)
 				if area2 != blocks_area:
@@ -342,7 +376,9 @@ def synthetic_project(state,
 		# Do project
 		assembly_dict = copy.deepcopy(prev_assembly_dict) # use assembly dict from prev round of project
 		last_active_assembly = copy.deepcopy(prev_last_active_assembly) # use last activated assembly from prev round of project
-		for destination in receive_from.keys(): # process every destination area
+		destinations = list(receive_from.keys())
+		destinations.sort(reverse=True) # head will be the last
+		for destination in destinations: # process every destination area
 			sources = list(receive_from[destination]) # all input sources
 			sources_permutation = list(itertools.permutations(sources)) # permutation of the sources, list of tuples
 			active_assembly_id_in_destination = -1 # assume no matching connection exists by default

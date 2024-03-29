@@ -14,7 +14,7 @@ python configs/parse_trainer.py \
   --wandb_entity=yichenli \
   --wandb_project=parse \
   --run_distributed=True \
-  --time=0-6:00:00 
+  --time=0-8:00:00 
 
 // test in interactive session
 python configs/parse_trainer.py \
@@ -103,18 +103,18 @@ def observation_encoder(
     The output of the neural network, ie. the encoded representation.
   """
   # embeddings for different elements in state repr
-  fiber_embed = hk.Linear(64, w_init=hk.initializers.TruncatedNormal())
-  area_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal())
+  # fiber_embed = hk.Linear(12, w_init=hk.initializers.TruncatedNormal())
+  area_embed = hk.Linear(128, w_init=hk.initializers.TruncatedNormal())
   # embeddings for prev reward and action
-  reward_embed = hk.Linear(16, w_init=hk.initializers.RandomNormal())
-  action_embed = hk.Linear(16, w_init=hk.initializers.TruncatedNormal())
+  reward_embed = hk.Linear(32, w_init=hk.initializers.RandomNormal())
+  action_embed = hk.Linear(32, w_init=hk.initializers.TruncatedNormal())
   # backbone of the encoder: mlp with relu
   mlp = hk.nets.MLP([256,256,256], activate_final=True) # default RELU activations between layers (and after final layer)
   def fn(x, dropout_rate=None):
     # concatenate embeddings and previous reward and action
     x = jnp.concatenate((
-        fiber_embed(x.observation[:num_fibers].reshape(-1)),
-        area_embed(jax.nn.one_hot(x.observation[num_fibers:], max_assemblies).reshape(-1)),
+        # fiber_embed(x.observation[:num_fibers].reshape(-1)),
+        area_embed(jax.nn.one_hot(x.observation, max_assemblies).reshape(-1)),
         reward_embed(jnp.expand_dims(x.reward, 0)), 
         action_embed(jax.nn.one_hot(x.action, num_actions))  
       ))
@@ -169,23 +169,6 @@ class QObserver(basics.ActorObserver):
     self.prefix = prefix
     self.idx = -1
     self.logging = True
-    # self.action_dict = {0: ('disinhibit_fiber', 'BLOCKS', 'G0_N0'),
-    #                     1: ('inhibit_fiber', 'BLOCKS', 'G0_N0'),
-    #                     2: ('disinhibit_fiber', 'BLOCKS', 'G0_N1'),
-    #                     3: ('inhibit_fiber', 'BLOCKS', 'G0_N1'),
-    #                     4: ('disinhibit_fiber', 'BLOCKS', 'G0_N2'),
-    #                     5: ('inhibit_fiber', 'BLOCKS', 'G0_N2'),
-    #                     6: ('disinhibit_fiber', 'G0_N0', 'G0_N1'),
-    #                     7: ('inhibit_fiber', 'G0_N0', 'G0_N1'),
-    #                     8: ('disinhibit_fiber', 'G0_N0', 'G0_N2'),
-    #                     9: ('inhibit_fiber', 'G0_N0', 'G0_N2'),
-    #                     10: ('disinhibit_fiber', 'G0_N0', 'G0_H'),
-    #                     11: ('inhibit_fiber', 'G0_N0', 'G0_H'),
-    #                     12: ('disinhibit_fiber', 'G0_N1', 'G0_N2'),
-    #                     13: ('inhibit_fiber', 'G0_N1', 'G0_N2'),
-    #                     14: ('project_star', None),
-    #                     15: ('activate_block', 'next'),
-    #                     16: ('activate_block', 'previous')}
 
   def wandb_log(self, d: dict):
     if self.logging:
@@ -299,13 +282,12 @@ def make_environment(seed: int ,
   del evaluation
   
   # create dm_env
-  sim = parse.Simulator(max_blocks=cfg['max_blocks'])
+  sim = parse.Simulator()
   cfg['num_fibers'] = sim.num_fibers
   cfg['num_areas'] = sim.num_areas
   cfg['num_actions'] = sim.num_actions
   cfg['action_dict'] = sim.action_dict
-  rng = np.random.default_rng(1)
-  env = parse.EnvWrapper(sim, rng)
+  env = parse.EnvWrapper(sim)
 
   # add acme wrappers
   wrapper_list = [
@@ -344,7 +326,7 @@ def setup_experiment_inputs(
       config=config,
       ActorCls=functools.partial(
         basics.BasicActor,
-        observers=[QObserver(period=1 if debug else 5000)],
+        observers=[QObserver(period=1 if debug else 10000)],
         ),
       LossFn=q_learning.R2D2LossFn(
           discount=config.discount,
@@ -577,8 +559,8 @@ def sweep(search: str = 'default'):
   if search == 'initial':
     space = [
         {
-            "group": tune.grid_search(['2P']),
-            "num_steps": tune.grid_search([50e6]),
+            "group": tune.grid_search(['3P']),
+            "num_steps": tune.grid_search([100e6]),
 
             "max_grad_norm": tune.grid_search([80.0]),
             "learning_rate": tune.grid_search([1e-4]),
