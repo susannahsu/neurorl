@@ -160,13 +160,14 @@ def setup_experiment_inputs(
     network_factory = functools.partial(
             q_learning.make_minigrid_networks,
             config=config)
+  # usage of contrastive_dyna.py
   elif agent == 'dyna':
     from td_agents import contrastive_dyna
     config = contrastive_dyna.Config(**config_kwargs)
     builder = basics.Builder(
         config=config,
         get_actor_core_fn=functools.partial(
-            basics.get_actor_core,
+            basics.get_actor_core, # similar to the make_actor in new codebase
             extract_q_values=lambda preds: preds.q_values),
         LossFn=contrastive_dyna.ContrastiveDynaLossFn(
             discount=config.discount,

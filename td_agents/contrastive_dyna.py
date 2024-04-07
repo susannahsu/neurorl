@@ -99,6 +99,13 @@ StateFn = Callable[[Params, PRNGKey, Observation, State],
 RootFn = Callable[[State], Tuple[PolicyLogits, ValueLogits]]
 ModelFn = Callable[[State], Tuple[RewardLogits, PolicyLogits, ValueLogits]]
 
+
+# PARAMS:
+  # architectural settings (e.g., dimensions of state transformations, Q-value dimensions)
+  # coefficients for various loss components (RL, Dyna, reward model)
+  # settings for contrastive loss (number of negatives, simulation steps, temperature)
+# OUTPUT:
+  # A configuration object used to define the setup of the RL architecture.
 @dataclasses.dataclass
 class Config(basics.Config):
 
@@ -129,7 +136,9 @@ class Config(basics.Config):
   simulation_steps: int = 5  # steps to use for model learning
   temperature: float = .1  # contrastive loss temperature
 
-
+# OUTPUT:
+  # A data class encapsulating network outputs, (current state, estimated Q-values, and computed rewards) 
+  # It aids in organizing different outputs needed for the RL process.
 @chex.dataclass(frozen=True)
 class Predictions:
   state: jax.Array
@@ -139,6 +148,13 @@ class Predictions:
 def unit(a): return (a / (1e-5+jnp.linalg.norm(a, axis=-1, keepdims=True)))
 def dot(a, b): return jnp.sum(a[:, None] * b[None], axis=-1)
 
+# PARAMS:
+  # predicted representations (y_hat)
+  # positive samples (y)
+  # negative samples (neg)
+  # temperature for the contrastive loss calculation
+# OUTPUT:
+  # contrastive loss, along with the logits for positive and negative samples
 def contrast_loss(
     y_hat: jax.Array,
     y: jax.Array,
@@ -161,7 +177,13 @@ def contrast_loss(
 
   return loss, y_logits, neg_logits
 
-
+# PARAMS:
+  # inherits parameters from q_learning.R2D2LossFn and includes configurations specific to contrastive learning and Dyna-style losses.
+# OUTPUT:
+  # the total error for the RL process
+  # integrating Q-learning loss (using real data)
+  # Dyna-style Q-learning loss (using simulated data)
+  # contrastive learning loss for state and reward models.
 @dataclasses.dataclass
 class ContrastiveDynaLossFn(q_learning.R2D2LossFn):
   """
@@ -619,6 +641,16 @@ class ContrastiveDynaLossFn(q_learning.R2D2LossFn):
 
     return batch_td_error, batch_loss, metrics  # [T-1, B], [B]
 
+
+# PARAMS:
+  # modules for observation processing
+  # state transformation
+  # environment transition modeling
+  # Q-values and rewards prediction
+# OUTPUT:
+  # initial state generation
+  # single-step application
+  # unrolling over sequences of inputs
 class DynaArch(hk.RNNCore):
   """
   DynaArch is a neural network architecture class that integrates various key components 
@@ -756,6 +788,13 @@ class DynaArch(hk.RNNCore):
     # [T, D], [D]
     return predictions, new_state
 
+# PARAMS:
+  # environment specification (env_spec)
+  # configuration object (config)
+  # an optional task encoder.
+# OUTPUT:
+  # A set of neural networks tailored for Minigrid environments, integrating core modules 
+  #into the DynaArch architecture for observation, state, transition, and prediction functions.
 def make_minigrid_networks(
         env_spec: specs.EnvironmentSpec,
         config: Config,
@@ -796,6 +835,7 @@ def make_minigrid_networks(
     vision_torso = neural_networks.BabyAIVisionTorso(
         conv_dim=0, out_dim=config.state_dim)
 
+    # for processing raw observations from the MiniGrid environment
     observation_fn = neural_networks.OarTorso(
         num_actions=num_actions,
         vision_torso=vision_torso,
@@ -805,6 +845,7 @@ def make_minigrid_networks(
     if config.state_transform_dims:
       # project hidden before outputting
       transformation = hk.nets.MLP(config.state_transform_dims)
+    # evolve the processed features into a more abstract representation of the agent's current state
     state_fn = neural_networks.LstmStateTransform(
       state_dim,
       transformation = transformation,
@@ -814,6 +855,8 @@ def make_minigrid_networks(
     ###########################
     # Setup transition function: ResNet
     ###########################
+    # predicts the next state based on the current state and the action taken by the agent
+    # enables the agent to simulate future states without actual interaction
     def transition_fn(action: int, state: State):
       action_onehot = jax.nn.one_hot(
           action, num_classes=num_actions)
@@ -840,6 +883,9 @@ def make_minigrid_networks(
     ###########################
     # Setup prediction functions for Q-values + rewards
     ###########################
+    # estimates the potential rewards and Q-values associated with state-action pairs
+    # crucial for determining the value of actions in given states and guiding the 
+    # agent's policy towards more rewarding behaviors
     def prediction_fn(state):
       q_values = duelling.DuellingMLP(
         num_actions, hidden_sizes=[config.q_dim])(state)
